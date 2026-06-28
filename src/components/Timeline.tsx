@@ -12,10 +12,11 @@ function kindColor(l: Layer): string {
   return "#3bb6a6"; // image
 }
 
-/** Unique keyframe times across all of a layer's transform tracks. */
+/** Unique keyframe times across a layer's transform tracks (+ text decompose). */
 function keyframeTimes(l: Layer): number[] {
   const t = l.transform;
   const tracks = [t.x, t.y, t.scaleX, t.scaleY, t.rotation, t.opacity];
+  if (l.kind.kind === "text") tracks.push(l.kind.decompose);
   const set = new Set<number>();
   for (const tr of tracks) for (const k of tr.keys) set.add(k.timeMs);
   return [...set];

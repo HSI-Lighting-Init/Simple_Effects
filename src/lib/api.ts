@@ -46,6 +46,14 @@ export const setLetterOverride = (layerId: number, index: number, part: LetterOv
 export const clearLetterOverrides = (layerId: number) =>
   invoke<Project>("clear_letter_overrides", { layerId });
 
+/** Key the decompose amount (0..1) at a time — animates the decompose effect. */
+export const setDecomposeKey = (
+  layerId: number,
+  tMs: number,
+  value: number,
+  seedStart: boolean
+) => invoke<Project>("set_decompose_key", { layerId, tMs, value, seedStart });
+
 export const setTextAnim = (layerId: number, anim: LetterAnimation | null) =>
   invoke<Project>("set_text_anim", { layerId, anim });
 

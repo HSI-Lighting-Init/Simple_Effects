@@ -47,6 +47,7 @@ function TextInspector({
   onAnim,
   onToggleDecompose,
   onClearParts,
+  onDecomposeKey,
 }: {
   layerId: number;
   content: string;
@@ -61,6 +62,7 @@ function TextInspector({
   onAnim: (layerId: number, anim: LetterAnimation | null) => void;
   onToggleDecompose: (layerId: number) => void;
   onClearParts: (layerId: number) => void;
+  onDecomposeKey: (layerId: number, value: number) => void;
 }) {
   const [content, setContent] = useState(content0);
   const [size, setSize] = useState(size0);
@@ -208,6 +210,18 @@ function TextInspector({
           <p className="insp-hint">
             Click a letter, then drag to move and use the handles to rotate/scale. Esc exits.
           </p>
+          <p className="insp-hint">
+            Animate it: move the playhead and key <b>Composed</b> where the letters should be
+            together, <b>Decomposed</b> where they're apart — it transitions between.
+          </p>
+          <div className="row2">
+            <button className="insp-btn" onClick={() => onDecomposeKey(layerId, 0)}>
+              ◆ Composed
+            </button>
+            <button className="insp-btn" onClick={() => onDecomposeKey(layerId, 1)}>
+              ◆ Decomposed
+            </button>
+          </div>
           <button className="insp-btn" onClick={() => onClearParts(layerId)}>
             Reset letters
           </button>
@@ -226,6 +240,7 @@ interface Props {
   onAnim: (layerId: number, anim: LetterAnimation | null) => void;
   onToggleDecompose: (layerId: number) => void;
   onClearParts: (layerId: number) => void;
+  onDecomposeKey: (layerId: number, value: number) => void;
 }
 
 export default function Inspector({
@@ -237,6 +252,7 @@ export default function Inspector({
   onAnim,
   onToggleDecompose,
   onClearParts,
+  onDecomposeKey,
 }: Props) {
   return (
     <aside className="inspector">
@@ -257,6 +273,7 @@ export default function Inspector({
           onAnim={onAnim}
           onToggleDecompose={onToggleDecompose}
           onClearParts={onClearParts}
+          onDecomposeKey={onDecomposeKey}
         />
       )}
       {layer && layer.kind.kind !== "text" && (

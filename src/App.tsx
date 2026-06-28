@@ -10,6 +10,7 @@ import {
   addTextLayer,
   clearLetterOverrides,
   editKeyframes,
+  setDecomposeKey,
   setLetterOverride,
   evaluateAt,
   getProject,
@@ -280,6 +281,19 @@ export default function App() {
     setDecomposeId((cur) => (cur === layerId ? null : layerId));
     setSelectedPart(null);
   }, []);
+
+  // Key the decompose amount (0 composed / 1 decomposed) at the playhead so the
+  // explode/gather animates over time.
+  const onDecomposeKey = useCallback(
+    async (layerId: number, value: number) => {
+      const p = await setDecomposeKey(layerId, Math.round(timeRef.current), value, true);
+      setProject(p);
+      durationRef.current = p.durationMs;
+      await applyTime(timeRef.current);
+      recordAction("decompose_key", { layerId, value });
+    },
+    [applyTime, recordAction]
+  );
 
   // Show/hide a layer from the timeline's layer list.
   const onToggleHidden = useCallback(
@@ -574,6 +588,7 @@ export default function App() {
           onAnim={onSetAnim}
           onToggleDecompose={toggleDecompose}
           onClearParts={onClearParts}
+          onDecomposeKey={onDecomposeKey}
         />
       </div>
 

@@ -157,6 +157,7 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
             font,
             anim: None,
             parts: vec![],
+            decompose: Track::constant(0.0),
         },
         transform: Transform::at(cx, cy),
         hidden: false,
@@ -403,6 +404,34 @@ fn set_letter_override(
     Ok(project.clone())
 }
 
+/// Key the decompose amount (0 composed .. 1 decomposed) at `t_ms` for a text
+/// layer. `seed_start=true` drops a 0-keyframe at the layer start so a single
+/// "decomposed" key animates the explode from the beginning.
+#[tauri::command]
+fn set_decompose_key(
+    state: State<AppState>,
+    layer_id: u32,
+    t_ms: u32,
+    value: f32,
+    seed_start: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let start = layer.start_ms;
+    match &mut layer.kind {
+        LayerKind::Text { decompose, .. } => {
+            upsert_key(decompose, t_ms, Some(value), seed_start, start)
+        }
+        _ => return Err("not a text layer".into()),
+    }
+    Ok(project.clone())
+}
+
 /// Clear all manual per-glyph overrides on a text layer.
 #[tauri::command]
 fn clear_letter_overrides(state: State<AppState>, layer_id: u32) -> Result<Project, String> {
@@ -469,6 +498,7 @@ pub fn run() {
             set_layer_hidden,
             set_letter_override,
             clear_letter_overrides,
+            set_decompose_key,
             add_text_layer,
             set_text_content,
             set_text_color,

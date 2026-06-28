@@ -116,7 +116,7 @@ pub fn evaluate(
                 !layer.hidden && t_ms >= layer.start_ms && t_ms <= layer.end_ms && opacity > 0.0;
 
             let letters = match &layer.kind {
-                LayerKind::Text { anim, size, parts, .. } => {
+                LayerKind::Text { anim, size, parts, decompose, .. } => {
                     let count = letter_counts.get(&layer.id).copied().unwrap_or(0);
                     // Base per-letter transforms from the preset (or identity).
                     let mut base = match anim {
@@ -124,13 +124,17 @@ pub fn evaluate(
                         None if parts.is_empty() => Vec::new(),
                         None => vec![LetterTransform::IDENTITY; count],
                     };
-                    // Add the manual per-glyph overrides (decompose mode) on top.
-                    for (i, lt) in base.iter_mut().enumerate() {
-                        if let Some(p) = parts.get(i) {
-                            lt.dx += p.dx;
-                            lt.dy += p.dy;
-                            lt.rotation += p.rotation;
-                            lt.scale *= p.scale;
+                    // Blend the manual decompose pose in by the animated amount:
+                    // 0 = composed, 1 = fully decomposed (the `parts` pose).
+                    let amount = sample_track(decompose, t_ms);
+                    if amount != 0.0 {
+                        for (i, lt) in base.iter_mut().enumerate() {
+                            if let Some(p) = parts.get(i) {
+                                lt.dx += p.dx * amount;
+                                lt.dy += p.dy * amount;
+                                lt.rotation += p.rotation * amount;
+                                lt.scale *= 1.0 + (p.scale - 1.0) * amount;
+                            }
                         }
                     }
                     base

@@ -4,6 +4,7 @@ import type { Font } from "./Font";
 import type { LetterAnimation } from "./LetterAnimation";
 import type { LetterOverride } from "./LetterOverride";
 import type { Rgba } from "./Rgba";
+import type { Track } from "./Track";
 
 /**
  * What a layer actually draws. Internally tagged so the TS side is a clean
@@ -13,4 +14,9 @@ export type LayerKind = { "kind": "image", src: string, width: number, height: n
 /**
  * Font size in px (the letter "height").
  */
-size: number, color: Rgba, font: Font, anim: LetterAnimation | null, parts: Array<LetterOverride>, } | { "kind": "colorpatch", color: Rgba, blend: BlendMode, width: number, height: number, };
+size: number, color: Rgba, font: Font, anim: LetterAnimation | null, parts: Array<LetterOverride>, 
+/**
+ * Keyframeable 0..1: how much of `parts` is applied. 0 = composed,
+ * 1 = fully decomposed. Keyframe it to animate the decompose effect.
+ */
+decompose: Track, } | { "kind": "colorpatch", color: Rgba, blend: BlendMode, width: number, height: number, };

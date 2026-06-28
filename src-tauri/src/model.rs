@@ -63,6 +63,10 @@ pub enum LayerKind {
         anim: Option<LetterAnimation>,
         #[serde(default)]
         parts: Vec<LetterOverride>,
+        /// Keyframeable 0..1: how much of `parts` is applied. 0 = composed,
+        /// 1 = fully decomposed. Keyframe it to animate the decompose effect.
+        #[serde(default)]
+        decompose: Track,
     },
     /// A flat coloured rectangle, optionally composited with a blend mode.
     ColorPatch {
@@ -91,7 +95,7 @@ pub struct Transform {
 
 /// A single animatable property: a list of keyframes plus the value to use when
 /// the track is empty.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct Track {
@@ -307,6 +311,7 @@ impl Project {
                     area_px: 500.0,
                 }),
                 parts: vec![],
+                decompose: Track::constant(0.0),
             },
             transform: Transform::at(cx, cy + 70.0),
             hidden: false,
