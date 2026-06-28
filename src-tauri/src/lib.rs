@@ -16,22 +16,55 @@ use tauri::{Manager, State};
 
 use eval::ResolvedLayer;
 use model::{
-    Easing, Keyframe, Layer, LayerKind, LetterAnimation, Project, Rgba, Track, Transform,
-    TransformEdit,
+    Easing, Keyframe, Layer, LayerKind, LetterAnimation, LetterOverride, Project, Rgba, Track,
+    Transform, TransformEdit,
 };
-use text::ShapedText;
+use text::{Font, ShapedText};
+
+/// Undo/redo stacks of whole-project snapshots. Each user-level mutation pushes
+/// the pre-change project onto `undo`.
+#[derive(Default)]
+struct History {
+    undo: Vec<Project>,
+    redo: Vec<Project>,
+}
 
 /// App-wide mutable state. `shaped` caches the shaped glyphs per text layer so we
 /// don't re-shape every frame; it's rebuilt whenever a layer's text changes.
+/// Lock order is always project → history → shaped to avoid deadlock.
 struct AppState {
     project: Mutex<Project>,
     shaped: Mutex<HashMap<u32, ShapedText>>,
+    history: Mutex<History>,
+}
+
+impl AppState {
+    /// Record the current project so the next mutation can be undone (clears
+    /// redo). Call BEFORE mutating, passing the current project.
+    fn snapshot(&self, current: &Project) {
+        const CAP: usize = 200;
+        let mut h = self.history.lock().unwrap();
+        h.undo.push(current.clone());
+        if h.undo.len() > CAP {
+            let excess = h.undo.len() - CAP;
+            h.undo.drain(0..excess);
+        }
+        h.redo.clear();
+    }
 }
 
 /// (Re)shape a single layer into the cache if it's a text layer.
 fn reshape_layer(shaped: &mut HashMap<u32, ShapedText>, layer: &Layer) {
-    if let LayerKind::Text { content, size, .. } = &layer.kind {
-        shaped.insert(layer.id, text::shape(content, *size));
+    if let LayerKind::Text { content, size, font, .. } = &layer.kind {
+        shaped.insert(layer.id, text::shape(content, *size, *font));
+    }
+}
+
+/// Rebuild the whole shaping cache from a project (after undo/redo/load).
+fn reshape_all(project: &Project, shaped: &mut HashMap<u32, ShapedText>) {
+    shaped.clear();
+    for l in &project.layers {
+        reshape_layer(shaped, l);
     }
 }
 
@@ -41,15 +74,47 @@ fn get_project(state: State<AppState>) -> Project {
     state.project.lock().unwrap().clone()
 }
 
-/// Replace the project wholesale (used by load / undo later).
+/// Replace the project wholesale (used by load). Undoable.
 #[tauri::command]
 fn set_project(state: State<AppState>, project: Project) {
+    let mut current = state.project.lock().unwrap();
+    state.snapshot(&current);
     let mut shaped = state.shaped.lock().unwrap();
-    shaped.clear();
-    for l in &project.layers {
-        reshape_layer(&mut shaped, l);
-    }
-    *state.project.lock().unwrap() = project;
+    reshape_all(&project, &mut shaped);
+    *current = project;
+}
+
+/// Undo the last mutation; returns the restored project (or `None` if nothing to
+/// undo). Rebuilds the shaping cache so text layers stay consistent.
+#[tauri::command]
+fn undo(state: State<AppState>) -> Option<Project> {
+    let mut project = state.project.lock().unwrap();
+    let mut h = state.history.lock().unwrap();
+    let prev = h.undo.pop()?;
+    h.redo.push(project.clone());
+    *project = prev;
+    let mut shaped = state.shaped.lock().unwrap();
+    reshape_all(&project, &mut shaped);
+    Some(project.clone())
+}
+
+/// Redo the last undone mutation; returns the restored project (or `None`).
+#[tauri::command]
+fn redo(state: State<AppState>) -> Option<Project> {
+    let mut project = state.project.lock().unwrap();
+    let mut h = state.history.lock().unwrap();
+    let next = h.redo.pop()?;
+    h.undo.push(project.clone());
+    *project = next;
+    let mut shaped = state.shaped.lock().unwrap();
+    reshape_all(&project, &mut shaped);
+    Some(project.clone())
+}
+
+/// Write text to an absolute path (used by the session recorder to save its log).
+#[tauri::command]
+fn save_text_file(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| format!("write {path}: {e}"))
 }
 
 /// Resolve every layer's transform at one playhead time. This is the authority
@@ -74,10 +139,12 @@ fn get_shaped(state: State<AppState>, layer_id: u32) -> Option<ShapedText> {
 #[tauri::command]
 fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project {
     let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
     let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
     let end_ms = project.duration_ms;
-    let shaped = text::shape(&content, size);
+    let font = Font::Vazirmatn;
+    let shaped = text::shape(&content, size, font);
     project.layers.push(Layer {
         id: next_id,
         name: "Text".into(),
@@ -87,9 +154,12 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
             content,
             size,
             color: Rgba { r: 245, g: 245, b: 250, a: 255 },
+            font,
             anim: None,
+            parts: vec![],
         },
         transform: Transform::at(cx, cy),
+        hidden: false,
     });
     state.shaped.lock().unwrap().insert(next_id, shaped);
     project.clone()
@@ -104,23 +174,69 @@ fn set_text_content(
     size: f32,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let font = match &mut layer.kind {
+        LayerKind::Text { content: c, size: s, font, .. } => {
+            *c = content.clone();
+            *s = size;
+            *font
+        }
+        _ => return Err("not a text layer".into()),
+    };
+    state
+        .shaped
+        .lock()
+        .unwrap()
+        .insert(layer_id, text::shape(&content, size, font));
+    Ok(project.clone())
+}
+
+/// Change a text layer's fill colour (no reshape needed).
+#[tauri::command]
+fn set_text_color(state: State<AppState>, layer_id: u32, color: Rgba) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
     let layer = project
         .layers
         .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
     match &mut layer.kind {
-        LayerKind::Text { content: c, size: s, .. } => {
-            *c = content.clone();
-            *s = size;
-        }
+        LayerKind::Text { color: c, .. } => *c = color,
         _ => return Err("not a text layer".into()),
     }
+    Ok(project.clone())
+}
+
+/// Change a text layer's font and re-shape it.
+#[tauri::command]
+fn set_text_font(state: State<AppState>, layer_id: u32, font: Font) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let (content, size) = {
+        let layer = project
+            .layers
+            .iter_mut()
+            .find(|l| l.id == layer_id)
+            .ok_or("layer not found")?;
+        match &mut layer.kind {
+            LayerKind::Text { content, size, font: f, .. } => {
+                *f = font;
+                (content.clone(), *size)
+            }
+            _ => return Err("not a text layer".into()),
+        }
+    };
     state
         .shaped
         .lock()
         .unwrap()
-        .insert(layer_id, text::shape(&content, size));
+        .insert(layer_id, text::shape(&content, size, font));
     Ok(project.clone())
 }
 
@@ -132,6 +248,7 @@ fn set_text_anim(
     anim: Option<LetterAnimation>,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
     let layer = project
         .layers
         .iter_mut()
@@ -148,6 +265,7 @@ fn set_text_anim(
 #[tauri::command]
 fn add_image_layer(state: State<AppState>, path: String) -> Project {
     let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
     let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
     let name = std::path::Path::new(&path)
         .file_name()
@@ -173,6 +291,7 @@ fn add_image_layer(state: State<AppState>, path: String) -> Project {
         end_ms,
         kind: LayerKind::Image { src: path, width: iw, height: ih },
         transform,
+        hidden: false,
     });
     project.clone()
 }
@@ -212,6 +331,7 @@ fn edit_keyframes(
     seed_start: bool,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
     let layer = project
         .layers
         .iter_mut()
@@ -225,6 +345,78 @@ fn edit_keyframes(
     upsert_key(&mut tf.scale_y, t_ms, edit.scale_y, seed_start, start);
     upsert_key(&mut tf.rotation, t_ms, edit.rotation, seed_start, start);
     upsert_key(&mut tf.opacity, t_ms, edit.opacity, seed_start, start);
+    Ok(project.clone())
+}
+
+/// Show/hide a layer manually (independent of its time range). Undoable.
+#[tauri::command]
+fn set_layer_hidden(
+    state: State<AppState>,
+    layer_id: u32,
+    hidden: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    layer.hidden = hidden;
+    Ok(project.clone())
+}
+
+/// Set the manual transform for one glyph of a text layer (decompose mode). The
+/// `parts` vec is grown to the shaped glyph count on demand.
+#[tauri::command]
+fn set_letter_override(
+    state: State<AppState>,
+    layer_id: u32,
+    index: usize,
+    part: LetterOverride,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let count = state
+        .shaped
+        .lock()
+        .unwrap()
+        .get(&layer_id)
+        .map(|s| s.glyphs.len())
+        .unwrap_or(0);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Text { parts, .. } => {
+            if parts.len() < count {
+                parts.resize(count, LetterOverride::default());
+            }
+            if let Some(slot) = parts.get_mut(index) {
+                *slot = part;
+            }
+        }
+        _ => return Err("not a text layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Clear all manual per-glyph overrides on a text layer.
+#[tauri::command]
+fn clear_letter_overrides(state: State<AppState>, layer_id: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Text { parts, .. } => parts.clear(),
+        _ => return Err("not a text layer".into()),
+    }
     Ok(project.clone())
 }
 
@@ -264,6 +456,7 @@ pub fn run() {
             app.manage(AppState {
                 project: Mutex::new(project),
                 shaped: Mutex::new(shaped),
+                history: Mutex::new(History::default()),
             });
             Ok(())
         })
@@ -273,11 +466,19 @@ pub fn run() {
             evaluate_at,
             add_image_layer,
             edit_keyframes,
+            set_layer_hidden,
+            set_letter_override,
+            clear_letter_overrides,
             add_text_layer,
             set_text_content,
+            set_text_color,
+            set_text_font,
             set_text_anim,
             get_shaped,
             load_image_data_url,
+            undo,
+            redo,
+            save_text_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

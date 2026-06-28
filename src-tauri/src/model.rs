@@ -8,6 +8,8 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::text::Font;
+
 /// A complete animation project. This is what gets serialised to `.ron` on save
 /// and handed to the export pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -35,6 +37,9 @@ pub struct Layer {
     pub kind: LayerKind,
     /// Animatable transform. Keyframe times are in comp time (absolute).
     pub transform: Transform,
+    /// Manually toggled off in the layer list (independent of the time range).
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// What a layer actually draws. Internally tagged so the TS side is a clean
@@ -47,12 +52,17 @@ pub enum LayerKind {
     /// image's natural pixel size; the layer is scaled (via its transform) to
     /// fit the comp when added.
     Image { src: String, width: u32, height: u32 },
-    /// A text run. `anim` opt-in drives per-letter animation from a preset.
+    /// A text run. `anim` opt-in drives per-letter animation from a preset;
+    /// `parts` holds manual per-glyph move/rotate/scale (decompose mode).
     Text {
         content: String,
+        /// Font size in px (the letter "height").
         size: f32,
         color: Rgba,
+        font: Font,
         anim: Option<LetterAnimation>,
+        #[serde(default)]
+        parts: Vec<LetterOverride>,
     },
     /// A flat coloured rectangle, optionally composited with a blend mode.
     ColorPatch {
@@ -126,6 +136,8 @@ pub struct LetterAnimation {
     pub duration_ms: u32,
     /// Delay added per letter index (ms).
     pub stagger_ms: u32,
+    /// For `ScatterIn`: how far letters explode out before gathering (px radius).
+    pub area_px: f32,
 }
 
 /// The predefined per-letter effects the user can pick from.
@@ -143,6 +155,24 @@ pub enum LetterPreset {
     ScatterIn,
     /// Appear one letter at a time (hard cut).
     Typewriter,
+}
+
+/// A manual per-glyph transform for "decompose" mode: move / rotate / scale one
+/// letter by hand. Added on top of (independent of) any preset animation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct LetterOverride {
+    pub dx: f32,
+    pub dy: f32,
+    pub rotation: f32,
+    pub scale: f32,
+}
+
+impl Default for LetterOverride {
+    fn default() -> Self {
+        Self { dx: 0.0, dy: 0.0, rotation: 0.0, scale: 1.0 }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
@@ -237,6 +267,7 @@ impl Project {
                 height: h as f32,
             },
             transform: Transform::at(cx, cy),
+            hidden: false,
         };
 
         let mut accent_tf = Transform::at(cx, cy - 40.0);
@@ -255,6 +286,7 @@ impl Project {
                 height: 560.0,
             },
             transform: accent_tf,
+            hidden: false,
         };
 
         let title = Layer {
@@ -266,14 +298,18 @@ impl Project {
                 content: "آموزش اتوکد پی‌دی‌اف رایگان".into(),
                 size: 92.0,
                 color: Rgba { r: 240, g: 240, b: 245, a: 255 },
+                font: Font::Vazirmatn,
                 anim: Some(LetterAnimation {
                     preset: LetterPreset::RiseUp,
                     start_ms: 300,
                     duration_ms: 700,
                     stagger_ms: 70,
+                    area_px: 500.0,
                 }),
+                parts: vec![],
             },
             transform: Transform::at(cx, cy + 70.0),
+            hidden: false,
         };
 
         Project {

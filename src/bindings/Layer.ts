@@ -13,4 +13,8 @@ startMs: number, endMs: number, kind: LayerKind,
 /**
  * Animatable transform. Keyframe times are in comp time (absolute).
  */
-transform: Transform, };
+transform: Transform, 
+/**
+ * Manually toggled off in the layer list (independent of the time range).
+ */
+hidden: boolean, };

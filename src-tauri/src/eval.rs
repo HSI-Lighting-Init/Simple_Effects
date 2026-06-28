@@ -44,6 +44,11 @@ pub struct LetterTransform {
     pub rotation: f32,
 }
 
+impl LetterTransform {
+    pub const IDENTITY: LetterTransform =
+        LetterTransform { dx: 0.0, dy: 0.0, scale: 1.0, opacity: 1.0, rotation: 0.0 };
+}
+
 /// Map an eased parameter `u` in [0, 1].
 fn ease(easing: Easing, u: f32) -> f32 {
     let u = u.clamp(0.0, 1.0);
@@ -107,12 +112,28 @@ pub fn evaluate(
         .map(|layer| {
             let tf = &layer.transform;
             let opacity = sample_track(&tf.opacity, t_ms).clamp(0.0, 1.0);
-            let visible = t_ms >= layer.start_ms && t_ms <= layer.end_ms && opacity > 0.0;
+            let visible =
+                !layer.hidden && t_ms >= layer.start_ms && t_ms <= layer.end_ms && opacity > 0.0;
 
             let letters = match &layer.kind {
-                LayerKind::Text { anim: Some(anim), size, .. } => {
+                LayerKind::Text { anim, size, parts, .. } => {
                     let count = letter_counts.get(&layer.id).copied().unwrap_or(0);
-                    eval_letters(anim, count, *size, t_ms)
+                    // Base per-letter transforms from the preset (or identity).
+                    let mut base = match anim {
+                        Some(a) => eval_letters(a, count, *size, t_ms),
+                        None if parts.is_empty() => Vec::new(),
+                        None => vec![LetterTransform::IDENTITY; count],
+                    };
+                    // Add the manual per-glyph overrides (decompose mode) on top.
+                    for (i, lt) in base.iter_mut().enumerate() {
+                        if let Some(p) = parts.get(i) {
+                            lt.dx += p.dx;
+                            lt.dy += p.dy;
+                            lt.rotation += p.rotation;
+                            lt.scale *= p.scale;
+                        }
+                    }
+                    base
                 }
                 _ => Vec::new(),
             };
@@ -160,9 +181,11 @@ fn letter_at(anim: &LetterAnimation, i: usize, size: f32, t_ms: u32) -> LetterTr
             lt.opacity = e;
         }
         LetterPreset::ScatterIn => {
+            // Letters start exploded within a `area_px`-radius region and gather
+            // to their resting place.
             let (rx, ry, rr) = scatter(i);
-            lt.dx = (1.0 - e) * rx * size;
-            lt.dy = (1.0 - e) * ry * size;
+            lt.dx = (1.0 - e) * rx * anim.area_px;
+            lt.dy = (1.0 - e) * ry * anim.area_px;
             lt.rotation = (1.0 - e) * rr;
             lt.opacity = (local * 1.5).clamp(0.0, 1.0);
         }
@@ -179,13 +202,14 @@ fn ease_out_back(x: f32) -> f32 {
 }
 
 /// Deterministic per-letter scatter offsets (no RNG, so it's reproducible and
-/// resume-safe): returns (dx, dy) in multiples of font size and rotation degrees.
+/// resume-safe): returns (dx, dy) normalized to roughly -1..1 and rotation
+/// degrees. The caller scales dx/dy by the desired area radius.
 fn scatter(i: usize) -> (f32, f32, f32) {
     let h = (i as u32).wrapping_mul(2654435761).wrapping_add(0x9e3779b9);
     let a = (h & 0xff) as f32 / 255.0;
     let b = ((h >> 8) & 0xff) as f32 / 255.0;
     let c = ((h >> 16) & 0xff) as f32 / 255.0;
-    ((a - 0.5) * 4.0, (b - 0.5) * 4.0, (c - 0.5) * 90.0)
+    ((a - 0.5) * 2.0, (b - 0.5) * 2.0, (c - 0.5) * 180.0)
 }
 
 #[cfg(test)]

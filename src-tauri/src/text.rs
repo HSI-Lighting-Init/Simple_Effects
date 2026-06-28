@@ -13,8 +13,31 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// Embedded Persian/Arabic-capable font (Vazirmatn, SIL OFL).
-const FONT: &[u8] = include_bytes!("../fonts/Vazirmatn-Regular.ttf");
+/// The embedded fonts the user can pick from (all SIL OFL, Persian/Arabic with
+/// Latin coverage). Rendering as outlines means any of them explode into shapes.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum Font {
+    Vazirmatn,
+    Sahel,
+    Shabnam,
+    Gandom,
+}
+
+const VAZIRMATN: &[u8] = include_bytes!("../fonts/Vazirmatn-Regular.ttf");
+const SAHEL: &[u8] = include_bytes!("../fonts/Sahel.ttf");
+const SHABNAM: &[u8] = include_bytes!("../fonts/Shabnam.ttf");
+const GANDOM: &[u8] = include_bytes!("../fonts/Gandom.ttf");
+
+fn font_bytes(font: Font) -> &'static [u8] {
+    match font {
+        Font::Vazirmatn => VAZIRMATN,
+        Font::Sahel => SAHEL,
+        Font::Shabnam => SHABNAM,
+        Font::Gandom => GANDOM,
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -75,10 +98,11 @@ impl ttf_parser::OutlineBuilder for PathBuilder {
     }
 }
 
-/// Shape `content` at `size` px into positioned glyph outlines.
-pub fn shape(content: &str, size: f32) -> ShapedText {
-    let rb_face = rustybuzz::Face::from_slice(FONT, 0).expect("embedded font is valid");
-    let ttf = ttf_parser::Face::parse(FONT, 0).expect("embedded font is valid");
+/// Shape `content` at `size` px with `font` into positioned glyph outlines.
+pub fn shape(content: &str, size: f32, font: Font) -> ShapedText {
+    let bytes = font_bytes(font);
+    let rb_face = rustybuzz::Face::from_slice(bytes, 0).expect("embedded font is valid");
+    let ttf = ttf_parser::Face::parse(bytes, 0).expect("embedded font is valid");
     let upem = ttf.units_per_em() as f32;
     let s = size / upem;
 
@@ -132,18 +156,19 @@ mod tests {
 
     #[test]
     fn shapes_persian_into_joined_glyphs() {
-        // The example string the client cares about.
-        let st = shape("آموزش اتوکد پی‌دی‌اف رایگان", 88.0);
-        assert!(st.width > 0.0, "run should have width");
-        assert!(st.glyphs.len() > 5, "should produce many glyphs");
-        // At least the non-space glyphs must have real outlines.
-        let with_outline = st.glyphs.iter().filter(|g| !g.d.is_empty()).count();
-        assert!(with_outline > 5, "most glyphs should have outlines");
+        // The example string the client cares about — across every font.
+        for font in [Font::Vazirmatn, Font::Sahel, Font::Shabnam, Font::Gandom] {
+            let st = shape("آموزش اتوکد پی‌دی‌اف رایگان", 88.0, font);
+            assert!(st.width > 0.0, "run should have width for {font:?}");
+            assert!(st.glyphs.len() > 5, "should produce many glyphs for {font:?}");
+            let with_outline = st.glyphs.iter().filter(|g| !g.d.is_empty()).count();
+            assert!(with_outline > 5, "most glyphs should have outlines for {font:?}");
+        }
     }
 
     #[test]
     fn latin_advances_left_to_right() {
-        let st = shape("AV", 100.0);
+        let st = shape("AV", 100.0, Font::Vazirmatn);
         assert_eq!(st.glyphs.len(), 2);
         assert!(st.glyphs[1].x > st.glyphs[0].x);
     }

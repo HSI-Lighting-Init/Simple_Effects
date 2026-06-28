@@ -19,4 +19,8 @@ durationMs: number,
 /**
  * Delay added per letter index (ms).
  */
-staggerMs: number, };
+staggerMs: number, 
+/**
+ * For `ScatterIn`: how far letters explode out before gathering (px radius).
+ */
+areaPx: number, };

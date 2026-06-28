@@ -24,6 +24,7 @@ import type { Rgba } from "../bindings/Rgba";
 import type { BlendMode } from "../bindings/BlendMode";
 import type { TransformEdit } from "../bindings/TransformEdit";
 import type { ShapedText } from "../bindings/ShapedText";
+import type { LetterOverride } from "../bindings/LetterOverride";
 
 function rgbaCss(c: Rgba): string {
   return `rgba(${c.r}, ${c.g}, ${c.b}, ${c.a / 255})`;
@@ -92,9 +93,10 @@ function ImageNode({
   );
 }
 
-// Renders text as shaped vector glyphs (so Arabic/Persian joins correctly) and
-// applies per-letter transforms from the evaluator. The whole run is one Group
-// — that's the selectable/draggable node; the per-glyph Paths animate within it.
+// Renders text as shaped vector glyphs (so Arabic/Persian joins correctly).
+// Normal mode: the whole run is one Group (the selectable/draggable node) and the
+// glyphs animate from the evaluator. Decompose mode: each glyph becomes its own
+// draggable/rotatable/scalable node, edited against its manual `parts` override.
 function TextGlyphs({
   layerId,
   content,
@@ -103,6 +105,12 @@ function TextGlyphs({
   r,
   interaction,
   registerRef,
+  parts,
+  decompose,
+  selectedPart,
+  handleScale,
+  onSelectPart,
+  onCommitPart,
 }: {
   layerId: number;
   content: string;
@@ -111,8 +119,17 @@ function TextGlyphs({
   r: ResolvedLayer;
   interaction: Interaction;
   registerRef: NodeRef;
+  parts: LetterOverride[];
+  decompose: boolean;
+  selectedPart: number | null;
+  handleScale: number;
+  onSelectPart: (i: number | null) => void;
+  onCommitPart: (layerId: number, index: number, part: LetterOverride) => void;
 }) {
   const [shaped, setShaped] = useState<ShapedText | null>(null);
+  const glyphRefs = useRef<Record<number, Konva.Path>>({});
+  const glyphTrRef = useRef<Konva.Transformer>(null);
+
   useEffect(() => {
     let alive = true;
     getShaped(layerId).then((s) => {
@@ -123,10 +140,36 @@ function TextGlyphs({
     };
   }, [layerId, content, size]);
 
+  // Attach the per-glyph Transformer to the selected glyph (decompose only).
+  useEffect(() => {
+    const tr = glyphTrRef.current;
+    if (!tr) return;
+    const node =
+      decompose && selectedPart != null ? glyphRefs.current[selectedPart] ?? null : null;
+    tr.nodes(node ? [node] : []);
+    tr.getLayer()?.batchDraw();
+  }, [decompose, selectedPart, shaped, parts, r, fill]);
+
   if (!shaped || shaped.glyphs.length === 0) return null;
   // Centre the run on the layer origin; baseline so it's vertically centred too.
   const left = -shaped.width / 2;
   const baseline = (shaped.ascender - shaped.descender) / 2;
+
+  // In decompose mode the glyph sits at base + its manual override, so its node
+  // transform IS the override — commit is a direct read.
+  const commitGlyph = (i: number) => {
+    const node = glyphRefs.current[i];
+    if (!node) return;
+    const g = shaped.glyphs[i];
+    onCommitPart(layerId, i, {
+      dx: node.x() - (left + g.x + g.cx),
+      dy: node.y() - (baseline + g.cy),
+      rotation: node.rotation(),
+      scale: node.scaleX(),
+    });
+  };
+
+  const gh = handleScale / Math.max(0.05, r.scaleX);
 
   return (
     <Group
@@ -137,28 +180,86 @@ function TextGlyphs({
       scaleY={r.scaleY}
       rotation={r.rotation}
       opacity={r.opacity}
-      {...interaction}
+      {...(decompose ? { listening: true } : interaction)}
     >
+      {/* Invisible solid hit area so a click anywhere on the text selects/drags
+          it — not just the thin glyph strokes. (Off in decompose mode so it
+          doesn't swallow per-glyph clicks.) */}
+      {!decompose && (
+        <Rect
+          x={left - 4}
+          y={baseline - shaped.ascender - 4}
+          width={shaped.width + 8}
+          height={shaped.ascender + shaped.descender + 8}
+          fill="#000"
+          opacity={0}
+          perfectDrawEnabled={false}
+        />
+      )}
       {shaped.glyphs.map((g, i) => {
         if (!g.d) return null; // whitespace: advance only, no outline
-        const lt = r.letters[i] ?? { dx: 0, dy: 0, scale: 1, opacity: 1, rotation: 0 };
+        const p = parts[i];
+        const lt = r.letters[i];
+        const off = decompose
+          ? { dx: p?.dx ?? 0, dy: p?.dy ?? 0, rotation: p?.rotation ?? 0, scale: p?.scale ?? 1, opacity: 1 }
+          : {
+              dx: lt?.dx ?? 0,
+              dy: lt?.dy ?? 0,
+              rotation: lt?.rotation ?? 0,
+              scale: lt?.scale ?? 1,
+              opacity: lt?.opacity ?? 1,
+            };
         return (
           <Path
             key={i}
+            ref={
+              decompose
+                ? (n: Konva.Path | null) => {
+                    if (n) glyphRefs.current[i] = n;
+                    else delete glyphRefs.current[i];
+                  }
+                : undefined
+            }
             data={g.d}
             fill={fill}
-            x={left + g.x + g.cx + lt.dx}
-            y={baseline + g.cy + lt.dy}
+            x={left + g.x + g.cx + off.dx}
+            y={baseline + g.cy + off.dy}
             offsetX={g.cx}
             offsetY={g.cy}
-            scaleX={lt.scale}
-            scaleY={lt.scale}
-            rotation={lt.rotation}
-            opacity={lt.opacity}
+            scaleX={off.scale}
+            scaleY={off.scale}
+            rotation={off.rotation}
+            opacity={off.opacity}
             perfectDrawEnabled={false}
+            draggable={decompose}
+            onClick={
+              decompose
+                ? (e: Konva.KonvaEventObject<MouseEvent>) => {
+                    e.cancelBubble = true;
+                    onSelectPart(i);
+                  }
+                : undefined
+            }
+            onDragEnd={decompose ? () => commitGlyph(i) : undefined}
+            onTransformEnd={decompose ? () => commitGlyph(i) : undefined}
+            listening={decompose ? true : false}
           />
         );
       })}
+
+      {decompose && (
+        <Transformer
+          ref={glyphTrRef}
+          anchorSize={8 * gh}
+          anchorStrokeWidth={1.5 * gh}
+          borderStrokeWidth={1.5 * gh}
+          rotateAnchorOffset={22 * gh}
+          padding={2 * gh}
+          ignoreStroke
+          flipEnabled={false}
+          rotationSnaps={[0, 45, 90, 135, 180, 225, 270, 315]}
+        />
+      )}
     </Group>
   );
 }
@@ -169,8 +270,12 @@ interface Props {
   images: Record<string, string>;
   selectedId: number | null;
   playing: boolean;
+  decomposeId: number | null;
+  selectedPart: number | null;
   onSelect: (id: number | null) => void;
   onCommit: (id: number, edit: TransformEdit) => void;
+  onSelectPart: (i: number | null) => void;
+  onCommitPart: (layerId: number, index: number, part: LetterOverride) => void;
 }
 
 export default function Preview({
@@ -179,8 +284,12 @@ export default function Preview({
   images,
   selectedId,
   playing,
+  decomposeId,
+  selectedPart,
   onSelect,
   onCommit,
+  onSelectPart,
+  onCommitPart,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
@@ -241,10 +350,13 @@ export default function Preview({
   useEffect(() => {
     const tr = trRef.current;
     if (!tr) return;
-    const node = selectedId != null ? nodeRefs.current[selectedId] ?? null : null;
+    // While decomposing a layer, the per-glyph Transformer takes over — hide the
+    // layer-level one.
+    const node =
+      decomposeId == null && selectedId != null ? nodeRefs.current[selectedId] ?? null : null;
     tr.nodes(node ? [node] : []);
     tr.getLayer()?.batchDraw();
-  }, [selectedId, resolved, images, playing, scale, project]);
+  }, [selectedId, decomposeId, resolved, images, playing, scale, project]);
 
   // Counter-scale the handles so they stay a constant on-screen size despite the
   // fit-to-comp layer scale.
@@ -258,7 +370,10 @@ export default function Preview({
           height={stageH}
           className="preview-stage"
           onMouseDown={(e) => {
-            if (e.target === e.target.getStage()) onSelect(null);
+            if (e.target === e.target.getStage()) {
+              if (decomposeId != null) onSelectPart(null);
+              else onSelect(null);
+            }
           }}
         >
           <KLayer scaleX={scale} scaleY={scale}>
@@ -298,6 +413,12 @@ export default function Preview({
                     r={r}
                     interaction={interaction(layer.id)}
                     registerRef={register(layer.id)}
+                    parts={k.parts}
+                    decompose={decomposeId === layer.id}
+                    selectedPart={decomposeId === layer.id ? selectedPart : null}
+                    handleScale={h}
+                    onSelectPart={onSelectPart}
+                    onCommitPart={onCommitPart}
                   />
                 );
               }

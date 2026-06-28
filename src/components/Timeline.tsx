@@ -4,7 +4,6 @@
 import { useRef } from "react";
 import type { Project } from "../bindings/Project";
 import type { Layer } from "../bindings/Layer";
-import type { ResolvedLayer } from "../bindings/ResolvedLayer";
 
 function kindColor(l: Layer): string {
   const k = l.kind;
@@ -25,18 +24,18 @@ function keyframeTimes(l: Layer): number[] {
 interface Props {
   project: Project;
   time: number;
-  resolved: Record<number, ResolvedLayer>;
   selectedId: number | null;
   onSelect: (id: number | null) => void;
+  onToggleHidden: (id: number) => void;
   onSeek: (t: number) => void;
 }
 
 export default function Timeline({
   project,
   time,
-  resolved,
   selectedId,
   onSelect,
+  onToggleHidden,
   onSeek,
 }: Props) {
   const tracksRef = useRef<HTMLDivElement>(null);
@@ -86,10 +85,21 @@ export default function Timeline({
           {layers.map((l) => (
             <div
               key={l.id}
-              className={"tl-label" + (l.id === selectedId ? " selected" : "")}
+              className={
+                "tl-label" +
+                (l.id === selectedId ? " selected" : "") +
+                (l.hidden ? " hidden" : "")
+              }
               onClick={() => onSelect(l.id)}
             >
-              <span className={"dot " + (resolved[l.id]?.visible ? "on" : "")} />
+              <button
+                className={"dot" + (l.hidden ? "" : " on")}
+                title={l.hidden ? "Show layer" : "Hide layer"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleHidden(l.id);
+                }}
+              />
               <span className="tl-label-name">{l.name}</span>
               <span className="tl-label-kind">{l.kind.kind}</span>
             </div>
@@ -102,7 +112,7 @@ export default function Timeline({
             const width = ((l.endMs - l.startMs) / dur) * 100;
             const span = Math.max(1, l.endMs - l.startMs);
             return (
-              <div key={l.id} className="tl-track">
+              <div key={l.id} className={"tl-track" + (l.hidden ? " hidden" : "")}>
                 <div
                   className="tl-block"
                   style={{ left: `${left}%`, width: `${width}%`, background: kindColor(l) }}
