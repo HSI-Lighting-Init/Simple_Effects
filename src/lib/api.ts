@@ -9,6 +9,8 @@ import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { Font } from "../bindings/Font";
 import type { Rgba } from "../bindings/Rgba";
 import type { LetterOverride } from "../bindings/LetterOverride";
+import type { SurfaceShape } from "../bindings/SurfaceShape";
+import type { Decal } from "../bindings/Decal";
 
 export const getProject = () => invoke<Project>("get_project");
 
@@ -56,6 +58,58 @@ export const setDecomposeKey = (
 
 export const setTextAnim = (layerId: number, anim: LetterAnimation | null) =>
   invoke<Project>("set_text_anim", { layerId, anim });
+
+/** Add an invisible 3D box/cylinder object that images can be pinned to. */
+export const addShapeLayer = (shape: SurfaceShape) =>
+  invoke<Project>("add_shape_layer", { shape });
+
+/** Set a shape's dimensions + camera (rotations are keyframed separately). */
+export const setShapeParams = (
+  layerId: number,
+  width: number,
+  height: number,
+  depth: number,
+  perspective: number,
+  focalLength: number,
+  coverage: number,
+  radius: number
+) =>
+  invoke<Project>("set_shape_params", {
+    layerId,
+    width,
+    height,
+    depth,
+    perspective,
+    focalLength,
+    coverage,
+    radius,
+  });
+
+/** Key one 3D-rotation axis ("x"|"y"|"z") of a shape — animates the spin. */
+export const setShapeRotationKey = (
+  layerId: number,
+  axis: "x" | "y" | "z",
+  tMs: number,
+  value: number,
+  seedStart: boolean
+) => invoke<Project>("set_shape_rotation_key", { layerId, axis, tMs, value, seedStart });
+
+/** Pin an image to a shape (decal), or detach with `shapeId = null`. */
+export const attachImage = (imageId: number, shapeId: number | null, face: number) =>
+  invoke<Project>("attach_image", { imageId, shapeId, face });
+
+/** Update a pinned image's placement (face + u/v/scale/rotation). */
+export const setDecal = (imageId: number, decal: Decal) =>
+  invoke<Project>("set_decal", { imageId, decal });
+
+/**
+ * Drop an image onto a shape's surface at comp point (x, y). Returns the new
+ * project if the point was over a shape (image pinned there), or `null` if not
+ * (the caller treats it as an ordinary move). Works for a flat image being
+ * dropped and for a decal's handle being dragged across the surface.
+ */
+export const dropImageOnShape = (imageId: number, x: number, y: number, tMs: number) =>
+  invoke<Project | null>("drop_image_on_shape", { imageId, x, y, tMs });
 
 /** Shaped glyph outlines for a text layer (Arabic intact), for the preview. */
 export const getShaped = (layerId: number) =>

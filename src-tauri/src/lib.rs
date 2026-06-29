@@ -6,6 +6,7 @@
 
 mod eval;
 mod model;
+mod surface;
 mod text;
 
 use std::collections::HashMap;
@@ -16,8 +17,8 @@ use tauri::{Manager, State};
 
 use eval::ResolvedLayer;
 use model::{
-    Easing, Keyframe, Layer, LayerKind, LetterAnimation, LetterOverride, Project, Rgba, Track,
-    Transform, TransformEdit,
+    Decal, Easing, Keyframe, Layer, LayerKind, LetterAnimation, LetterOverride, Project, Rgba,
+    SurfaceShape, Track, Transform, TransformEdit,
 };
 use text::{Font, ShapedText};
 
@@ -290,7 +291,7 @@ fn add_image_layer(state: State<AppState>, path: String) -> Project {
         name,
         start_ms: 0,
         end_ms,
-        kind: LayerKind::Image { src: path, width: iw, height: ih },
+        kind: LayerKind::Image { src: path, width: iw, height: ih, attach: None },
         transform,
         hidden: false,
     });
@@ -432,6 +433,238 @@ fn set_decompose_key(
     Ok(project.clone())
 }
 
+/// Add an invisible 3D box/cylinder object centred in the comp. Images can then
+/// be pinned to it (`attach_image`) to render as decals on its surface.
+#[tauri::command]
+fn add_shape_layer(state: State<AppState>, shape: SurfaceShape) -> Project {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
+    let end_ms = project.duration_ms;
+    // A comfortable default size relative to the comp.
+    let w = project.width as f32 * 0.4;
+    let h = project.height as f32 * 0.4;
+    let name = match shape {
+        SurfaceShape::Box => "Box",
+        SurfaceShape::Cylinder => "Cylinder",
+    };
+    project.layers.push(Layer {
+        id: next_id,
+        name: name.into(),
+        start_ms: 0,
+        end_ms,
+        kind: LayerKind::Shape3D {
+            shape,
+            width: w,
+            height: h,
+            depth: w.min(h) * 0.7,
+            rotation_x: Track::constant(0.0),
+            rotation_y: Track::constant(0.0),
+            rotation_z: Track::constant(0.0),
+            perspective: 0.35,
+            focal_length: 1200.0,
+            coverage: 360.0,
+            radius: w.min(h) * 0.5,
+        },
+        transform: Transform::at(cx, cy),
+        hidden: false,
+    });
+    project.clone()
+}
+
+/// Set a `Shape3D` layer's static parameters (dimensions + camera). Rotations are
+/// keyframed separately (`set_shape_rotation_key`). Undoable.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn set_shape_params(
+    state: State<AppState>,
+    layer_id: u32,
+    width: f32,
+    height: f32,
+    depth: f32,
+    perspective: f32,
+    focal_length: f32,
+    coverage: f32,
+    radius: f32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Shape3D {
+            width: w,
+            height: h,
+            depth: d,
+            perspective: p,
+            focal_length: f,
+            coverage: c,
+            radius: r,
+            ..
+        } => {
+            *w = width.max(1.0);
+            *h = height.max(1.0);
+            *d = depth.max(0.0);
+            *p = perspective.clamp(0.0, 1.0);
+            *f = focal_length.max(50.0);
+            *c = coverage.clamp(1.0, 360.0);
+            *r = radius.max(1.0);
+        }
+        _ => return Err("not a shape layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Key one 3D-rotation axis (`"x"`/`"y"`/`"z"`) of a `Shape3D` at `t_ms` — this
+/// animates the spin. `seed_start=true` drops a keyframe holding the default at
+/// the layer start, so a single key animates from the beginning.
+#[tauri::command]
+fn set_shape_rotation_key(
+    state: State<AppState>,
+    layer_id: u32,
+    axis: String,
+    t_ms: u32,
+    value: f32,
+    seed_start: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let start = layer.start_ms;
+    match &mut layer.kind {
+        LayerKind::Shape3D { rotation_x, rotation_y, rotation_z, .. } => {
+            let track = match axis.as_str() {
+                "x" => rotation_x,
+                "y" => rotation_y,
+                "z" => rotation_z,
+                _ => return Err("axis must be x, y or z".into()),
+            };
+            upsert_key(track, t_ms, Some(value), seed_start, start);
+        }
+        _ => return Err("not a shape layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Pin an image to a `Shape3D` (so it renders as a decal), or with
+/// `shape_id = None` detach it back to a flat image. Defaults the placement to
+/// the centre of the chosen face. Undoable.
+#[tauri::command]
+fn attach_image(
+    state: State<AppState>,
+    image_id: u32,
+    shape_id: Option<u32>,
+    face: u32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    // Cylinders wrap full-height by default; box faces use a half-face decal.
+    let scale = match shape_id {
+        Some(sid) if is_cylinder(&project, sid) => 1.0,
+        _ => 0.5,
+    };
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == image_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Image { attach, .. } => {
+            *attach = shape_id.map(|sid| Decal { shape_id: sid, face, scale, ..Decal::default() });
+        }
+        _ => return Err("not an image layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Whether a layer id refers to a cylinder shape.
+fn is_cylinder(project: &Project, shape_id: u32) -> bool {
+    project.layers.iter().any(|l| {
+        l.id == shape_id
+            && matches!(&l.kind, LayerKind::Shape3D { shape: SurfaceShape::Cylinder, .. })
+    })
+}
+
+/// Try to drop an image onto a shape's surface at comp point `(x, y)`. If the
+/// point is over a (front-facing) shape surface, the image is pinned there
+/// (face + u/v computed from the geometry), preserving its current size/rotation;
+/// returns the new project. `None` = the point wasn't over any shape (the caller
+/// then treats the drag as an ordinary move). Used for both dropping a flat image
+/// and dragging a decal's handle across the surface. Undoable.
+#[tauri::command]
+fn drop_image_on_shape(
+    state: State<AppState>,
+    image_id: u32,
+    x: f32,
+    y: f32,
+    t_ms: u32,
+) -> Option<Project> {
+    let mut project = state.project.lock().unwrap();
+    // Top-most shape first (later layers draw on top).
+    let mut hit: Option<(u32, u32, f32, f32)> = None;
+    for layer in project.layers.iter().rev() {
+        if let Some(st) = eval::shape_state_for(layer, t_ms) {
+            if let Some((face, u, v)) = surface::pick_surface(&st, x, y) {
+                hit = Some((layer.id, face, u, v));
+                break;
+            }
+        }
+    }
+    let (shape_id, face, u, v) = hit?;
+    let is_image = project
+        .layers
+        .iter()
+        .any(|l| l.id == image_id && matches!(l.kind, LayerKind::Image { .. }));
+    if !is_image {
+        return None;
+    }
+    // First-time pin: cylinders wrap full-height (1.0), boxes use a half-face
+    // decal (0.5). Re-dropping an existing decal keeps its current size/rotation.
+    let default_scale = if is_cylinder(&project, shape_id) { 1.0 } else { 0.5 };
+    state.snapshot(&project);
+    if let Some(img) = project.layers.iter_mut().find(|l| l.id == image_id) {
+        if let LayerKind::Image { attach, .. } = &mut img.kind {
+            let (scale, rotation) = attach
+                .as_ref()
+                .map(|a| (a.scale, a.rotation))
+                .unwrap_or((default_scale, 0.0));
+            *attach = Some(Decal { shape_id, face, u, v, scale, rotation });
+        }
+    }
+    Some(project.clone())
+}
+
+/// Update a pinned image's placement on its shape (face + u/v/scale/rotation).
+/// Undoable.
+#[tauri::command]
+fn set_decal(state: State<AppState>, image_id: u32, decal: Decal) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == image_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Image { attach, .. } => {
+            if attach.is_none() {
+                return Err("image is not pinned to a shape".into());
+            }
+            *attach = Some(decal);
+        }
+        _ => return Err("not an image layer".into()),
+    }
+    Ok(project.clone())
+}
+
 /// Clear all manual per-glyph overrides on a text layer.
 #[tauri::command]
 fn clear_letter_overrides(state: State<AppState>, layer_id: u32) -> Result<Project, String> {
@@ -499,6 +732,12 @@ pub fn run() {
             set_letter_override,
             clear_letter_overrides,
             set_decompose_key,
+            add_shape_layer,
+            set_shape_params,
+            set_shape_rotation_key,
+            attach_image,
+            set_decal,
+            drop_image_on_shape,
             add_text_layer,
             set_text_content,
             set_text_color,

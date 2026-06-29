@@ -9,14 +9,18 @@ function kindColor(l: Layer): string {
   const k = l.kind;
   if (k.kind === "colorpatch") return `rgb(${k.color.r}, ${k.color.g}, ${k.color.b})`;
   if (k.kind === "text") return "#6c8cff";
+  if (k.kind === "shape3d") return "#b06cff";
   return "#3bb6a6"; // image
 }
 
-/** Unique keyframe times across a layer's transform tracks (+ text decompose). */
+/** Unique keyframe times across a layer's transform tracks (+ text decompose,
+ *  + 3D-shape rotations). */
 function keyframeTimes(l: Layer): number[] {
   const t = l.transform;
   const tracks = [t.x, t.y, t.scaleX, t.scaleY, t.rotation, t.opacity];
   if (l.kind.kind === "text") tracks.push(l.kind.decompose);
+  if (l.kind.kind === "shape3d")
+    tracks.push(l.kind.rotation_x, l.kind.rotation_y, l.kind.rotation_z);
   const set = new Set<number>();
   for (const tr of tracks) for (const k of tr.keys) set.add(k.timeMs);
   return [...set];

@@ -13,11 +13,14 @@ import {
   Group,
   Path,
   Image as KImage,
+  Shape,
+  Circle,
   Transformer,
 } from "react-konva";
 import Konva from "konva";
 
 import { getShaped } from "../lib/api";
+import { drawSurface } from "../lib/surface3d";
 import type { Project } from "../bindings/Project";
 import type { ResolvedLayer } from "../bindings/ResolvedLayer";
 import type { Rgba } from "../bindings/Rgba";
@@ -54,6 +57,24 @@ type Interaction = {
 
 type NodeRef = (n: Konva.Node | null) => void;
 
+/** Load a data: URL / path into an HTMLImageElement (null until ready). */
+function useImage(src?: string): HTMLImageElement | null {
+  const [img, setImg] = useState<HTMLImageElement | null>(null);
+  useEffect(() => {
+    if (!src) {
+      setImg(null);
+      return;
+    }
+    const im = new window.Image();
+    im.onload = () => setImg(im);
+    im.src = src;
+    return () => {
+      im.onload = null;
+    };
+  }, [src]);
+  return img;
+}
+
 function ImageNode({
   src,
   r,
@@ -65,16 +86,7 @@ function ImageNode({
   interaction: Interaction;
   registerRef: NodeRef;
 }) {
-  const [img, setImg] = useState<HTMLImageElement | null>(null);
-  useEffect(() => {
-    if (!src) return;
-    const im = new window.Image();
-    im.onload = () => setImg(im);
-    im.src = src;
-    return () => {
-      im.onload = null;
-    };
-  }, [src]);
+  const img = useImage(src);
   if (!img) return null;
   return (
     <KImage
@@ -90,6 +102,177 @@ function ImageNode({
       opacity={r.opacity}
       {...interaction}
     />
+  );
+}
+
+type DrawCtx = Parameters<typeof drawSurface>[0];
+
+/** Stroke a closed polygon of comp-space points on a Konva context. */
+function strokePoly(ctx: DrawCtx, pts: { x: number; y: number }[]) {
+  if (pts.length < 2) return;
+  ctx.beginPath();
+  pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+  ctx.closePath();
+}
+
+// An image pinned to a Shape3D: the evaluator already projected it to paint-ready
+// quads in COMP space (the shape's placement baked in), so this renders with no
+// transform of its own. When selected we show a drag handle at the decal centre;
+// dragging it drops the decal at a new spot on the surface (Rust recomputes the
+// face + u/v — so it slides across box faces and around the cylinder).
+function DecalNode({
+  layerId,
+  src,
+  r,
+  listening,
+  selected,
+  screenScale,
+  onSelect,
+  onImageDrop,
+}: {
+  layerId: number;
+  src?: string;
+  r: ResolvedLayer;
+  listening: boolean;
+  selected: boolean;
+  screenScale: number;
+  onSelect: (id: number) => void;
+  onImageDrop: (layerId: number, x: number, y: number) => void;
+}) {
+  const img = useImage(src);
+  const surface = r.surface;
+  if (!img || !surface || surface.quads.length === 0) return null;
+
+  // A box decal is one quad; a cylinder decal is a curved band of many quads.
+  const polys = surface.quads.map((q) =>
+    q.corners.map((c) => ({ x: c.hx / c.hw, y: c.hy / c.hw }))
+  );
+  const allPts = polys.flat();
+  const cx = allPts.reduce((s, p) => s + p.x, 0) / allPts.length;
+  const cy = allPts.reduce((s, p) => s + p.y, 0) / allPts.length;
+
+  return (
+    <Group opacity={r.opacity}>
+      <Shape
+        listening={listening}
+        fill="#000"
+        sceneFunc={(ctx) => {
+          drawSurface(ctx as DrawCtx, img, surface, 1);
+          if (selected) {
+            ctx.save();
+            (ctx as unknown as CanvasRenderingContext2D).strokeStyle = "rgba(108,140,255,0.95)";
+            (ctx as unknown as CanvasRenderingContext2D).lineWidth = 1.5 * screenScale;
+            for (const poly of polys) {
+              strokePoly(ctx as DrawCtx, poly);
+              (ctx as unknown as CanvasRenderingContext2D).stroke();
+            }
+            ctx.restore();
+          }
+        }}
+        hitFunc={(ctx, shape) => {
+          for (const poly of polys) {
+            strokePoly(ctx as unknown as DrawCtx, poly);
+            ctx.fillStrokeShape(shape);
+          }
+        }}
+        onClick={(e) => {
+          e.cancelBubble = true;
+          onSelect(layerId);
+        }}
+      />
+      {selected && listening && (
+        <Circle
+          x={cx}
+          y={cy}
+          radius={7 * screenScale}
+          fill="rgba(108,140,255,0.95)"
+          stroke="#fff"
+          strokeWidth={1.5 * screenScale}
+          draggable
+          onClick={(e) => {
+            e.cancelBubble = true;
+          }}
+          onDragEnd={(e) => onImageDrop(layerId, e.target.x(), e.target.y())}
+        />
+      )}
+    </Group>
+  );
+}
+
+// An invisible Shape3D object (box/cylinder). The evaluator hands us its visible
+// faces as local-space polygons (r.shape). The Group carries the shape's 2D
+// transform, so it moves/scales/rotates and keyframes like any layer; the inner
+// Shape strokes a wireframe when selected and provides the (otherwise invisible)
+// hit area. The 3D spin is keyframed from the inspector.
+function ShapeNode({
+  r,
+  selected,
+  interaction,
+  registerRef,
+  screenScale,
+}: {
+  r: ResolvedLayer;
+  selected: boolean;
+  interaction: Interaction;
+  registerRef: NodeRef;
+  screenScale: number;
+}) {
+  const shapeRef = useRef<Konva.Shape | null>(null);
+  const frame = r.shape;
+
+  useEffect(() => {
+    const s = shapeRef.current;
+    if (!s || !frame) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const f of frame.faces)
+      for (const p of f) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+      }
+    s.getSelfRect = () =>
+      isFinite(minX)
+        ? { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+        : { x: -1, y: -1, width: 2, height: 2 };
+  }, [frame]);
+
+  if (!frame) return null;
+  const lw = (1.5 * screenScale) / Math.max(0.05, r.scaleX);
+
+  return (
+    <Group
+      ref={registerRef}
+      x={r.x}
+      y={r.y}
+      scaleX={r.scaleX}
+      scaleY={r.scaleY}
+      rotation={r.rotation}
+      {...interaction}
+    >
+      <Shape
+        ref={shapeRef}
+        listening={interaction.listening}
+        fill="#000"
+        sceneFunc={(ctx) => {
+          if (!selected) return;
+          ctx.save();
+          (ctx as unknown as CanvasRenderingContext2D).strokeStyle = "rgba(108,140,255,0.85)";
+          (ctx as unknown as CanvasRenderingContext2D).lineWidth = lw;
+          for (const f of frame.faces) {
+            strokePoly(ctx as DrawCtx, f);
+            (ctx as unknown as CanvasRenderingContext2D).stroke();
+          }
+          ctx.restore();
+        }}
+        hitFunc={(ctx, shape) => {
+          for (const f of frame.faces) {
+            strokePoly(ctx as unknown as DrawCtx, f);
+            ctx.fillStrokeShape(shape);
+          }
+        }}
+      />
+    </Group>
   );
 }
 
@@ -276,6 +459,7 @@ interface Props {
   onCommit: (id: number, edit: TransformEdit) => void;
   onSelectPart: (i: number | null) => void;
   onCommitPart: (layerId: number, index: number, part: LetterOverride) => void;
+  onImageDrop: (layerId: number, x: number, y: number) => void;
 }
 
 export default function Preview({
@@ -290,6 +474,7 @@ export default function Preview({
   onCommit,
   onSelectPart,
   onCommitPart,
+  onImageDrop,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
@@ -343,6 +528,17 @@ export default function Preview({
     },
     onDragEnd: () => commit(id),
     onTransformEnd: () => commit(id),
+  });
+
+  // Flat images: dragging the body either drops onto a shape (→ becomes a decal)
+  // or, if not over one, falls back to a normal move. Transformer handles still
+  // commit scale/rotation via the shared interaction.
+  const flatImageInteraction = (id: number): Interaction => ({
+    ...interaction(id),
+    onDragEnd: () => {
+      const node = nodeRefs.current[id];
+      if (node) onImageDrop(id, node.x(), node.y());
+    },
   });
 
   // Keep the Transformer attached to the selected node. Re-run when anything
@@ -422,12 +618,38 @@ export default function Preview({
                   />
                 );
               }
-              return (
+              if (k.kind === "shape3d") {
+                return (
+                  <ShapeNode
+                    key={layer.id}
+                    r={r}
+                    selected={selectedId === layer.id}
+                    interaction={interaction(layer.id)}
+                    registerRef={register(layer.id)}
+                    screenScale={h}
+                  />
+                );
+              }
+              // Image: a decal when pinned to a shape, otherwise a flat image
+              // (draggable onto a shape to pin it).
+              return r.surface ? (
+                <DecalNode
+                  key={layer.id}
+                  layerId={layer.id}
+                  src={images[k.src]}
+                  r={r}
+                  listening={!playing}
+                  selected={selectedId === layer.id}
+                  screenScale={h}
+                  onSelect={onSelect}
+                  onImageDrop={onImageDrop}
+                />
+              ) : (
                 <ImageNode
                   key={layer.id}
                   src={images[k.src]}
                   r={r}
-                  interaction={interaction(layer.id)}
+                  interaction={flatImageInteraction(layer.id)}
                   registerRef={register(layer.id)}
                 />
               );

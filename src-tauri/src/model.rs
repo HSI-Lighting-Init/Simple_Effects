@@ -50,8 +50,37 @@ pub struct Layer {
 pub enum LayerKind {
     /// An image loaded from an absolute path on disk. `width`/`height` are the
     /// image's natural pixel size; the layer is scaled (via its transform) to
-    /// fit the comp when added.
-    Image { src: String, width: u32, height: u32 },
+    /// fit the comp when added. When `attach` is set, the image is pinned to a
+    /// `Shape3D` and renders as a decal on its surface instead of flat.
+    Image {
+        src: String,
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        attach: Option<Decal>,
+    },
+    /// An invisible 3D box or cylinder you can spin (the rotation tracks) and
+    /// move/scale on the canvas (the layer transform). It draws nothing itself —
+    /// `Image` layers pinned to it (via `Decal`) render on its surface. The
+    /// `width`/`height`/`depth` set the box dimensions / cylinder size in comp px.
+    Shape3D {
+        shape: SurfaceShape,
+        width: f32,
+        height: f32,
+        /// Box depth (px). Ignored for cylinders.
+        depth: f32,
+        rotation_x: Track,
+        rotation_y: Track,
+        rotation_z: Track,
+        /// 0 = orthographic, 1 = full perspective foreshortening.
+        perspective: f32,
+        /// Camera distance (px-ish). Larger = flatter perspective.
+        focal_length: f32,
+        /// Cylinder: degrees of circumference shown (0..360). Ignored for boxes.
+        coverage: f32,
+        /// Cylinder: radius (px). Ignored for boxes.
+        radius: f32,
+    },
     /// A text run. `anim` opt-in drives per-letter animation from a preset;
     /// `parts` holds manual per-glyph move/rotate/scale (decompose mode).
     Text {
@@ -176,6 +205,39 @@ pub struct LetterOverride {
 impl Default for LetterOverride {
     fn default() -> Self {
         Self { dx: 0.0, dy: 0.0, rotation: 0.0, scale: 1.0 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum SurfaceShape {
+    Box,
+    Cylinder,
+}
+
+/// Pins an image to a `Shape3D` so it renders as a decal on the shape's surface.
+/// The placement is *within the face's plane*: `(u, v)` is the decal centre in
+/// face coordinates (0..1), `scale` its size (fraction of the face / shape size,
+/// image aspect preserved), and `rotation` its in-plane spin.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct Decal {
+    /// Id of the `Shape3D` layer this image is pinned to.
+    pub shape_id: u32,
+    /// Which box face (0=front,1=back,2=left,3=right,4=top,5=bottom). For a
+    /// cylinder this is ignored — the decal sits tangent to the surface at `u`.
+    pub face: u32,
+    pub u: f32,
+    pub v: f32,
+    pub scale: f32,
+    pub rotation: f32,
+}
+
+impl Default for Decal {
+    fn default() -> Self {
+        Self { shape_id: 0, face: 0, u: 0.5, v: 0.5, scale: 0.5, rotation: 0.0 }
     }
 }
 

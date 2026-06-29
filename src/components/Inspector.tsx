@@ -6,6 +6,8 @@ import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { LetterPreset } from "../bindings/LetterPreset";
 import type { Font } from "../bindings/Font";
 import type { Rgba } from "../bindings/Rgba";
+import type { SurfaceShape } from "../bindings/SurfaceShape";
+import type { Decal } from "../bindings/Decal";
 
 const PRESETS: { value: LetterPreset | "none"; label: string }[] = [
   { value: "none", label: "None (static)" },
@@ -231,9 +233,312 @@ function TextInspector({
   );
 }
 
+const FACE_LABELS = ["Front", "Back", "Left", "Right", "Top", "Bottom"];
+
+export interface ShapeParams {
+  width: number;
+  height: number;
+  depth: number;
+  perspective: number;
+  focalLength: number;
+  coverage: number;
+  radius: number;
+}
+
+interface ShapeRef {
+  id: number;
+  name: string;
+  shape: SurfaceShape;
+}
+
+// Controls for a Shape3D object: keyframeable 3D rotation (the spin), camera,
+// and dimensions. Rotations key the playhead (set_shape_rotation_key); the rest
+// is a single set_shape_params call.
+function ShapeInspector({
+  layerId,
+  shape,
+  params,
+  angles,
+  onShapeParams,
+  onShapeRotKey,
+}: {
+  layerId: number;
+  shape: SurfaceShape;
+  params: ShapeParams;
+  angles: { x: number; y: number; z: number } | null;
+  onShapeParams: (layerId: number, p: ShapeParams) => void;
+  onShapeRotKey: (
+    layerId: number,
+    axis: "x" | "y" | "z",
+    value: number,
+    seedStart: boolean
+  ) => void;
+}) {
+  const set = (p: Partial<ShapeParams>) => onShapeParams(layerId, { ...params, ...p });
+  const a = angles ?? { x: 0, y: 0, z: 0 };
+  const rotRow = (label: string, axis: "x" | "y" | "z", value: number) => (
+    <div className="insp-field">
+      <div className="surf-rot-head">
+        <span>{label}</span>
+        <span className="muted">{Math.round(value)}°</span>
+        <button
+          className="insp-btn tiny"
+          title="Spin in from 0° (keyframe from the layer start to here)"
+          onClick={() => onShapeRotKey(layerId, axis, value || 90, true)}
+        >
+          ◆ spin
+        </button>
+      </div>
+      <input
+        type="range"
+        min={-180}
+        max={180}
+        step={1}
+        value={value}
+        onChange={(e) => onShapeRotKey(layerId, axis, Number(e.target.value), false)}
+      />
+    </div>
+  );
+
+  return (
+    <div className="insp-body">
+      <div className="insp-sep">{shape === "box" ? "Box" : "Cylinder"} — 3D object</div>
+      <p className="insp-hint">
+        Move / scale / rotate it on the canvas like any layer. Add images, then
+        pin each to this shape from the image's inspector.
+      </p>
+
+      <div className="insp-sep">Rotation (keyframe to spin)</div>
+      {rotRow("X — tilt", "x", a.x)}
+      {rotRow("Y — turn", "y", a.y)}
+      {rotRow("Z — roll", "z", a.z)}
+      <p className="insp-hint">
+        Drag a rotation, move the playhead, drag again → it spins between. Or
+        press <b>◆ spin</b> to animate from 0° at the layer start to here.
+      </p>
+
+      <div className="insp-sep">Camera</div>
+      <label className="insp-field">
+        Perspective {params.perspective.toFixed(2)}
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={params.perspective}
+          onChange={(e) => set({ perspective: Number(e.target.value) })}
+        />
+      </label>
+      <label className="insp-field">
+        Focal length
+        <input
+          type="number"
+          min={100}
+          max={5000}
+          step={50}
+          value={Math.round(params.focalLength)}
+          onChange={(e) => set({ focalLength: Number(e.target.value) })}
+        />
+      </label>
+
+      <div className="insp-sep">Size</div>
+      <div className="row2">
+        <label className="insp-field">
+          Width
+          <input
+            type="number"
+            min={1}
+            value={Math.round(params.width)}
+            onChange={(e) => set({ width: Number(e.target.value) })}
+          />
+        </label>
+        <label className="insp-field">
+          Height
+          <input
+            type="number"
+            min={1}
+            value={Math.round(params.height)}
+            onChange={(e) => set({ height: Number(e.target.value) })}
+          />
+        </label>
+      </div>
+      {shape === "box" ? (
+        <label className="insp-field">
+          Depth
+          <input
+            type="number"
+            min={0}
+            value={Math.round(params.depth)}
+            onChange={(e) => set({ depth: Number(e.target.value) })}
+          />
+        </label>
+      ) : (
+        <>
+          <label className="insp-field">
+            Radius
+            <input
+              type="number"
+              min={1}
+              value={Math.round(params.radius)}
+              onChange={(e) => set({ radius: Number(e.target.value) })}
+            />
+          </label>
+          <label className="insp-field">
+            Coverage {Math.round(params.coverage)}°
+            <input
+              type="range"
+              min={10}
+              max={360}
+              step={5}
+              value={params.coverage}
+              onChange={(e) => set({ coverage: Number(e.target.value) })}
+            />
+          </label>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Controls for an image layer: pin it to a 3D shape (decal) and place it on the
+// surface. When flat (unpinned) there's nothing to configure here yet.
+function ImageInspector({
+  layerId,
+  attach,
+  shapes,
+  onAttachImage,
+  onSetDecal,
+}: {
+  layerId: number;
+  attach: Decal | null;
+  shapes: ShapeRef[];
+  onAttachImage: (imageId: number, shapeId: number | null, face: number) => void;
+  onSetDecal: (imageId: number, decal: Decal) => void;
+}) {
+  const parent = attach ? shapes.find((s) => s.id === attach.shapeId) ?? null : null;
+  const isBox = parent?.shape === "box";
+  const patch = (p: Partial<Decal>) => {
+    if (attach) onSetDecal(layerId, { ...attach, ...p });
+  };
+
+  return (
+    <div className="insp-body">
+      <div className="insp-sep">3D surface</div>
+      {shapes.length === 0 && (
+        <p className="insp-hint">
+          Add a Box or Cylinder (＋ Box / ＋ Cylinder), then pin this image to it
+          to wrap it onto the surface.
+        </p>
+      )}
+      {shapes.length > 0 && (
+        <label className="insp-field">
+          Pin to shape
+          <select
+            value={attach ? String(attach.shapeId) : "none"}
+            onChange={(e) => {
+              const v = e.target.value;
+              onAttachImage(layerId, v === "none" ? null : Number(v), attach?.face ?? 0);
+            }}
+          >
+            <option value="none">Flat (not pinned)</option>
+            {shapes.map((s) => (
+              <option key={s.id} value={String(s.id)}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+
+      {attach && (
+        <>
+          {isBox && (
+            <label className="insp-field">
+              Face
+              <select
+                value={String(attach.face)}
+                onChange={(e) => patch({ face: Number(e.target.value) })}
+              >
+                {FACE_LABELS.map((lbl, i) => (
+                  <option key={lbl} value={String(i)}>
+                    {lbl}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <p className="insp-hint">
+            Drag the dot on the canvas to slide it across the surface.
+            {isBox ? " Size and spin it here:" : " It wraps around the cylinder — size it here:"}
+          </p>
+          <label className="insp-field">
+            {isBox ? "Size" : "Height (wrap)"} {attach.scale.toFixed(2)}
+            <input
+              type="range"
+              min={0.05}
+              max={2}
+              step={0.01}
+              value={attach.scale}
+              onChange={(e) => patch({ scale: Number(e.target.value) })}
+            />
+          </label>
+          {isBox && (
+            <label className="insp-field">
+              Rotation {Math.round(attach.rotation)}°
+              <input
+                type="range"
+                min={-180}
+                max={180}
+                step={1}
+                value={attach.rotation}
+                onChange={(e) => patch({ rotation: Number(e.target.value) })}
+              />
+            </label>
+          )}
+          <div className="row2">
+            <label className="insp-field">
+              Across (u) {attach.u.toFixed(2)}
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={attach.u}
+                onChange={(e) => patch({ u: Number(e.target.value) })}
+              />
+            </label>
+            <label className="insp-field">
+              Down (v) {attach.v.toFixed(2)}
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={attach.v}
+                onChange={(e) => patch({ v: Number(e.target.value) })}
+              />
+            </label>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 interface Props {
   layer: Layer | null;
   decomposed: boolean;
+  shapes: ShapeRef[];
+  shapeAngles: { x: number; y: number; z: number } | null;
+  onShapeParams: (layerId: number, p: ShapeParams) => void;
+  onShapeRotKey: (
+    layerId: number,
+    axis: "x" | "y" | "z",
+    value: number,
+    seedStart: boolean
+  ) => void;
+  onAttachImage: (imageId: number, shapeId: number | null, face: number) => void;
+  onSetDecal: (imageId: number, decal: Decal) => void;
   onContent: (layerId: number, content: string, size: number) => void;
   onColor: (layerId: number, color: Rgba) => void;
   onFont: (layerId: number, font: Font) => void;
@@ -246,6 +551,12 @@ interface Props {
 export default function Inspector({
   layer,
   decomposed,
+  shapes,
+  shapeAngles,
+  onShapeParams,
+  onShapeRotKey,
+  onAttachImage,
+  onSetDecal,
   onContent,
   onColor,
   onFont,
@@ -276,7 +587,34 @@ export default function Inspector({
           onDecomposeKey={onDecomposeKey}
         />
       )}
-      {layer && layer.kind.kind !== "text" && (
+      {layer && layer.kind.kind === "shape3d" && (
+        <ShapeInspector
+          layerId={layer.id}
+          shape={layer.kind.shape}
+          params={{
+            width: layer.kind.width,
+            height: layer.kind.height,
+            depth: layer.kind.depth,
+            perspective: layer.kind.perspective,
+            focalLength: layer.kind.focal_length,
+            coverage: layer.kind.coverage,
+            radius: layer.kind.radius,
+          }}
+          angles={shapeAngles}
+          onShapeParams={onShapeParams}
+          onShapeRotKey={onShapeRotKey}
+        />
+      )}
+      {layer && layer.kind.kind === "image" && (
+        <ImageInspector
+          layerId={layer.id}
+          attach={layer.kind.attach}
+          shapes={shapes}
+          onAttachImage={onAttachImage}
+          onSetDecal={onSetDecal}
+        />
+      )}
+      {layer && layer.kind.kind === "colorpatch" && (
         <span className="muted">
           {layer.kind.kind} layer — drag on the canvas to move/scale, ◆ Key to set a keyframe.
         </span>

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::model::{Easing, LayerKind, LetterAnimation, LetterPreset, Project, Track};
+use crate::surface::{self, ResolvedShapeFrame, ResolvedSurface, ShapeState};
 
 /// A layer's transform fully resolved at one instant in time. Field names are
 /// camelCase so they map straight onto Konva node props on the frontend.
@@ -30,6 +31,12 @@ pub struct ResolvedLayer {
     /// Per-letter offsets for animated `Text` layers (one per shaped glyph,
     /// in glyph order). Empty for everything else.
     pub letters: Vec<LetterTransform>,
+    /// Paint-ready decal quads when this is an image pinned to a `Shape3D`.
+    /// `None` = render the image flat.
+    pub surface: Option<ResolvedSurface>,
+    /// Visible-face polygons when this is a `Shape3D` layer (for the selection
+    /// wireframe + hit area). `None` for everything else.
+    pub shape: Option<ResolvedShapeFrame>,
 }
 
 /// One glyph's offset from its resting shaped position at a given time.
@@ -98,6 +105,46 @@ pub fn sample_track(track: &Track, t_ms: u32) -> f32 {
     k0.value + (k1.value - k0.value) * e
 }
 
+/// Build a `ShapeState` for a layer at `t_ms` if it's a `Shape3D` (samples its
+/// 3D rotation + 2D placement). Shared by `evaluate` and the drag/drop pick.
+pub fn shape_state_for(layer: &crate::model::Layer, t_ms: u32) -> Option<ShapeState> {
+    let LayerKind::Shape3D {
+        shape,
+        width,
+        height,
+        depth,
+        rotation_x,
+        rotation_y,
+        rotation_z,
+        perspective,
+        focal_length,
+        coverage,
+        radius,
+    } = &layer.kind
+    else {
+        return None;
+    };
+    let tf = &layer.transform;
+    Some(ShapeState {
+        shape: *shape,
+        hw: width / 2.0,
+        hh: height / 2.0,
+        hd: depth / 2.0,
+        radius: *radius,
+        coverage: *coverage,
+        rx: sample_track(rotation_x, t_ms),
+        ry: sample_track(rotation_y, t_ms),
+        rz: sample_track(rotation_z, t_ms),
+        perspective: *perspective,
+        focal: *focal_length,
+        sx: sample_track(&tf.x, t_ms),
+        sy: sample_track(&tf.y, t_ms),
+        ssx: sample_track(&tf.scale_x, t_ms),
+        ssy: sample_track(&tf.scale_y, t_ms),
+        srot: sample_track(&tf.rotation, t_ms),
+    })
+}
+
 /// Resolve every layer in the project at comp time `t_ms`. `letter_counts` maps
 /// a text layer's id to its shaped glyph count (the caller gets that from the
 /// shaping cache) so per-letter animation can be evaluated here too.
@@ -106,6 +153,16 @@ pub fn evaluate(
     t_ms: u32,
     letter_counts: &HashMap<u32, usize>,
 ) -> Vec<ResolvedLayer> {
+    // Pass 1: resolve every Shape3D into a ShapeState so the images pinned to it
+    // (which may appear before or after it in the list) can be projected.
+    let mut shapes: HashMap<u32, ShapeState> = HashMap::new();
+    for layer in &project.layers {
+        if let Some(st) = shape_state_for(layer, t_ms) {
+            shapes.insert(layer.id, st);
+        }
+    }
+
+    // Pass 2: build the resolved layers.
     project
         .layers
         .iter()
@@ -142,16 +199,34 @@ pub fn evaluate(
                 _ => Vec::new(),
             };
 
+            // Shape3D → its visible-face frame. Image pinned to a shape → its decal.
+            let shape = match &layer.kind {
+                LayerKind::Shape3D { .. } => shapes.get(&layer.id).map(surface::shape_frame),
+                _ => None,
+            };
+            let decal = match &layer.kind {
+                LayerKind::Image { attach: Some(d), width, height, .. } => shapes
+                    .get(&d.shape_id)
+                    .map(|st| surface::decal_surface(st, d.face, d.u, d.v, d.scale, d.rotation, *width as f32, *height as f32)),
+                _ => None,
+            };
+
+            // A decal is baked into comp space, so its image-layer transform is
+            // identity (only opacity still applies). Everything else uses its own
+            // resolved transform.
+            let attached = decal.is_some();
             ResolvedLayer {
                 id: layer.id,
                 visible,
-                x: sample_track(&tf.x, t_ms),
-                y: sample_track(&tf.y, t_ms),
-                scale_x: sample_track(&tf.scale_x, t_ms),
-                scale_y: sample_track(&tf.scale_y, t_ms),
-                rotation: sample_track(&tf.rotation, t_ms),
+                x: if attached { 0.0 } else { sample_track(&tf.x, t_ms) },
+                y: if attached { 0.0 } else { sample_track(&tf.y, t_ms) },
+                scale_x: if attached { 1.0 } else { sample_track(&tf.scale_x, t_ms) },
+                scale_y: if attached { 1.0 } else { sample_track(&tf.scale_y, t_ms) },
+                rotation: if attached { 0.0 } else { sample_track(&tf.rotation, t_ms) },
                 opacity,
                 letters,
+                surface: decal,
+                shape,
             }
         })
         .collect()

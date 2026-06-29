@@ -7,11 +7,17 @@ import Inspector from "./components/Inspector";
 import RecorderPanel from "./components/RecorderPanel";
 import {
   addImageLayer,
+  addShapeLayer,
   addTextLayer,
+  attachImage,
   clearLetterOverrides,
+  dropImageOnShape,
   editKeyframes,
   setDecomposeKey,
+  setDecal,
   setLetterOverride,
+  setShapeParams,
+  setShapeRotationKey,
   evaluateAt,
   getProject,
   loadImageDataUrl,
@@ -40,6 +46,9 @@ import type { LetterAnimation } from "./bindings/LetterAnimation";
 import type { Font } from "./bindings/Font";
 import type { Rgba } from "./bindings/Rgba";
 import type { LetterOverride } from "./bindings/LetterOverride";
+import type { SurfaceShape } from "./bindings/SurfaceShape";
+import type { Decal } from "./bindings/Decal";
+import type { ShapeParams } from "./components/Inspector";
 import "./App.css";
 
 export default function App() {
@@ -295,6 +304,107 @@ export default function App() {
     [applyTime, recordAction]
   );
 
+  // Add an invisible 3D box/cylinder object and select it.
+  const onAddShape = useCallback(
+    async (shape: SurfaceShape) => {
+      const p = await addShapeLayer(shape);
+      setProject(p);
+      const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
+      if (newId != null) setSelectedId(newId);
+      await applyTime(timeRef.current);
+      recordAction("add_shape", { shape, layerId: newId });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Shape dimensions + camera (rotations are keyed separately).
+  const onShapeParams = useCallback(
+    async (layerId: number, params: ShapeParams) => {
+      const p = await setShapeParams(
+        layerId,
+        params.width,
+        params.height,
+        params.depth,
+        params.perspective,
+        params.focalLength,
+        params.coverage,
+        params.radius
+      );
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("shape_params", { layerId, params });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Key a shape's 3D rotation at the playhead so it spins.
+  const onShapeRotKey = useCallback(
+    async (layerId: number, axis: "x" | "y" | "z", value: number, seedStart: boolean) => {
+      const p = await setShapeRotationKey(
+        layerId,
+        axis,
+        Math.round(timeRef.current),
+        value,
+        seedStart
+      );
+      setProject(p);
+      durationRef.current = p.durationMs;
+      await applyTime(timeRef.current);
+      recordAction("shape_rot", { layerId, axis, value });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Pin an image to a shape (or detach with shapeId null).
+  const onAttachImage = useCallback(
+    async (imageId: number, shapeId: number | null, face: number) => {
+      const p = await attachImage(imageId, shapeId, face);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("attach_image", { imageId, shapeId, face });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Update a pinned image's placement (face / u / v / scale / rotation).
+  const onSetDecal = useCallback(
+    async (imageId: number, decal: Decal) => {
+      const p = await setDecal(imageId, decal);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("set_decal", { imageId, decal });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Drag an image (or a decal's handle) onto a shape's surface at comp (x, y).
+  // If it lands on a shape, Rust pins it there; otherwise a flat image falls back
+  // to an ordinary move, and a decal dragged off-surface just snaps back.
+  const onImageDrop = useCallback(
+    async (imageId: number, x: number, y: number) => {
+      const tMs = Math.round(timeRef.current);
+      const dropped = await dropImageOnShape(imageId, x, y, tMs);
+      if (dropped) {
+        setProject(dropped);
+        durationRef.current = dropped.durationMs;
+        await applyTime(timeRef.current);
+        recordAction("image_drop", { imageId, x, y, attached: true });
+        return;
+      }
+      // Not over a shape: a flat image commits the move; a decal stays put.
+      const layer = projectRef.current?.layers.find((l) => l.id === imageId);
+      const isDecal = layer?.kind.kind === "image" && !!layer.kind.attach;
+      if (!isDecal) {
+        const p = await editKeyframes(imageId, tMs, { x, y }, true);
+        setProject(p);
+        durationRef.current = p.durationMs;
+        recordAction("image_drop", { imageId, x, y, attached: false });
+      }
+      await applyTime(timeRef.current);
+    },
+    [applyTime, recordAction]
+  );
+
   // Show/hide a layer from the timeline's layer list.
   const onToggleHidden = useCallback(
     async (layerId: number) => {
@@ -532,6 +642,19 @@ export default function App() {
   if (!project) return <div className="loading">Loading…</div>;
 
   const selectedLayer = project.layers.find((l) => l.id === selectedId) ?? null;
+  // All 3D-shape objects, for the "pin to shape" picker.
+  const shapes = project.layers
+    .filter((l) => l.kind.kind === "shape3d")
+    .map((l) => ({
+      id: l.id,
+      name: l.name,
+      shape: l.kind.kind === "shape3d" ? l.kind.shape : "box",
+    }));
+  // Sampled 3D rotation of the selected shape (feeds the inspector sliders).
+  const selFrame = selectedId != null ? resolved[selectedId]?.shape : null;
+  const shapeAngles = selFrame
+    ? { x: selFrame.rotationX, y: selFrame.rotationY, z: selFrame.rotationZ }
+    : null;
 
   return (
     <div className="app">
@@ -539,6 +662,10 @@ export default function App() {
         <span className="brand">simple · effects</span>
         <button onClick={onOpenImage}>＋ Image</button>
         <button onClick={onAddText}>＋ Text</button>
+        <button onClick={() => onAddShape("box")} title="Add a 3D box object">＋ Box</button>
+        <button onClick={() => onAddShape("cylinder")} title="Add a 3D cylinder object">
+          ＋ Cylinder
+        </button>
         <button className="primary" onClick={playing ? stop : play}>
           {playing ? "❚❚ Pause" : "▶ Play"}
         </button>
@@ -577,11 +704,18 @@ export default function App() {
             onCommit={onCommit}
             onSelectPart={setSelectedPart}
             onCommitPart={onCommitPart}
+            onImageDrop={onImageDrop}
           />
         </main>
         <Inspector
           layer={selectedLayer}
           decomposed={selectedLayer != null && decomposeId === selectedLayer.id}
+          shapes={shapes}
+          shapeAngles={shapeAngles}
+          onShapeParams={onShapeParams}
+          onShapeRotKey={onShapeRotKey}
+          onAttachImage={onAttachImage}
+          onSetDecal={onSetDecal}
           onContent={onSetContent}
           onColor={onSetColor}
           onFont={onSetFont}
