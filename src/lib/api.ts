@@ -20,6 +20,14 @@ export const setProject = (project: Project) =>
 export const setCompSize = (width: number, height: number) =>
   invoke<Project>("set_comp_size", { width, height });
 
+/** Set the composition length (ms); layers running past the end are trimmed. */
+export const setCompDuration = (durationMs: number) =>
+  invoke<Project>("set_comp_duration", { durationMs });
+
+/** Set one layer's play range [startMs, endMs] (when it appears on the timeline). */
+export const setLayerRange = (layerId: number, startMs: number, endMs: number) =>
+  invoke<Project>("set_layer_range", { layerId, startMs, endMs });
+
 /** Resolve every layer's transform at one playhead time (comp ms). */
 export const evaluateAt = (tMs: number) =>
   invoke<ResolvedLayer[]>("evaluate_at", { tMs });

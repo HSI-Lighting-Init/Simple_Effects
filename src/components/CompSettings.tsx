@@ -15,16 +15,20 @@ const PRESETS: { label: string; w: number; h: number }[] = [
 export default function CompSettings({
   width,
   height,
+  durationMs,
   onApply,
   onClose,
 }: {
   width: number;
   height: number;
-  onApply: (w: number, h: number) => void;
+  durationMs: number;
+  onApply: (w: number, h: number, durationMs: number) => void;
   onClose: () => void;
 }) {
   const [w, setW] = useState(width);
   const [h, setH] = useState(height);
+  // Edited in seconds (friendlier), stored as ms.
+  const [secs, setSecs] = useState(durationMs / 1000);
   const orientation = w > h ? "Landscape" : w < h ? "Portrait" : "Square";
   const presetValue = PRESETS.some((p) => p.w === w && p.h === h) ? `${w}x${h}` : "";
 
@@ -89,6 +93,17 @@ export default function CompSettings({
               {w}×{h} · {orientation}
             </span>
           </div>
+          <label className="insp-field">
+            Duration (seconds)
+            <input
+              type="number"
+              min={0.1}
+              max={3600}
+              step={0.5}
+              value={secs}
+              onChange={(e) => setSecs(Number(e.target.value))}
+            />
+          </label>
         </div>
         <div className="modal-actions">
           <button className="insp-btn" onClick={onClose}>
@@ -97,7 +112,7 @@ export default function CompSettings({
           <button
             className="insp-btn active"
             onClick={() => {
-              onApply(Math.round(w), Math.round(h));
+              onApply(Math.round(w), Math.round(h), Math.round(secs * 1000));
               onClose();
             }}
           >

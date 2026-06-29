@@ -16,6 +16,8 @@ import {
   addShapeLayer,
   addTextLayer,
   setCompSize,
+  setCompDuration,
+  setLayerRange,
   attachToShape,
   clearKeyframes,
   clearLetterOverrides,
@@ -666,13 +668,30 @@ export default function App() {
     setCtxMenu({ x, y, layerId });
   }, []);
 
-  // Change the composition resolution / orientation.
-  const onSetCompSize = useCallback(
-    async (w: number, h: number) => {
-      const p = await setCompSize(w, h);
+  // Change the composition resolution / orientation and/or its length.
+  const onApplyComp = useCallback(
+    async (w: number, h: number, durationMs: number) => {
+      let p = await setCompSize(w, h);
+      if (durationMs !== p.durationMs) {
+        p = await setCompDuration(durationMs);
+      }
+      setProject(p);
+      durationRef.current = p.durationMs;
+      // Keep the playhead inside the (possibly shorter) comp.
+      if (timeRef.current > p.durationMs) seek(p.durationMs);
+      else await applyTime(timeRef.current);
+      recordAction("comp_settings", { w, h, durationMs: p.durationMs });
+    },
+    [applyTime, seek, recordAction]
+  );
+
+  // Trim/move a layer's play range on the timeline (drag the block or its edges).
+  const onSetLayerRange = useCallback(
+    async (layerId: number, startMs: number, endMs: number) => {
+      const p = await setLayerRange(layerId, startMs, endMs);
       setProject(p);
       await applyTime(timeRef.current);
-      recordAction("comp_size", { w, h });
+      recordAction("layer_range", { layerId, startMs, endMs });
     },
     [applyTime, recordAction]
   );
@@ -1253,6 +1272,7 @@ export default function App() {
         onDeleteLayer={onDeleteLayer}
         onDeleteKeyframe={onDeleteKeyframe}
         onLayerContextMenu={onLayerContextMenu}
+        onSetLayerRange={onSetLayerRange}
       />
 
       {showRecorder && (
@@ -1321,7 +1341,8 @@ export default function App() {
         <CompSettings
           width={project.width}
           height={project.height}
-          onApply={onSetCompSize}
+          durationMs={project.durationMs}
+          onApply={onApplyComp}
           onClose={() => setShowCompSettings(false)}
         />
       )}

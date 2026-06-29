@@ -1,9 +1,21 @@
 // The timeline. One track per layer (top layer on top), so every image you add
 // gets its own row. Blocks show each layer's [startMs, endMs] range; diamonds
 // mark keyframes; the playhead is draggable to scrub.
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import type { Project } from "../bindings/Project";
 import type { Layer } from "../bindings/Layer";
+
+/** Smallest range a layer block may be trimmed to (ms) — matches the Rust floor. */
+const MIN_SPAN_MS = 50;
+
+/** A live drag of a layer block: moving the whole range or trimming one edge. */
+interface Drag {
+  id: number;
+  mode: "move" | "start" | "end";
+  startMs: number;
+  endMs: number;
+  moved: boolean;
+}
 
 function kindColor(l: Layer): string {
   const k = l.kind;
@@ -43,6 +55,7 @@ interface Props {
   onDeleteLayer: (id: number) => void;
   onDeleteKeyframe: (id: number, tMs: number) => void;
   onLayerContextMenu: (id: number, x: number, y: number) => void;
+  onSetLayerRange: (id: number, startMs: number, endMs: number) => void;
 }
 
 export default function Timeline({
@@ -55,10 +68,64 @@ export default function Timeline({
   onDeleteLayer,
   onDeleteKeyframe,
   onLayerContextMenu,
+  onSetLayerRange,
 }: Props) {
   const tracksRef = useRef<HTMLDivElement>(null);
+  const [drag, setDrag] = useState<Drag | null>(null);
   const dur = project.durationMs || 1;
   const layers = [...project.layers].reverse();
+
+  // Begin dragging a layer block (move it) or one of its trim edges. Converts
+  // horizontal mouse motion into ms against the track width, clamps to the comp,
+  // and commits the new range once on release (so it's a single undo step).
+  const startBlockDrag = (
+    e: React.MouseEvent,
+    layer: Layer,
+    mode: Drag["mode"]
+  ) => {
+    e.stopPropagation(); // don't scrub the playhead
+    onSelect(layer.id);
+    const el = tracksRef.current;
+    if (!el) return;
+    const trackW = el.getBoundingClientRect().width || 1;
+    const span = layer.endMs - layer.startMs;
+    const startX = e.clientX;
+    let next: Drag = {
+      id: layer.id,
+      mode,
+      startMs: layer.startMs,
+      endMs: layer.endMs,
+      moved: false,
+    };
+    setDrag(next);
+
+    const move = (ev: MouseEvent) => {
+      const dMs = ((ev.clientX - startX) / trackW) * dur;
+      let s = layer.startMs;
+      let en = layer.endMs;
+      if (mode === "move") {
+        let ns = Math.max(0, Math.min(dur - span, layer.startMs + dMs));
+        s = Math.round(ns);
+        en = Math.round(ns + span);
+      } else if (mode === "start") {
+        s = Math.round(Math.max(0, Math.min(layer.endMs - MIN_SPAN_MS, layer.startMs + dMs)));
+        en = layer.endMs;
+      } else {
+        s = layer.startMs;
+        en = Math.round(Math.min(dur, Math.max(layer.startMs + MIN_SPAN_MS, layer.endMs + dMs)));
+      }
+      next = { ...next, startMs: s, endMs: en, moved: next.moved || Math.abs(ev.clientX - startX) > 3 };
+      setDrag(next);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      if (next.moved) onSetLayerRange(next.id, next.startMs, next.endMs);
+      setDrag(null);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
 
   const seekFromX = (clientX: number) => {
     const el = tracksRef.current;
@@ -141,22 +208,37 @@ export default function Timeline({
 
         <div className="tl-tracks" ref={tracksRef} onMouseDown={onMouseDown}>
           {layers.map((l) => {
-            const left = (l.startMs / dur) * 100;
-            const width = ((l.endMs - l.startMs) / dur) * 100;
-            const span = Math.max(1, l.endMs - l.startMs);
+            // While dragging this layer, render from the live preview range.
+            const sMs = drag?.id === l.id ? drag.startMs : l.startMs;
+            const eMs = drag?.id === l.id ? drag.endMs : l.endMs;
+            const left = (sMs / dur) * 100;
+            const width = ((eMs - sMs) / dur) * 100;
+            const span = Math.max(1, eMs - sMs);
             return (
               <div key={l.id} className={"tl-track" + (l.hidden ? " hidden" : "")}>
                 <div
                   className="tl-block"
                   style={{ left: `${left}%`, width: `${width}%`, background: kindColor(l) }}
+                  title={`${(sMs / 1000).toFixed(2)}s – ${(eMs / 1000).toFixed(2)}s · drag to move, edges to trim`}
+                  onMouseDown={(e) => startBlockDrag(e, l, "move")}
                 >
+                  <span
+                    className="tl-trim tl-trim-l"
+                    title="Trim start"
+                    onMouseDown={(e) => startBlockDrag(e, l, "start")}
+                  />
                   <span className="tl-block-name">{l.name}</span>
+                  <span
+                    className="tl-trim tl-trim-r"
+                    title="Trim end"
+                    onMouseDown={(e) => startBlockDrag(e, l, "end")}
+                  />
                   {keyframeTimes(l).map((tm, i) => (
                     <button
                       key={i}
                       className="tl-kf"
                       title="Delete keyframe"
-                      style={{ left: `${((tm - l.startMs) / span) * 100}%` }}
+                      style={{ left: `${((tm - sMs) / span) * 100}%` }}
                       onMouseDown={(e) => e.stopPropagation()}
                       onClick={(e) => {
                         e.stopPropagation();

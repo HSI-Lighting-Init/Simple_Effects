@@ -22,6 +22,10 @@ use model::{
 };
 use text::{Font, ShapedText};
 
+/// Shortest play range a layer is allowed to have, and the floor for the comp
+/// duration (ms). Keeps a trimmed block from collapsing to nothing.
+const MIN_SPAN_MS: u32 = 50;
+
 /// Undo/redo stacks of whole-project snapshots. Each user-level mutation pushes
 /// the pre-change project onto `undo`.
 #[derive(Default)]
@@ -369,6 +373,55 @@ fn set_comp_size(state: State<AppState>, width: u32, height: u32) -> Project {
     project.width = width.clamp(16, 8192);
     project.height = height.clamp(16, 8192);
     project.clone()
+}
+
+/// Set the composition length (ms). Any layer whose range runs past the new end
+/// is trimmed to fit (so blocks stay inside the timeline). Undoable.
+#[tauri::command]
+fn set_comp_duration(state: State<AppState>, duration_ms: u32) -> Project {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let dur = duration_ms.clamp(MIN_SPAN_MS, 3_600_000);
+    project.duration_ms = dur;
+    for l in &mut project.layers {
+        if l.end_ms > dur {
+            l.end_ms = dur;
+        }
+        if l.start_ms + MIN_SPAN_MS > l.end_ms {
+            l.start_ms = l.end_ms.saturating_sub(MIN_SPAN_MS);
+        }
+    }
+    project.clone()
+}
+
+/// Set one layer's play range [start_ms, end_ms] (comp ms) — i.e. when on the
+/// timeline it appears. Clamped to the comp and to a minimum span so it can't
+/// invert or vanish. Undoable.
+#[tauri::command]
+fn set_layer_range(
+    state: State<AppState>,
+    layer_id: u32,
+    start_ms: u32,
+    end_ms: u32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let dur = project.duration_ms.max(MIN_SPAN_MS);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    // End first (capped to the comp), then start kept at least MIN_SPAN behind it.
+    let mut e = end_ms.min(dur);
+    let mut s = start_ms.min(e.saturating_sub(MIN_SPAN_MS));
+    if e < s + MIN_SPAN_MS {
+        e = (s + MIN_SPAN_MS).min(dur);
+        s = e.saturating_sub(MIN_SPAN_MS);
+    }
+    layer.start_ms = s;
+    layer.end_ms = e;
+    Ok(project.clone())
 }
 
 /// Show/hide a layer manually (independent of its time range). Undoable.
@@ -1143,6 +1196,8 @@ pub fn run() {
             delete_keyframes_at,
             clear_keyframes,
             set_comp_size,
+            set_comp_duration,
+            set_layer_range,
             ffmpeg_status,
             install_ffmpeg,
             export_video,

@@ -989,6 +989,40 @@ body {
   opacity: 0.92;
   overflow: hidden;
   min-width: 3px;
+  cursor: grab;
+}
+
+.tl-block:active {
+  cursor: grabbing;
+}
+
+/* Trim handles at each edge of a layer block. */
+.tl-trim {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  z-index: 2;
+  cursor: ew-resize;
+  background: rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.tl-trim-l {
+  left: 0;
+  border-radius: 4px 0 0 4px;
+  box-shadow: inset 2px 0 0 rgba(255, 255, 255, 0.55);
+}
+
+.tl-trim-r {
+  right: 0;
+  border-radius: 0 4px 4px 0;
+  box-shadow: inset -2px 0 0 rgba(255, 255, 255, 0.55);
+}
+
+.tl-block:hover .tl-trim {
+  opacity: 1;
 }
 
 .tl-block-name {
