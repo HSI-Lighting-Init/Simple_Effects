@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::model::{Easing, LayerKind, LetterAnimation, LetterPreset, Project, Track};
+use crate::model::{Easing, Effect, LayerKind, LetterAnimation, LetterPreset, Project, Track};
 use crate::surface::{self, ResolvedShapeFrame, ResolvedSurface, ShapeState};
 
 /// A layer's transform fully resolved at one instant in time. Field names are
@@ -37,6 +37,54 @@ pub struct ResolvedLayer {
     /// Visible-face polygons when this is a `Shape3D` layer (for the selection
     /// wireframe + hit area). `None` for everything else.
     pub shape: Option<ResolvedShapeFrame>,
+    /// The layer's effect stack with every parameter sampled at this time, in
+    /// apply order. Empty when the layer has no effects.
+    pub effects: Vec<ResolvedEffect>,
+}
+
+/// One effect with its parameters resolved at a point in time (camelCase field
+/// names map straight onto the frontend renderer).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum ResolvedEffect {
+    Grayscale { amount: f32 },
+    Brightness { amount: f32 },
+    Contrast { amount: f32 },
+    Saturate { amount: f32 },
+    Blur { radius: f32 },
+    Hue { degrees: f32 },
+    Invert { amount: f32 },
+    Wipe { angle: f32, position: f32, softness: f32, invert: bool },
+}
+
+/// Resolve one effect's keyframed parameters at `t_ms`.
+fn resolve_effect(effect: &Effect, t_ms: u32) -> ResolvedEffect {
+    match effect {
+        Effect::Grayscale { amount } => {
+            ResolvedEffect::Grayscale { amount: sample_track(amount, t_ms) }
+        }
+        Effect::Brightness { amount } => {
+            ResolvedEffect::Brightness { amount: sample_track(amount, t_ms) }
+        }
+        Effect::Contrast { amount } => {
+            ResolvedEffect::Contrast { amount: sample_track(amount, t_ms) }
+        }
+        Effect::Saturate { amount } => {
+            ResolvedEffect::Saturate { amount: sample_track(amount, t_ms) }
+        }
+        Effect::Blur { radius } => ResolvedEffect::Blur { radius: sample_track(radius, t_ms) },
+        Effect::Hue { degrees } => ResolvedEffect::Hue { degrees: sample_track(degrees, t_ms) },
+        Effect::Invert { amount } => {
+            ResolvedEffect::Invert { amount: sample_track(amount, t_ms) }
+        }
+        Effect::Wipe { angle, position, softness, invert } => ResolvedEffect::Wipe {
+            angle: *angle,
+            position: sample_track(position, t_ms),
+            softness: sample_track(softness, t_ms),
+            invert: *invert,
+        },
+    }
 }
 
 /// One glyph's offset from its resting shaped position at a given time.
@@ -152,6 +200,7 @@ pub fn evaluate(
     project: &Project,
     t_ms: u32,
     letter_counts: &HashMap<u32, usize>,
+    text_dims: &HashMap<u32, (f32, f32)>,
 ) -> Vec<ResolvedLayer> {
     // Pass 1: resolve every Shape3D into a ShapeState so the images pinned to it
     // (which may appear before or after it in the list) can be projected.
@@ -199,17 +248,36 @@ pub fn evaluate(
                 _ => Vec::new(),
             };
 
-            // Shape3D → its visible-face frame. Image pinned to a shape → its decal.
+            // Shape3D → its visible-face frame.
             let shape = match &layer.kind {
                 LayerKind::Shape3D { .. } => shapes.get(&layer.id).map(surface::shape_frame),
                 _ => None,
             };
-            let decal = match &layer.kind {
-                LayerKind::Image { attach: Some(d), width, height, .. } => shapes
-                    .get(&d.shape_id)
-                    .map(|st| surface::decal_surface(st, d.face, d.u, d.v, d.scale, d.rotation, *width as f32, *height as f32)),
-                _ => None,
-            };
+            // A layer pinned to a shape (image or text) → its decal, with the
+            // placement sampled at this time so it can animate across the surface.
+            let decal = layer.attach.as_ref().and_then(|d| {
+                let dims = match &layer.kind {
+                    LayerKind::Image { width, height, .. } => Some((*width as f32, *height as f32)),
+                    LayerKind::Text { .. } => text_dims.get(&layer.id).copied(),
+                    _ => None,
+                };
+                match (shapes.get(&d.shape_id), dims) {
+                    (Some(st), Some((w, h))) => Some(surface::decal_surface(
+                        st,
+                        d.face,
+                        sample_track(&d.u, t_ms),
+                        sample_track(&d.v, t_ms),
+                        sample_track(&d.scale, t_ms),
+                        sample_track(&d.rotation, t_ms),
+                        w,
+                        h,
+                    )),
+                    _ => None,
+                }
+            });
+
+            let effects: Vec<ResolvedEffect> =
+                layer.effects.iter().map(|e| resolve_effect(e, t_ms)).collect();
 
             // A decal is baked into comp space, so its image-layer transform is
             // identity (only opacity still applies). Everything else uses its own
@@ -227,6 +295,7 @@ pub fn evaluate(
                 letters,
                 surface: decal,
                 shape,
+                effects,
             }
         })
         .collect()
@@ -342,7 +411,7 @@ mod tests {
     #[test]
     fn demo_evaluates() {
         let p = Project::demo();
-        let r = evaluate(&p, 0, &HashMap::new());
+        let r = evaluate(&p, 0, &HashMap::new(), &HashMap::new());
         assert_eq!(r.len(), 3);
         // Accent (id 2) starts fully transparent at t=0.
         let accent = r.iter().find(|l| l.id == 2).unwrap();

@@ -10,12 +10,15 @@ import type { Font } from "../bindings/Font";
 import type { Rgba } from "../bindings/Rgba";
 import type { LetterOverride } from "../bindings/LetterOverride";
 import type { SurfaceShape } from "../bindings/SurfaceShape";
-import type { Decal } from "../bindings/Decal";
 
 export const getProject = () => invoke<Project>("get_project");
 
 export const setProject = (project: Project) =>
   invoke<void>("set_project", { project });
+
+/** Set the composition resolution (workspace size / orientation). */
+export const setCompSize = (width: number, height: number) =>
+  invoke<Project>("set_comp_size", { width, height });
 
 /** Resolve every layer's transform at one playhead time (comp ms). */
 export const evaluateAt = (tMs: number) =>
@@ -94,13 +97,78 @@ export const setShapeRotationKey = (
   seedStart: boolean
 ) => invoke<Project>("set_shape_rotation_key", { layerId, axis, tMs, value, seedStart });
 
-/** Pin an image to a shape (decal), or detach with `shapeId = null`. */
-export const attachImage = (imageId: number, shapeId: number | null, face: number) =>
-  invoke<Project>("attach_image", { imageId, shapeId, face });
+/** Pin a layer (image or text) to a shape as a decal, or detach with `null`. */
+export const attachToShape = (layerId: number, shapeId: number | null, face: number) =>
+  invoke<Project>("attach_to_shape", { layerId, shapeId, face });
 
-/** Update a pinned image's placement (face + u/v/scale/rotation). */
-export const setDecal = (imageId: number, decal: Decal) =>
-  invoke<Project>("set_decal", { imageId, decal });
+/** Key one decal placement track ("u"|"v"|"scale"|"rotation") at a time. */
+export const keyDecal = (
+  layerId: number,
+  prop: "u" | "v" | "scale" | "rotation",
+  tMs: number,
+  value: number,
+  seedStart: boolean
+) => invoke<Project>("key_decal", { layerId, prop, tMs, value, seedStart });
+
+/** Set which box face a decal sits on (not keyframed). */
+export const setDecalFace = (layerId: number, face: number) =>
+  invoke<Project>("set_decal_face", { layerId, face });
+
+/** Append a default effect of the given kind to a layer's effect stack. */
+export const addEffect = (layerId: number, kind: string) =>
+  invoke<Project>("add_effect", { layerId, kind });
+
+/** Remove the effect at `index`. */
+export const removeEffect = (layerId: number, index: number) =>
+  invoke<Project>("remove_effect", { layerId, index });
+
+/** Key one effect parameter at a time (animates the effect). */
+export const keyEffect = (
+  layerId: number,
+  index: number,
+  param: "amount" | "radius" | "degrees" | "position" | "softness",
+  tMs: number,
+  value: number,
+  seedStart: boolean
+) => invoke<Project>("key_effect", { layerId, index, param, tMs, value, seedStart });
+
+/** Set a wipe effect's static fields (angle + invert). */
+export const setWipeStatic = (layerId: number, index: number, angle: number, invert: boolean) =>
+  invoke<Project>("set_wipe_static", { layerId, index, angle, invert });
+
+/** Write raw bytes (base64) to a path — used to save the exported video. */
+export const saveBinaryFile = (path: string, base64: string) =>
+  invoke<void>("save_binary_file", { path, base64 });
+
+/** The located ffmpeg path, or null if not installed (gates MP4 export). */
+export const ffmpegStatus = () => invoke<string | null>("ffmpeg_status");
+
+/** Install ffmpeg via winget (one-time). Resolves when found, rejects on error. */
+export const installFfmpeg = () => invoke<string>("install_ffmpeg");
+
+/**
+ * Save the recorded WebM as the chosen `format` ("webm" as-is, or "mp4" via
+ * ffmpeg H.264). `level` 1..5 = compression (1 near-original/largest,
+ * 5 highest-compression/smallest).
+ */
+export const exportVideo = (
+  base64: string,
+  path: string,
+  format: "mp4" | "webm",
+  level: number
+) => invoke<void>("export_video", { webmBase64: base64, path, format, level });
+
+/** Delete a layer (object). Shapes detach any layers pinned to them. */
+export const deleteLayer = (layerId: number) =>
+  invoke<Project>("delete_layer", { layerId });
+
+/** Delete all keyframes at one time on a layer (one timeline diamond). */
+export const deleteKeyframesAt = (layerId: number, tMs: number) =>
+  invoke<Project>("delete_keyframes_at", { layerId, tMs });
+
+/** Clear ALL keyframes on a layer, freezing it at its look at `tMs`. */
+export const clearKeyframes = (layerId: number, tMs: number) =>
+  invoke<Project>("clear_keyframes", { layerId, tMs });
 
 /**
  * Drop an image onto a shape's surface at comp point (x, y). Returns the new

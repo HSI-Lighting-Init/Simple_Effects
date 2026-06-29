@@ -21,6 +21,13 @@ function keyframeTimes(l: Layer): number[] {
   if (l.kind.kind === "text") tracks.push(l.kind.decompose);
   if (l.kind.kind === "shape3d")
     tracks.push(l.kind.rotation_x, l.kind.rotation_y, l.kind.rotation_z);
+  if (l.attach) tracks.push(l.attach.u, l.attach.v, l.attach.scale, l.attach.rotation);
+  for (const e of l.effects) {
+    if (e.kind === "blur") tracks.push(e.radius);
+    else if (e.kind === "hue") tracks.push(e.degrees);
+    else if (e.kind === "wipe") tracks.push(e.position, e.softness);
+    else tracks.push(e.amount);
+  }
   const set = new Set<number>();
   for (const tr of tracks) for (const k of tr.keys) set.add(k.timeMs);
   return [...set];
@@ -33,6 +40,9 @@ interface Props {
   onSelect: (id: number | null) => void;
   onToggleHidden: (id: number) => void;
   onSeek: (t: number) => void;
+  onDeleteLayer: (id: number) => void;
+  onDeleteKeyframe: (id: number, tMs: number) => void;
+  onLayerContextMenu: (id: number, x: number, y: number) => void;
 }
 
 export default function Timeline({
@@ -42,6 +52,9 @@ export default function Timeline({
   onSelect,
   onToggleHidden,
   onSeek,
+  onDeleteLayer,
+  onDeleteKeyframe,
+  onLayerContextMenu,
 }: Props) {
   const tracksRef = useRef<HTMLDivElement>(null);
   const dur = project.durationMs || 1;
@@ -96,6 +109,11 @@ export default function Timeline({
                 (l.hidden ? " hidden" : "")
               }
               onClick={() => onSelect(l.id)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.nativeEvent.stopPropagation();
+                onLayerContextMenu(l.id, e.clientX, e.clientY);
+              }}
             >
               <button
                 className={"dot" + (l.hidden ? "" : " on")}
@@ -107,6 +125,16 @@ export default function Timeline({
               />
               <span className="tl-label-name">{l.name}</span>
               <span className="tl-label-kind">{l.kind.kind}</span>
+              <button
+                className="tl-del"
+                title="Delete layer"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDeleteLayer(l.id);
+                }}
+              >
+                ✕
+              </button>
             </div>
           ))}
         </div>
@@ -124,10 +152,16 @@ export default function Timeline({
                 >
                   <span className="tl-block-name">{l.name}</span>
                   {keyframeTimes(l).map((tm, i) => (
-                    <span
+                    <button
                       key={i}
                       className="tl-kf"
+                      title="Delete keyframe"
                       style={{ left: `${((tm - l.startMs) / span) * 100}%` }}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteKeyframe(l.id, tm);
+                      }}
                     />
                   ))}
                 </div>

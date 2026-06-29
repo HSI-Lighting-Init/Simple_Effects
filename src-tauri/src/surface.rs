@@ -43,13 +43,18 @@ pub struct ResolvedShapeFrame {
     pub rotation_z: f32,
 }
 
-/// A pinned image projected onto the shape: paint-ready quads (empty if the
-/// decal faces away from the camera).
+/// A pinned layer projected onto the shape: paint-ready quads (empty if the
+/// decal faces away from the camera), plus the placement sampled at this time
+/// (for the inspector's sliders).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct ResolvedSurface {
     pub quads: Vec<SurfaceQuad>,
+    pub u: f32,
+    pub v: f32,
+    pub scale: f32,
+    pub rotation: f32,
 }
 
 /// One projected quad. Corners are in texture-UV order: `[(0,0),(1,0),(1,1),(0,1)]`.
@@ -255,10 +260,11 @@ pub fn decal_surface(
     img_w: f32,
     img_h: f32,
 ) -> ResolvedSurface {
-    match st.shape {
+    let quads = match st.shape {
         SurfaceShape::Box => decal_on_box(st, face, u, v, scale, rotation, img_w, img_h),
         SurfaceShape::Cylinder => decal_on_cylinder(st, u, v, scale, img_w, img_h),
-    }
+    };
+    ResolvedSurface { quads, u, v, scale, rotation }
 }
 
 /// A flat rectangular decal on one box face.
@@ -271,11 +277,11 @@ fn decal_on_box(
     rotation: f32,
     img_w: f32,
     img_h: f32,
-) -> ResolvedSurface {
+) -> Vec<SurfaceQuad> {
     let aspect = (img_h / img_w.max(1.0)).max(1e-3);
     let (o, ua, va, n) = box_face_basis(st, face.min(5));
     if rotated_normal_z(n, st) <= 0.0 {
-        return ResolvedSurface { quads: vec![] };
+        return vec![];
     }
     let center = add(add(o, scale3(ua, u)), scale3(va, v));
     let (ux, uy, ref_px) = (norm3(ua), norm3(va), len3(ua));
@@ -298,7 +304,7 @@ fn decal_on_box(
         let (hx, hy, hw) = bake_2d_point(p, st);
         corners.push(QuadVertex { hx, hy, hw, u: tu, v: tv });
     }
-    ResolvedSurface { quads: vec![SurfaceQuad { corners, opacity: 1.0, subdiv: 4 }] }
+    vec![SurfaceQuad { corners, opacity: 1.0, subdiv: 4 }]
 }
 
 /// A curved band decal that wraps around the cylinder. `scale` sizes it relative
@@ -312,7 +318,7 @@ fn decal_on_cylinder(
     scale: f32,
     img_w: f32,
     img_h: f32,
-) -> ResolvedSurface {
+) -> Vec<SurfaceQuad> {
     let height = 2.0 * st.hh;
     let band_h = (scale * height).max(1.0);
     let aspect_w = (img_w / img_h.max(1.0)).max(1e-3); // width / height
@@ -351,7 +357,7 @@ fn decal_on_cylinder(
         }
         quads.push(SurfaceQuad { corners, opacity: 1.0, subdiv: 2 });
     }
-    ResolvedSurface { quads }
+    quads
 }
 
 /// Project a local point to comp-space homogeneous coords (rotation + perspective

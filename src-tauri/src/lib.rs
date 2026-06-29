@@ -17,8 +17,8 @@ use tauri::{Manager, State};
 
 use eval::ResolvedLayer;
 use model::{
-    Decal, Easing, Keyframe, Layer, LayerKind, LetterAnimation, LetterOverride, Project, Rgba,
-    SurfaceShape, Track, Transform, TransformEdit,
+    Decal, Easing, Effect, Keyframe, Layer, LayerKind, LetterAnimation, LetterOverride, Project,
+    Rgba, SurfaceShape, Track, Transform, TransformEdit,
 };
 use text::{Font, ShapedText};
 
@@ -126,7 +126,13 @@ fn evaluate_at(state: State<AppState>, t_ms: u32) -> Vec<ResolvedLayer> {
     let shaped = state.shaped.lock().unwrap();
     let counts: HashMap<u32, usize> =
         shaped.iter().map(|(id, st)| (*id, st.glyphs.len())).collect();
-    eval::evaluate(&project, t_ms, &counts)
+    // Text layers pinned to a shape need their shaped bounding box (for the
+    // decal's aspect ratio): width × (ascender + descender).
+    let text_dims: HashMap<u32, (f32, f32)> = shaped
+        .iter()
+        .map(|(id, st)| (*id, (st.width, st.ascender + st.descender)))
+        .collect();
+    eval::evaluate(&project, t_ms, &counts, &text_dims)
 }
 
 /// Hand the shaped glyphs of a text layer to the frontend so it can draw the
@@ -162,6 +168,8 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
         },
         transform: Transform::at(cx, cy),
         hidden: false,
+        attach: None,
+        effects: vec![],
     });
     state.shaped.lock().unwrap().insert(next_id, shaped);
     project.clone()
@@ -291,9 +299,11 @@ fn add_image_layer(state: State<AppState>, path: String) -> Project {
         name,
         start_ms: 0,
         end_ms,
-        kind: LayerKind::Image { src: path, width: iw, height: ih, attach: None },
+        kind: LayerKind::Image { src: path, width: iw, height: ih },
         transform,
         hidden: false,
+        attach: None,
+        effects: vec![],
     });
     project.clone()
 }
@@ -348,6 +358,17 @@ fn edit_keyframes(
     upsert_key(&mut tf.rotation, t_ms, edit.rotation, seed_start, start);
     upsert_key(&mut tf.opacity, t_ms, edit.opacity, seed_start, start);
     Ok(project.clone())
+}
+
+/// Set the composition resolution (workspace size — landscape/portrait/square).
+/// Layers keep their positions. Undoable.
+#[tauri::command]
+fn set_comp_size(state: State<AppState>, width: u32, height: u32) -> Project {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    project.width = width.clamp(16, 8192);
+    project.height = height.clamp(16, 8192);
+    project.clone()
 }
 
 /// Show/hide a layer manually (independent of its time range). Undoable.
@@ -469,6 +490,8 @@ fn add_shape_layer(state: State<AppState>, shape: SurfaceShape) -> Project {
         },
         transform: Transform::at(cx, cy),
         hidden: false,
+        attach: None,
+        effects: vec![],
     });
     project.clone()
 }
@@ -554,19 +577,18 @@ fn set_shape_rotation_key(
     Ok(project.clone())
 }
 
-/// Pin an image to a `Shape3D` (so it renders as a decal), or with
-/// `shape_id = None` detach it back to a flat image. Defaults the placement to
-/// the centre of the chosen face. Undoable.
+/// Pin a layer (image or text) to a `Shape3D` so it renders as a decal, or with
+/// `shape_id = None` detach it back to flat. Defaults the placement to the centre
+/// of the chosen face (cylinders wrap full-height). Undoable.
 #[tauri::command]
-fn attach_image(
+fn attach_to_shape(
     state: State<AppState>,
-    image_id: u32,
+    layer_id: u32,
     shape_id: Option<u32>,
     face: u32,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    // Cylinders wrap full-height by default; box faces use a half-face decal.
     let scale = match shape_id {
         Some(sid) if is_cylinder(&project, sid) => 1.0,
         _ => 0.5,
@@ -574,14 +596,12 @@ fn attach_image(
     let layer = project
         .layers
         .iter_mut()
-        .find(|l| l.id == image_id)
+        .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
-    match &mut layer.kind {
-        LayerKind::Image { attach, .. } => {
-            *attach = shape_id.map(|sid| Decal { shape_id: sid, face, scale, ..Decal::default() });
-        }
-        _ => return Err("not an image layer".into()),
+    if !matches!(layer.kind, LayerKind::Image { .. } | LayerKind::Text { .. }) {
+        return Err("only image or text layers can be pinned".into());
     }
+    layer.attach = shape_id.map(|sid| Decal::new(sid, face, scale));
     Ok(project.clone())
 }
 
@@ -593,12 +613,12 @@ fn is_cylinder(project: &Project, shape_id: u32) -> bool {
     })
 }
 
-/// Try to drop an image onto a shape's surface at comp point `(x, y)`. If the
-/// point is over a (front-facing) shape surface, the image is pinned there
-/// (face + u/v computed from the geometry), preserving its current size/rotation;
-/// returns the new project. `None` = the point wasn't over any shape (the caller
-/// then treats the drag as an ordinary move). Used for both dropping a flat image
-/// and dragging a decal's handle across the surface. Undoable.
+/// Try to drop a layer onto a shape's surface at comp point `(x, y)`. If the
+/// point is over a (front-facing) shape surface, the layer is pinned there and
+/// its `u`/`v` placement is keyed at `t_ms` (so dragging across the surface at
+/// different times animates it). Returns the new project, or `None` if the point
+/// wasn't over any shape (the caller treats the drag as an ordinary move). Used
+/// for dropping a flat layer and for dragging a decal's handle. Undoable.
 #[tauri::command]
 fn drop_image_on_shape(
     state: State<AppState>,
@@ -619,49 +639,424 @@ fn drop_image_on_shape(
         }
     }
     let (shape_id, face, u, v) = hit?;
-    let is_image = project
-        .layers
-        .iter()
-        .any(|l| l.id == image_id && matches!(l.kind, LayerKind::Image { .. }));
-    if !is_image {
+    let pinnable = project.layers.iter().any(|l| {
+        l.id == image_id && matches!(l.kind, LayerKind::Image { .. } | LayerKind::Text { .. })
+    });
+    if !pinnable {
         return None;
     }
-    // First-time pin: cylinders wrap full-height (1.0), boxes use a half-face
-    // decal (0.5). Re-dropping an existing decal keeps its current size/rotation.
     let default_scale = if is_cylinder(&project, shape_id) { 1.0 } else { 0.5 };
+    let start = project.layers.iter().find(|l| l.id == image_id).map(|l| l.start_ms).unwrap_or(0);
     state.snapshot(&project);
-    if let Some(img) = project.layers.iter_mut().find(|l| l.id == image_id) {
-        if let LayerKind::Image { attach, .. } = &mut img.kind {
-            let (scale, rotation) = attach
-                .as_ref()
-                .map(|a| (a.scale, a.rotation))
-                .unwrap_or((default_scale, 0.0));
-            *attach = Some(Decal { shape_id, face, u, v, scale, rotation });
-        }
-    }
+    let layer = project.layers.iter_mut().find(|l| l.id == image_id)?;
+    // Create the decal on first pin, or re-point an existing one to the new
+    // shape/face, then key u/v at the drop time.
+    let decal = layer.attach.get_or_insert_with(|| Decal::new(shape_id, face, default_scale));
+    decal.shape_id = shape_id;
+    decal.face = face;
+    upsert_key(&mut decal.u, t_ms, Some(u), true, start);
+    upsert_key(&mut decal.v, t_ms, Some(v), true, start);
     Some(project.clone())
 }
 
-/// Update a pinned image's placement on its shape (face + u/v/scale/rotation).
+/// Key one of a decal's placement tracks (`"u"`, `"v"`, `"scale"`, `"rotation"`)
+/// at `t_ms`. This is how moving/sizing a decal on the surface becomes animation.
+/// `seed_start=true` drops a keyframe at the layer start holding the old value.
 /// Undoable.
 #[tauri::command]
-fn set_decal(state: State<AppState>, image_id: u32, decal: Decal) -> Result<Project, String> {
+fn key_decal(
+    state: State<AppState>,
+    layer_id: u32,
+    prop: String,
+    t_ms: u32,
+    value: f32,
+    seed_start: bool,
+) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
     let layer = project
         .layers
         .iter_mut()
-        .find(|l| l.id == image_id)
+        .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
-    match &mut layer.kind {
-        LayerKind::Image { attach, .. } => {
-            if attach.is_none() {
-                return Err("image is not pinned to a shape".into());
-            }
-            *attach = Some(decal);
-        }
-        _ => return Err("not an image layer".into()),
+    let start = layer.start_ms;
+    let decal = layer.attach.as_mut().ok_or("layer is not pinned to a shape")?;
+    let track = match prop.as_str() {
+        "u" => &mut decal.u,
+        "v" => &mut decal.v,
+        "scale" => &mut decal.scale,
+        "rotation" => &mut decal.rotation,
+        _ => return Err("prop must be u, v, scale or rotation".into()),
+    };
+    upsert_key(track, t_ms, Some(value), seed_start, start);
+    Ok(project.clone())
+}
+
+/// Set which box face a decal sits on (not keyframed). Undoable.
+#[tauri::command]
+fn set_decal_face(state: State<AppState>, layer_id: u32, face: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let decal = layer.attach.as_mut().ok_or("layer is not pinned to a shape")?;
+    decal.face = face;
+    Ok(project.clone())
+}
+
+/// The keyframeable Track of an effect for a parameter name, if it has one.
+fn effect_track_mut<'a>(e: &'a mut Effect, param: &str) -> Option<&'a mut Track> {
+    match (e, param) {
+        (Effect::Grayscale { amount }, "amount") => Some(amount),
+        (Effect::Brightness { amount }, "amount") => Some(amount),
+        (Effect::Contrast { amount }, "amount") => Some(amount),
+        (Effect::Saturate { amount }, "amount") => Some(amount),
+        (Effect::Blur { radius }, "radius") => Some(radius),
+        (Effect::Hue { degrees }, "degrees") => Some(degrees),
+        (Effect::Invert { amount }, "amount") => Some(amount),
+        (Effect::Wipe { position, .. }, "position") => Some(position),
+        (Effect::Wipe { softness, .. }, "softness") => Some(softness),
+        _ => None,
     }
+}
+
+/// Append a default effect of the named kind to a layer's effect stack. Undoable.
+#[tauri::command]
+fn add_effect(state: State<AppState>, layer_id: u32, kind: String) -> Result<Project, String> {
+    let effect = Effect::default_of(&kind).ok_or("unknown effect kind")?;
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    layer.effects.push(effect);
+    Ok(project.clone())
+}
+
+/// Remove the effect at `index` from a layer's stack. Undoable.
+#[tauri::command]
+fn remove_effect(state: State<AppState>, layer_id: u32, index: usize) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    if index < layer.effects.len() {
+        layer.effects.remove(index);
+    }
+    Ok(project.clone())
+}
+
+/// Key one parameter (`amount`/`radius`/`degrees`/`position`/`softness`) of the
+/// effect at `index` at `t_ms`. This is how an effect animates. Undoable.
+#[tauri::command]
+fn key_effect(
+    state: State<AppState>,
+    layer_id: u32,
+    index: usize,
+    param: String,
+    t_ms: u32,
+    value: f32,
+    seed_start: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let start = layer.start_ms;
+    let effect = layer.effects.get_mut(index).ok_or("effect index out of range")?;
+    let track = effect_track_mut(effect, &param).ok_or("effect has no such parameter")?;
+    upsert_key(track, t_ms, Some(value), seed_start, start);
+    Ok(project.clone())
+}
+
+/// Set a wipe effect's static fields: `angle` (degrees) and `invert`. Undoable.
+#[tauri::command]
+fn set_wipe_static(
+    state: State<AppState>,
+    layer_id: u32,
+    index: usize,
+    angle: f32,
+    invert: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match layer.effects.get_mut(index) {
+        Some(Effect::Wipe { angle: a, invert: inv, .. }) => {
+            *a = angle;
+            *inv = invert;
+        }
+        _ => return Err("not a wipe effect".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Write raw bytes (base64-encoded over IPC) to an absolute path — used to save
+/// the exported video file.
+#[tauri::command]
+fn save_binary_file(path: String, base64: String) -> Result<(), String> {
+    let bytes = STANDARD.decode(base64.as_bytes()).map_err(|e| format!("decode: {e}"))?;
+    std::fs::write(&path, bytes).map_err(|e| format!("write {path}: {e}"))
+}
+
+/// Recursively look for an executable named `name` under `dir`, up to `depth`.
+fn find_exe(dir: &std::path::Path, name: &str, depth: u32) -> Option<std::path::PathBuf> {
+    if depth == 0 {
+        return None;
+    }
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(found) = find_exe(&p, name, depth - 1) {
+                return Some(found);
+            }
+        } else if p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case(name))
+            .unwrap_or(false)
+        {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Locate an `ffmpeg` executable. Checks PATH first, then the locations winget
+/// installs to (its running-process PATH isn't refreshed after an install), then
+/// a couple of common spots.
+fn find_ffmpeg() -> Option<std::path::PathBuf> {
+    // On PATH?
+    if std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return Some("ffmpeg".into());
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let base = std::path::Path::new(&local).join("Microsoft").join("WinGet");
+        let link = base.join("Links").join("ffmpeg.exe");
+        if link.exists() {
+            return Some(link);
+        }
+        if let Some(p) = find_exe(&base.join("Packages"), "ffmpeg.exe", 5) {
+            return Some(p);
+        }
+    }
+    for cand in [
+        "C:\\ffmpeg\\bin\\ffmpeg.exe",
+        "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
+    ] {
+        let p = std::path::PathBuf::from(cand);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Report the located ffmpeg path (or `None`) so the UI can offer MP4 export.
+#[tauri::command]
+fn ffmpeg_status() -> Option<String> {
+    find_ffmpeg().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Install ffmpeg via winget (blocking — may take a while). Returns once it's
+/// found, or the winget error.
+#[tauri::command]
+fn install_ffmpeg() -> Result<String, String> {
+    let out = std::process::Command::new("winget")
+        .args([
+            "install",
+            "--id",
+            "Gyan.FFmpeg",
+            "-e",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+            "--disable-interactivity",
+        ])
+        .output()
+        .map_err(|e| format!("winget not available: {e}"))?;
+    if find_ffmpeg().is_some() {
+        Ok("ffmpeg installed".into())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        Err(if err.trim().is_empty() {
+            "winget finished but ffmpeg wasn't found".into()
+        } else {
+            err.into_owned()
+        })
+    }
+}
+
+/// Save the exported video. `webm_base64` is the recorded WebM. `format` "webm"
+/// writes it as-is; "mp4" transcodes to H.264 via ffmpeg. `level` 1..5 sets the
+/// compression (1 = near-original / largest, 5 = highest compression / smallest).
+#[tauri::command]
+fn export_video(
+    webm_base64: String,
+    path: String,
+    format: String,
+    level: u8,
+) -> Result<(), String> {
+    let bytes = STANDARD
+        .decode(webm_base64.as_bytes())
+        .map_err(|e| format!("decode: {e}"))?;
+    if format == "webm" {
+        return std::fs::write(&path, &bytes).map_err(|e| format!("write {path}: {e}"));
+    }
+    // MP4 (H.264) via ffmpeg.
+    let ffmpeg = find_ffmpeg().ok_or(
+        "MP4 needs ffmpeg, which isn't installed. Install it from the export dialog, \
+         or choose WebM.",
+    )?;
+    let crf = match level {
+        1 => "16",
+        2 => "20",
+        3 => "23",
+        4 => "27",
+        _ => "32",
+    };
+    let tmp = std::env::temp_dir().join(format!("simple_effects_export_{}.webm", std::process::id()));
+    std::fs::write(&tmp, &bytes).map_err(|e| format!("temp write: {e}"))?;
+    let result = std::process::Command::new(&ffmpeg)
+        .args(["-y", "-i"])
+        .arg(&tmp)
+        .args([
+            "-c:v", "libx264", "-crf", crf, "-preset", "medium", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+        ])
+        .arg(&path)
+        .output();
+    let _ = std::fs::remove_file(&tmp);
+    let out = result.map_err(|e| format!("run ffmpeg: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "ffmpeg failed: {}",
+            err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error")
+        ));
+    }
+    Ok(())
+}
+
+/// Visit every keyframeable Track on a layer (transform + kind-specific + decal
+/// placement + effect params), so delete/clear can act on all of them at once.
+fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
+    let tf = &mut layer.transform;
+    f(&mut tf.x);
+    f(&mut tf.y);
+    f(&mut tf.scale_x);
+    f(&mut tf.scale_y);
+    f(&mut tf.rotation);
+    f(&mut tf.opacity);
+    match &mut layer.kind {
+        LayerKind::Text { decompose, .. } => f(decompose),
+        LayerKind::Shape3D { rotation_x, rotation_y, rotation_z, .. } => {
+            f(rotation_x);
+            f(rotation_y);
+            f(rotation_z);
+        }
+        _ => {}
+    }
+    if let Some(d) = &mut layer.attach {
+        f(&mut d.u);
+        f(&mut d.v);
+        f(&mut d.scale);
+        f(&mut d.rotation);
+    }
+    for e in &mut layer.effects {
+        match e {
+            Effect::Grayscale { amount }
+            | Effect::Brightness { amount }
+            | Effect::Contrast { amount }
+            | Effect::Saturate { amount }
+            | Effect::Invert { amount } => f(amount),
+            Effect::Blur { radius } => f(radius),
+            Effect::Hue { degrees } => f(degrees),
+            Effect::Wipe { position, softness, .. } => {
+                f(position);
+                f(softness);
+            }
+        }
+    }
+}
+
+/// Delete a layer (object). If it's a shape, any layers pinned to it are detached
+/// back to flat. Undoable.
+#[tauri::command]
+fn delete_layer(state: State<AppState>, layer_id: u32) -> Project {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let is_shape = project
+        .layers
+        .iter()
+        .any(|l| l.id == layer_id && matches!(l.kind, LayerKind::Shape3D { .. }));
+    if is_shape {
+        for l in &mut project.layers {
+            if l.attach.as_ref().map_or(false, |d| d.shape_id == layer_id) {
+                l.attach = None;
+            }
+        }
+    }
+    project.layers.retain(|l| l.id != layer_id);
+    state.shaped.lock().unwrap().remove(&layer_id);
+    project.clone()
+}
+
+/// Remove every keyframe at exactly `t_ms` across all of a layer's tracks
+/// (deleting the "keys" the timeline shows as one diamond). Undoable.
+#[tauri::command]
+fn delete_keyframes_at(
+    state: State<AppState>,
+    layer_id: u32,
+    t_ms: u32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    for_each_track_mut(layer, |tr| tr.keys.retain(|k| k.time_ms != t_ms));
+    Ok(project.clone())
+}
+
+/// Clear ALL keyframes on a layer (delete its animation tracks), freezing each
+/// property at its value at `t_ms` so the look doesn't jump. Undoable.
+#[tauri::command]
+fn clear_keyframes(state: State<AppState>, layer_id: u32, t_ms: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    for_each_track_mut(layer, |tr| {
+        tr.default = eval::sample_track(tr, t_ms);
+        tr.keys.clear();
+    });
     Ok(project.clone())
 }
 
@@ -735,9 +1130,22 @@ pub fn run() {
             add_shape_layer,
             set_shape_params,
             set_shape_rotation_key,
-            attach_image,
-            set_decal,
+            attach_to_shape,
+            key_decal,
+            set_decal_face,
             drop_image_on_shape,
+            add_effect,
+            remove_effect,
+            key_effect,
+            set_wipe_static,
+            save_binary_file,
+            delete_layer,
+            delete_keyframes_at,
+            clear_keyframes,
+            set_comp_size,
+            ffmpeg_status,
+            install_ffmpeg,
+            export_video,
             add_text_layer,
             set_text_content,
             set_text_color,

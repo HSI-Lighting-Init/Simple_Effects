@@ -1,6 +1,6 @@
 // Right-hand inspector. For text layers it edits content (Arabic/RTL aware),
 // font, colour, size (height), and the per-letter animation preset + timing.
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { Layer } from "../bindings/Layer";
 import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { LetterPreset } from "../bindings/LetterPreset";
@@ -8,6 +8,7 @@ import type { Font } from "../bindings/Font";
 import type { Rgba } from "../bindings/Rgba";
 import type { SurfaceShape } from "../bindings/SurfaceShape";
 import type { Decal } from "../bindings/Decal";
+import type { ResolvedEffect } from "../bindings/ResolvedEffect";
 
 const PRESETS: { value: LetterPreset | "none"; label: string }[] = [
   { value: "none", label: "None (static)" },
@@ -400,34 +401,50 @@ function ShapeInspector({
   );
 }
 
-// Controls for an image layer: pin it to a 3D shape (decal) and place it on the
-// surface. When flat (unpinned) there's nothing to configure here yet.
-function ImageInspector({
+// Controls for a layer (image OR text) pinned to a 3D shape: choose the shape +
+// face, and place it on the surface. Placement is keyframeable — the sliders key
+// the value at the playhead, so moving the playhead and re-placing animates the
+// decal across the surface (in-betweens filled automatically). The live values
+// come from `placement` (sampled at the playhead by the evaluator).
+function DecalControls({
   layerId,
   attach,
+  placement,
+  visible,
   shapes,
-  onAttachImage,
-  onSetDecal,
+  onAttachToShape,
+  onKeyDecal,
+  onSetDecalFace,
+  onRevealFace,
+  onDecalKeyAll,
 }: {
   layerId: number;
   attach: Decal | null;
+  placement: { u: number; v: number; scale: number; rotation: number } | null;
+  visible: boolean;
   shapes: ShapeRef[];
-  onAttachImage: (imageId: number, shapeId: number | null, face: number) => void;
-  onSetDecal: (imageId: number, decal: Decal) => void;
+  onAttachToShape: (layerId: number, shapeId: number | null, face: number) => void;
+  onKeyDecal: (
+    layerId: number,
+    prop: "u" | "v" | "scale" | "rotation",
+    value: number,
+    seedStart: boolean
+  ) => void;
+  onSetDecalFace: (layerId: number, face: number) => void;
+  onRevealFace: (shapeId: number, face: number) => void;
+  onDecalKeyAll: (layerId: number) => void;
 }) {
   const parent = attach ? shapes.find((s) => s.id === attach.shapeId) ?? null : null;
   const isBox = parent?.shape === "box";
-  const patch = (p: Partial<Decal>) => {
-    if (attach) onSetDecal(layerId, { ...attach, ...p });
-  };
+  const p = placement ?? { u: 0.5, v: 0.5, scale: 0.5, rotation: 0 };
 
   return (
     <div className="insp-body">
-      <div className="insp-sep">3D surface</div>
+      <div className="insp-sep">On 3D surface</div>
       {shapes.length === 0 && (
         <p className="insp-hint">
-          Add a Box or Cylinder (＋ Box / ＋ Cylinder), then pin this image to it
-          to wrap it onto the surface.
+          Add a Box or Cylinder, then pin this here — or right-click the shape →
+          Insert — to map it onto the surface.
         </p>
       )}
       {shapes.length > 0 && (
@@ -437,7 +454,7 @@ function ImageInspector({
             value={attach ? String(attach.shapeId) : "none"}
             onChange={(e) => {
               const v = e.target.value;
-              onAttachImage(layerId, v === "none" ? null : Number(v), attach?.face ?? 0);
+              onAttachToShape(layerId, v === "none" ? null : Number(v), attach?.face ?? 0);
             }}
           >
             <option value="none">Flat (not pinned)</option>
@@ -457,7 +474,7 @@ function ImageInspector({
               Face
               <select
                 value={String(attach.face)}
-                onChange={(e) => patch({ face: Number(e.target.value) })}
+                onChange={(e) => onSetDecalFace(layerId, Number(e.target.value))}
               >
                 {FACE_LABELS.map((lbl, i) => (
                   <option key={lbl} value={String(i)}>
@@ -467,60 +484,260 @@ function ImageInspector({
               </select>
             </label>
           )}
+          {isBox && (
+            <button
+              className="insp-btn"
+              onClick={() => onRevealFace(attach.shapeId, attach.face)}
+            >
+              ⟳ Turn box to this face
+            </button>
+          )}
+          {isBox && !visible && (
+            <p className="insp-hint">
+              This face ({FACE_LABELS[attach.face] ?? attach.face}) is turned away
+              from the camera, so it isn't drawn. Click “Turn box to this face”, or
+              rotate the box, to bring it into view.
+            </p>
+          )}
           <p className="insp-hint">
-            Drag the dot on the canvas to slide it across the surface.
-            {isBox ? " Size and spin it here:" : " It wraps around the cylinder — size it here:"}
+            On the canvas: drag the round handle to move it, the square to size
+            it. Move the playhead and re-place to animate — in-betweens are built
+            for you.
           </p>
           <label className="insp-field">
-            {isBox ? "Size" : "Height (wrap)"} {attach.scale.toFixed(2)}
+            {isBox ? "Size" : "Height (wrap)"} {p.scale.toFixed(2)}
             <input
               type="range"
               min={0.05}
-              max={2}
+              max={4}
               step={0.01}
-              value={attach.scale}
-              onChange={(e) => patch({ scale: Number(e.target.value) })}
+              value={p.scale}
+              onChange={(e) => onKeyDecal(layerId, "scale", Number(e.target.value), false)}
             />
           </label>
           {isBox && (
             <label className="insp-field">
-              Rotation {Math.round(attach.rotation)}°
+              Rotation {Math.round(p.rotation)}°
               <input
                 type="range"
                 min={-180}
                 max={180}
                 step={1}
-                value={attach.rotation}
-                onChange={(e) => patch({ rotation: Number(e.target.value) })}
+                value={p.rotation}
+                onChange={(e) => onKeyDecal(layerId, "rotation", Number(e.target.value), false)}
               />
             </label>
           )}
           <div className="row2">
             <label className="insp-field">
-              Across (u) {attach.u.toFixed(2)}
+              Across (u) {p.u.toFixed(2)}
               <input
                 type="range"
                 min={0}
                 max={1}
                 step={0.01}
-                value={attach.u}
-                onChange={(e) => patch({ u: Number(e.target.value) })}
+                value={p.u}
+                onChange={(e) => onKeyDecal(layerId, "u", Number(e.target.value), false)}
               />
             </label>
             <label className="insp-field">
-              Down (v) {attach.v.toFixed(2)}
+              Down (v) {p.v.toFixed(2)}
               <input
                 type="range"
                 min={0}
                 max={1}
                 step={0.01}
-                value={attach.v}
-                onChange={(e) => patch({ v: Number(e.target.value) })}
+                value={p.v}
+                onChange={(e) => onKeyDecal(layerId, "v", Number(e.target.value), false)}
               />
             </label>
           </div>
+          <button className="insp-btn" onClick={() => onDecalKeyAll(layerId)}>
+            ◆ Key placement here
+          </button>
         </>
       )}
+    </div>
+  );
+}
+
+const EFFECT_TYPES: { kind: string; label: string }[] = [
+  { kind: "grayscale", label: "Black & white" },
+  { kind: "brightness", label: "Brightness" },
+  { kind: "contrast", label: "Contrast" },
+  { kind: "saturate", label: "Saturation" },
+  { kind: "blur", label: "Blur" },
+  { kind: "hue", label: "Hue shift" },
+  { kind: "invert", label: "Invert" },
+  { kind: "wipe", label: "Wipe / fade" },
+];
+
+type EffectParam = "amount" | "radius" | "degrees" | "position" | "softness";
+type KeyEffect = (
+  layerId: number,
+  index: number,
+  param: EffectParam,
+  value: number,
+  seedStart: boolean
+) => void;
+type SetWipeStatic = (layerId: number, index: number, angle: number, invert: boolean) => void;
+
+function effSlider(
+  label: string,
+  value: number,
+  min: number,
+  max: number,
+  step: number,
+  onChange: (v: number) => void
+) {
+  return (
+    <label className="insp-field">
+      {label} {value.toFixed(2)}
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+    </label>
+  );
+}
+
+// One row of the effect stack — the controls vary by effect kind. Live values
+// come from the sampled effect; the sliders key at the playhead so effects
+// animate (e.g. a wipe's Position swept 0→1).
+function EffectRow({
+  layerId,
+  index,
+  eff,
+  onRemove,
+  onKey,
+  onSetWipeStatic,
+}: {
+  layerId: number;
+  index: number;
+  eff: ResolvedEffect;
+  onRemove: (layerId: number, index: number) => void;
+  onKey: KeyEffect;
+  onSetWipeStatic: SetWipeStatic;
+}) {
+  const label = EFFECT_TYPES.find((t) => t.kind === eff.kind)?.label ?? eff.kind;
+  const key = (param: EffectParam, value: number) => onKey(layerId, index, param, value, false);
+  let body: ReactNode = null;
+  switch (eff.kind) {
+    case "grayscale":
+    case "invert":
+      body = effSlider("Amount", eff.amount, 0, 1, 0.01, (v) => key("amount", v));
+      break;
+    case "brightness":
+      body = effSlider("Brightness", eff.amount, 0, 3, 0.01, (v) => key("amount", v));
+      break;
+    case "contrast":
+      body = effSlider("Contrast", eff.amount, 0, 3, 0.01, (v) => key("amount", v));
+      break;
+    case "saturate":
+      body = effSlider("Saturation", eff.amount, 0, 3, 0.01, (v) => key("amount", v));
+      break;
+    case "blur":
+      body = effSlider("Radius (px)", eff.radius, 0, 50, 0.5, (v) => key("radius", v));
+      break;
+    case "hue":
+      body = effSlider("Degrees", eff.degrees, 0, 360, 1, (v) => key("degrees", v));
+      break;
+    case "wipe":
+      body = (
+        <>
+          {effSlider("Position", eff.position, 0, 1, 0.01, (v) => key("position", v))}
+          {effSlider("Softness", eff.softness, 0, 1, 0.01, (v) => key("softness", v))}
+          {effSlider("Angle", eff.angle, 0, 360, 1, (v) =>
+            onSetWipeStatic(layerId, index, v, eff.invert)
+          )}
+          <label className="surf-face">
+            <input
+              type="checkbox"
+              checked={eff.invert}
+              onChange={(e) => onSetWipeStatic(layerId, index, eff.angle, e.target.checked)}
+            />
+            Invert (flip side)
+          </label>
+          <p className="insp-hint">
+            Keyframe <b>Position</b> (move the playhead, drag) to sweep the fade across.
+          </p>
+        </>
+      );
+      break;
+  }
+  return (
+    <div className="effect-row">
+      <div className="effect-head">
+        <span>{label}</span>
+        <button
+          className="insp-btn tiny"
+          title="Remove effect"
+          onClick={() => onRemove(layerId, index)}
+        >
+          ✕
+        </button>
+      </div>
+      {body}
+    </div>
+  );
+}
+
+// The effect stack for a layer: add from the dropdown, then each effect's
+// keyframeable controls. Reused by the isolated Effect Editor overlay.
+export function EffectsSection({
+  layerId,
+  effects,
+  onAddEffect,
+  onRemoveEffect,
+  onKeyEffect,
+  onSetWipeStatic,
+}: {
+  layerId: number;
+  effects: ResolvedEffect[];
+  onAddEffect: (layerId: number, kind: string) => void;
+  onRemoveEffect: (layerId: number, index: number) => void;
+  onKeyEffect: KeyEffect;
+  onSetWipeStatic: SetWipeStatic;
+}) {
+  return (
+    <div className="insp-body">
+      <div className="insp-sep">Effects</div>
+      <label className="insp-field">
+        Add effect
+        <select
+          value=""
+          onChange={(e) => {
+            if (e.target.value) onAddEffect(layerId, e.target.value);
+          }}
+        >
+          <option value="">＋ Add…</option>
+          {EFFECT_TYPES.map((t) => (
+            <option key={t.kind} value={t.kind}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {effects.length === 0 && (
+        <p className="insp-hint">
+          Add black &amp; white, blur, a left→right wipe, brightness… they stack in order.
+        </p>
+      )}
+      {effects.map((eff, i) => (
+        <EffectRow
+          key={i}
+          layerId={layerId}
+          index={i}
+          eff={eff}
+          onRemove={onRemoveEffect}
+          onKey={onKeyEffect}
+          onSetWipeStatic={onSetWipeStatic}
+        />
+      ))}
     </div>
   );
 }
@@ -530,6 +747,13 @@ interface Props {
   decomposed: boolean;
   shapes: ShapeRef[];
   shapeAngles: { x: number; y: number; z: number } | null;
+  decalPlacement: { u: number; v: number; scale: number; rotation: number } | null;
+  decalVisible: boolean;
+  resolvedEffects: ResolvedEffect[];
+  onAddEffect: (layerId: number, kind: string) => void;
+  onRemoveEffect: (layerId: number, index: number) => void;
+  onKeyEffect: KeyEffect;
+  onSetWipeStatic: SetWipeStatic;
   onShapeParams: (layerId: number, p: ShapeParams) => void;
   onShapeRotKey: (
     layerId: number,
@@ -537,8 +761,16 @@ interface Props {
     value: number,
     seedStart: boolean
   ) => void;
-  onAttachImage: (imageId: number, shapeId: number | null, face: number) => void;
-  onSetDecal: (imageId: number, decal: Decal) => void;
+  onAttachToShape: (layerId: number, shapeId: number | null, face: number) => void;
+  onKeyDecal: (
+    layerId: number,
+    prop: "u" | "v" | "scale" | "rotation",
+    value: number,
+    seedStart: boolean
+  ) => void;
+  onSetDecalFace: (layerId: number, face: number) => void;
+  onRevealFace: (shapeId: number, face: number) => void;
+  onDecalKeyAll: (layerId: number) => void;
   onContent: (layerId: number, content: string, size: number) => void;
   onColor: (layerId: number, color: Rgba) => void;
   onFont: (layerId: number, font: Font) => void;
@@ -553,10 +785,20 @@ export default function Inspector({
   decomposed,
   shapes,
   shapeAngles,
+  decalPlacement,
+  decalVisible,
+  resolvedEffects,
+  onAddEffect,
+  onRemoveEffect,
+  onKeyEffect,
+  onSetWipeStatic,
   onShapeParams,
   onShapeRotKey,
-  onAttachImage,
-  onSetDecal,
+  onAttachToShape,
+  onKeyDecal,
+  onSetDecalFace,
+  onRevealFace,
+  onDecalKeyAll,
   onContent,
   onColor,
   onFont,
@@ -565,6 +807,20 @@ export default function Inspector({
   onClearParts,
   onDecomposeKey,
 }: Props) {
+  const decalControls = layer && (layer.kind.kind === "image" || layer.kind.kind === "text") && (
+    <DecalControls
+      layerId={layer.id}
+      attach={layer.attach}
+      placement={decalPlacement}
+      visible={decalVisible}
+      shapes={shapes}
+      onAttachToShape={onAttachToShape}
+      onKeyDecal={onKeyDecal}
+      onSetDecalFace={onSetDecalFace}
+      onRevealFace={onRevealFace}
+      onDecalKeyAll={onDecalKeyAll}
+    />
+  );
   return (
     <aside className="inspector">
       <div className="panel-title">{layer ? layer.name : "Inspector"}</div>
@@ -605,13 +861,15 @@ export default function Inspector({
           onShapeRotKey={onShapeRotKey}
         />
       )}
+      {decalControls}
       {layer && layer.kind.kind === "image" && (
-        <ImageInspector
+        <EffectsSection
           layerId={layer.id}
-          attach={layer.kind.attach}
-          shapes={shapes}
-          onAttachImage={onAttachImage}
-          onSetDecal={onSetDecal}
+          effects={resolvedEffects}
+          onAddEffect={onAddEffect}
+          onRemoveEffect={onRemoveEffect}
+          onKeyEffect={onKeyEffect}
+          onSetWipeStatic={onSetWipeStatic}
         />
       )}
       {layer && layer.kind.kind === "colorpatch" && (

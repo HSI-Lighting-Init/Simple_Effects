@@ -139,14 +139,17 @@ function drawQuad(ctx: KCtx, img: CanvasImageSource, iw: number, ih: number, q: 
  * carry their UVs into it. `layerOpacity` lets per-face opacity stack under the
  * layer opacity (which the Group applies separately, so pass 1 there).
  */
+/** A texture source: a loaded image or an offscreen canvas (rasterised text). */
+export type Texture = HTMLImageElement | HTMLCanvasElement;
+
 export function drawSurface(
   ctx: KCtx,
-  img: HTMLImageElement,
+  img: Texture,
   surface: ResolvedSurface,
   layerOpacity = 1
 ) {
-  const iw = img.naturalWidth || img.width;
-  const ih = img.naturalHeight || img.height;
+  const iw = img instanceof HTMLImageElement ? img.naturalWidth || img.width : img.width;
+  const ih = img instanceof HTMLImageElement ? img.naturalHeight || img.height : img.height;
   if (!iw || !ih) return;
   // The Group already set globalAlpha for the layer opacity; multiply into it
   // rather than clobbering it.

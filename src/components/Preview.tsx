@@ -15,13 +15,17 @@ import {
   Image as KImage,
   Shape,
   Circle,
+  Line,
   Transformer,
 } from "react-konva";
 import Konva from "konva";
 
 import { getShaped } from "../lib/api";
 import { drawSurface } from "../lib/surface3d";
+import type { Texture } from "../lib/surface3d";
+import { applyEffects } from "../lib/effects";
 import type { Project } from "../bindings/Project";
+import type { Layer } from "../bindings/Layer";
 import type { ResolvedLayer } from "../bindings/ResolvedLayer";
 import type { Rgba } from "../bindings/Rgba";
 import type { BlendMode } from "../bindings/BlendMode";
@@ -57,6 +61,32 @@ type Interaction = {
 
 type NodeRef = (n: Konva.Node | null) => void;
 
+// A surface decal maps its texture through hundreds of clipped triangles every
+// frame, so a 10-megapixel photo wrapped on a small cylinder is what makes
+// playback stall. Cap the texture at a sane size (cached per image — built once)
+// so each per-triangle drawImage is cheap. The decal is shown small, so there's
+// no visible quality loss.
+const downscaleCache = new WeakMap<HTMLImageElement, HTMLCanvasElement>();
+function cappedTexture(img: HTMLImageElement, max = 1280): HTMLImageElement | HTMLCanvasElement {
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  if (!w || !h || Math.max(w, h) <= max) return img;
+  const cached = downscaleCache.get(img);
+  if (cached) return cached;
+  const s = max / Math.max(w, h);
+  const cv = document.createElement("canvas");
+  cv.width = Math.max(1, Math.round(w * s));
+  cv.height = Math.max(1, Math.round(h * s));
+  const ctx = cv.getContext("2d");
+  if (ctx) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(img, 0, 0, cv.width, cv.height);
+  }
+  downscaleCache.set(img, cv);
+  return cv;
+}
+
 /** Load a data: URL / path into an HTMLImageElement (null until ready). */
 function useImage(src?: string): HTMLImageElement | null {
   const [img, setImg] = useState<HTMLImageElement | null>(null);
@@ -73,6 +103,128 @@ function useImage(src?: string): HTMLImageElement | null {
     };
   }, [src]);
   return img;
+}
+
+// A flat image with an effect stack. Renders the image through an offscreen
+// canvas — colour/blur effects via the canvas `filter`, then each wipe as a
+// gradient mask — and composites the result. Same transform contract as
+// ImageNode, so it selects / drags / keyframes the same way.
+function EffectImageNode({
+  src,
+  r,
+  interaction,
+  registerRef,
+}: {
+  src?: string;
+  r: ResolvedLayer;
+  interaction: Interaction;
+  registerRef: NodeRef;
+}) {
+  const img = useImage(src);
+  const offRef = useRef<HTMLCanvasElement | null>(null);
+  if (!img) return null;
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+
+  return (
+    <Shape
+      ref={registerRef}
+      x={r.x}
+      y={r.y}
+      width={w}
+      height={h}
+      offsetX={w / 2}
+      offsetY={h / 2}
+      scaleX={r.scaleX}
+      scaleY={r.scaleY}
+      rotation={r.rotation}
+      opacity={r.opacity}
+      sceneFunc={(ctx) => {
+        const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
+        const tex = applyEffects(off, img, w, h, r.effects);
+        (ctx as unknown as CanvasRenderingContext2D).drawImage(tex, 0, 0);
+      }}
+      hitFunc={(ctx, shape) => {
+        ctx.beginPath();
+        ctx.rect(0, 0, w, h);
+        ctx.closePath();
+        ctx.fillStrokeShape(shape);
+      }}
+      {...interaction}
+    />
+  );
+}
+
+// Fetch a text layer's shaped glyphs (re-fetched when content/size/font change).
+// Null for non-text layers.
+function useShaped(layer: Layer): ShapedText | null {
+  const k = layer.kind;
+  const isText = k.kind === "text";
+  const content = isText ? k.content : "";
+  const size = isText ? k.size : 0;
+  const font = isText ? k.font : "";
+  const [shaped, setShaped] = useState<ShapedText | null>(null);
+
+  useEffect(() => {
+    if (!isText) {
+      setShaped(null);
+      return;
+    }
+    let alive = true;
+    getShaped(layer.id).then((s: ShapedText | null) => {
+      if (alive) setShaped(s && s.glyphs.length > 0 ? s : null);
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layer.id, isText, content, size, font]);
+
+  return shaped;
+}
+
+// Rasterise a text layer's shaped glyphs into `off`, applying each glyph's
+// per-letter transform (`letters`) — so animation presets (ScatterIn, RiseUp…)
+// and the decompose blend animate even when the text is pinned to a 3D shape.
+// Supersampled for crispness. The box matches the Rust decal dims (so the wrap
+// aspect is right); large offsets clip at the box edge.
+function rasterizeText(
+  off: HTMLCanvasElement,
+  shaped: ShapedText,
+  color: Rgba,
+  letters: ResolvedLayer["letters"]
+): HTMLCanvasElement {
+  const SS = 2;
+  const w = Math.max(1, Math.ceil(shaped.width));
+  const h = Math.max(1, Math.ceil(shaped.ascender + shaped.descender));
+  if (off.width !== w * SS || off.height !== h * SS) {
+    off.width = w * SS;
+    off.height = h * SS;
+  }
+  const ctx = off.getContext("2d");
+  if (!ctx) return off;
+  ctx.setTransform(SS, 0, 0, SS, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = `rgb(${color.r}, ${color.g}, ${color.b})`;
+  const baseAlpha = color.a / 255;
+  const baseline = shaped.ascender;
+  shaped.glyphs.forEach((g, i) => {
+    if (!g.d) return;
+    const lt = letters[i];
+    ctx.save();
+    ctx.globalAlpha = baseAlpha * (lt?.opacity ?? 1);
+    // Same transform contract as the flat glyph renderer: position at (g.x), with
+    // scale/rotation about the glyph centre (cx, cy), plus the per-letter offset.
+    ctx.translate(g.x + g.cx + (lt?.dx ?? 0), baseline + g.cy + (lt?.dy ?? 0));
+    ctx.rotate(((lt?.rotation ?? 0) * Math.PI) / 180);
+    const sc = lt?.scale ?? 1;
+    ctx.scale(sc, sc);
+    ctx.translate(-g.cx, -g.cy);
+    ctx.fill(new Path2D(g.d));
+    ctx.restore();
+  });
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  return off;
 }
 
 function ImageNode({
@@ -115,13 +267,12 @@ function strokePoly(ctx: DrawCtx, pts: { x: number; y: number }[]) {
   ctx.closePath();
 }
 
-// An image pinned to a Shape3D: the evaluator already projected it to paint-ready
-// quads in COMP space (the shape's placement baked in), so this renders with no
-// transform of its own. When selected we show a drag handle at the decal centre;
-// dragging it drops the decal at a new spot on the surface (Rust recomputes the
-// face + u/v — so it slides across box faces and around the cylinder).
+// A layer (image or text) pinned to a Shape3D, rendered as a decal. The evaluator
+// already projected it to paint-ready quads in COMP space. When selected we show
+// two handles: the round one MOVES it on the surface (drops at a new u/v, keyed),
+// the square one SCALES it (keyed) — both distinct from moving the shape itself.
 function DecalNode({
-  layerId,
+  layer,
   src,
   r,
   listening,
@@ -129,8 +280,9 @@ function DecalNode({
   screenScale,
   onSelect,
   onImageDrop,
+  onDecalScale,
 }: {
-  layerId: number;
+  layer: Layer;
   src?: string;
   r: ResolvedLayer;
   listening: boolean;
@@ -138,11 +290,20 @@ function DecalNode({
   screenScale: number;
   onSelect: (id: number) => void;
   onImageDrop: (layerId: number, x: number, y: number) => void;
+  onDecalScale: (layerId: number, scale: number) => void;
 }) {
-  const img = useImage(src);
+  const isText = layer.kind.kind === "text";
+  const imgTex = useImage(isText ? undefined : src);
+  const shaped = useShaped(layer);
+  const textOffRef = useRef<HTMLCanvasElement | null>(null);
+  const fxOffRef = useRef<HTMLCanvasElement | null>(null);
   const surface = r.surface;
-  if (!img || !surface || surface.quads.length === 0) return null;
+  const ready = isText ? !!shaped : !!imgTex;
+  if (!ready || !surface || surface.quads.length === 0) return null;
 
+  const textColor: Rgba =
+    layer.kind.kind === "text" ? layer.kind.color : { r: 255, g: 255, b: 255, a: 255 };
+  const layerId = layer.id;
   // A box decal is one quad; a cylinder decal is a curved band of many quads.
   const polys = surface.quads.map((q) =>
     q.corners.map((c) => ({ x: c.hx / c.hw, y: c.hy / c.hw }))
@@ -150,6 +311,7 @@ function DecalNode({
   const allPts = polys.flat();
   const cx = allPts.reduce((s, p) => s + p.x, 0) / allPts.length;
   const cy = allPts.reduce((s, p) => s + p.y, 0) / allPts.length;
+  const K = 44 * screenScale; // resting offset of the scale handle
 
   return (
     <Group opacity={r.opacity}>
@@ -157,7 +319,22 @@ function DecalNode({
         listening={listening}
         fill="#000"
         sceneFunc={(ctx) => {
-          drawSurface(ctx as DrawCtx, img, surface, 1);
+          // Build the base texture: an image, or text rasterised WITH its
+          // per-letter animation (so ScatterIn / decompose move on the surface).
+          let base: Texture | null;
+          if (isText) {
+            if (!shaped) return;
+            const toff = textOffRef.current ?? (textOffRef.current = document.createElement("canvas"));
+            base = rasterizeText(toff, shaped, textColor, r.letters);
+          } else {
+            base = imgTex ? cappedTexture(imgTex) : null;
+          }
+          if (!base) return;
+          const bw = base instanceof HTMLImageElement ? base.naturalWidth || base.width : base.width;
+          const bh = base instanceof HTMLImageElement ? base.naturalHeight || base.height : base.height;
+          const off = fxOffRef.current ?? (fxOffRef.current = document.createElement("canvas"));
+          const tex = applyEffects(off, base, bw, bh, r.effects);
+          drawSurface(ctx as DrawCtx, tex, surface, 1);
           if (selected) {
             ctx.save();
             (ctx as unknown as CanvasRenderingContext2D).strokeStyle = "rgba(108,140,255,0.95)";
@@ -181,41 +358,71 @@ function DecalNode({
         }}
       />
       {selected && listening && (
-        <Circle
-          x={cx}
-          y={cy}
-          radius={7 * screenScale}
-          fill="rgba(108,140,255,0.95)"
-          stroke="#fff"
-          strokeWidth={1.5 * screenScale}
-          draggable
-          onClick={(e) => {
-            e.cancelBubble = true;
-          }}
-          onDragEnd={(e) => onImageDrop(layerId, e.target.x(), e.target.y())}
-        />
+        <>
+          <Line points={[cx, cy, cx + K, cy]} stroke="rgba(255,255,255,0.4)" strokeWidth={1 * screenScale} listening={false} />
+          {/* Move on the surface (keys u/v at the playhead). */}
+          <Circle
+            x={cx}
+            y={cy}
+            radius={7 * screenScale}
+            fill="rgba(108,140,255,0.95)"
+            stroke="#fff"
+            strokeWidth={1.5 * screenScale}
+            draggable
+            onClick={(e) => {
+              e.cancelBubble = true;
+            }}
+            onDragEnd={(e) => onImageDrop(layerId, e.target.x(), e.target.y())}
+          />
+          {/* Scale on the surface (keys scale at the playhead). */}
+          <Rect
+            x={cx + K - 6 * screenScale}
+            y={cy - 6 * screenScale}
+            width={12 * screenScale}
+            height={12 * screenScale}
+            fill="rgba(60,200,160,0.95)"
+            stroke="#fff"
+            strokeWidth={1.5 * screenScale}
+            draggable
+            onClick={(e) => {
+              e.cancelBubble = true;
+            }}
+            onDragEnd={(e) => {
+              const handleCenterX = e.target.x() + 6 * screenScale;
+              const ratio = Math.max(0.05, (handleCenterX - cx) / K);
+              onDecalScale(layerId, Math.min(4, surface.scale * ratio));
+            }}
+          />
+        </>
       )}
     </Group>
   );
 }
 
-// An invisible Shape3D object (box/cylinder). The evaluator hands us its visible
-// faces as local-space polygons (r.shape). The Group carries the shape's 2D
-// transform, so it moves/scales/rotates and keyframes like any layer; the inner
-// Shape strokes a wireframe when selected and provides the (otherwise invisible)
-// hit area. The 3D spin is keyframed from the inspector.
+// A Shape3D object (box/cylinder). The evaluator hands us its visible faces as
+// local-space polygons (r.shape). The Group carries the shape's 2D transform, so
+// it moves/scales/rotates and keyframes like any layer; the inner Shape strokes
+// the wireframe (always visible — bright when selected) and provides the hit
+// area. Right-click opens the insert menu. The 3D spin is keyframed in the
+// inspector.
 function ShapeNode({
+  layerId,
   r,
   selected,
   interaction,
   registerRef,
   screenScale,
+  onContextMenu,
+  exporting,
 }: {
+  layerId: number;
   r: ResolvedLayer;
   selected: boolean;
   interaction: Interaction;
   registerRef: NodeRef;
   screenScale: number;
+  onContextMenu: (layerId: number, x: number, y: number) => void;
+  exporting: boolean;
 }) {
   const shapeRef = useRef<Konva.Shape | null>(null);
   const frame = r.shape;
@@ -249,16 +456,24 @@ function ShapeNode({
       scaleY={r.scaleY}
       rotation={r.rotation}
       {...interaction}
+      onContextMenu={(e) => {
+        e.evt.preventDefault();
+        e.evt.stopPropagation();
+        e.cancelBubble = true;
+        onContextMenu(layerId, e.evt.clientX, e.evt.clientY);
+      }}
     >
       <Shape
         ref={shapeRef}
         listening={interaction.listening}
         fill="#000"
         sceneFunc={(ctx) => {
-          if (!selected) return;
+          if (exporting) return; // the frame is an editor guide — not in the render
           ctx.save();
-          (ctx as unknown as CanvasRenderingContext2D).strokeStyle = "rgba(108,140,255,0.85)";
-          (ctx as unknown as CanvasRenderingContext2D).lineWidth = lw;
+          (ctx as unknown as CanvasRenderingContext2D).strokeStyle = selected
+            ? "rgba(108,140,255,0.95)"
+            : "rgba(108,140,255,0.4)";
+          (ctx as unknown as CanvasRenderingContext2D).lineWidth = selected ? lw : lw * 0.8;
           for (const f of frame.faces) {
             strokePoly(ctx as DrawCtx, f);
             (ctx as unknown as CanvasRenderingContext2D).stroke();
@@ -460,6 +675,9 @@ interface Props {
   onSelectPart: (i: number | null) => void;
   onCommitPart: (layerId: number, index: number, part: LetterOverride) => void;
   onImageDrop: (layerId: number, x: number, y: number) => void;
+  onDecalScale: (layerId: number, scale: number) => void;
+  onShapeContextMenu: (layerId: number, x: number, y: number) => void;
+  exporting?: boolean;
 }
 
 export default function Preview({
@@ -475,6 +693,9 @@ export default function Preview({
   onSelectPart,
   onCommitPart,
   onImageDrop,
+  onDecalScale,
+  onShapeContextMenu,
+  exporting = false,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
@@ -492,10 +713,12 @@ export default function Preview({
   }, []);
 
   const pad = 24;
-  const scale =
+  const fitScale =
     box.w > 0 && box.h > 0
       ? Math.min((box.w - pad) / project.width, (box.h - pad) / project.height)
       : 0;
+  // During export render at full comp resolution (1:1) for a crisp video.
+  const scale = exporting ? 1 : fitScale;
   const stageW = project.width * scale;
   const stageH = project.height * scale;
 
@@ -577,6 +800,24 @@ export default function Preview({
               const r = resolved[layer.id];
               if (!r || !r.visible) return null;
               const k = layer.kind;
+              // Pinned to a shape (image or text) → render as a decal on its
+              // surface, regardless of the layer kind.
+              if (r.surface) {
+                return (
+                  <DecalNode
+                    key={layer.id}
+                    layer={layer}
+                    src={k.kind === "image" ? images[k.src] : undefined}
+                    r={r}
+                    listening={!playing}
+                    selected={selectedId === layer.id}
+                    screenScale={h}
+                    onSelect={onSelect}
+                    onImageDrop={onImageDrop}
+                    onDecalScale={onDecalScale}
+                  />
+                );
+              }
               if (k.kind === "colorpatch") {
                 return (
                   <Rect
@@ -622,32 +863,32 @@ export default function Preview({
                 return (
                   <ShapeNode
                     key={layer.id}
+                    layerId={layer.id}
                     r={r}
                     selected={selectedId === layer.id}
                     interaction={interaction(layer.id)}
                     registerRef={register(layer.id)}
                     screenScale={h}
+                    onContextMenu={onShapeContextMenu}
+                    exporting={exporting}
                   />
                 );
               }
-              // Image: a decal when pinned to a shape, otherwise a flat image
-              // (draggable onto a shape to pin it).
-              return r.surface ? (
-                <DecalNode
+              // A flat image (not pinned) — draggable onto a shape to pin it.
+              // With effects it goes through the effect renderer.
+              const src = k.kind === "image" ? images[k.src] : undefined;
+              return r.effects.length > 0 ? (
+                <EffectImageNode
                   key={layer.id}
-                  layerId={layer.id}
-                  src={images[k.src]}
+                  src={src}
                   r={r}
-                  listening={!playing}
-                  selected={selectedId === layer.id}
-                  screenScale={h}
-                  onSelect={onSelect}
-                  onImageDrop={onImageDrop}
+                  interaction={flatImageInteraction(layer.id)}
+                  registerRef={register(layer.id)}
                 />
               ) : (
                 <ImageNode
                   key={layer.id}
-                  src={images[k.src]}
+                  src={src}
                   r={r}
                   interaction={flatImageInteraction(layer.id)}
                   registerRef={register(layer.id)}

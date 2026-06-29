@@ -2,7 +2,8 @@
 import type { SurfaceQuad } from "./SurfaceQuad";
 
 /**
- * A pinned image projected onto the shape: paint-ready quads (empty if the
- * decal faces away from the camera).
+ * A pinned layer projected onto the shape: paint-ready quads (empty if the
+ * decal faces away from the camera), plus the placement sampled at this time
+ * (for the inspector's sliders).
  */
-export type ResolvedSurface = { quads: Array<SurfaceQuad>, };
+export type ResolvedSurface = { quads: Array<SurfaceQuad>, u: number, v: number, scale: number, rotation: number, };

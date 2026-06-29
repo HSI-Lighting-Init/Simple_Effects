@@ -28,8 +28,90 @@ body {
 
 .app {
   display: grid;
-  grid-template-rows: 48px 1fr 224px;
+  grid-template-rows: 30px 48px 1fr 224px;
   height: 100vh;
+}
+
+/* Application menu bar (File, Edit, …). */
+.menubar {
+  display: flex;
+  align-items: stretch;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 0 6px;
+  user-select: none;
+  z-index: 200;
+}
+
+.menu {
+  position: relative;
+  display: flex;
+}
+
+.menu-title {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.menu-title:hover,
+.menu-title.open {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.menu-drop {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 220px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 0 0 8px 8px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+  z-index: 300;
+}
+
+.menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.menu-item:hover:not(:disabled) {
+  background: rgba(108, 140, 255, 0.2);
+}
+
+.menu-item:disabled {
+  color: var(--muted);
+  opacity: 0.5;
+  cursor: default;
+}
+
+.menu-shortcut {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.menu-sep {
+  height: 1px;
+  background: var(--line);
+  margin: 4px 6px;
 }
 
 .loading {
@@ -353,6 +435,8 @@ body {
   min-width: 0;
   min-height: 0;
   display: grid;
+  position: relative;
+  overflow: hidden;
   background:
     repeating-conic-gradient(#15151c 0% 25%, #101015 0% 50%) 50% / 24px 24px;
 }
@@ -525,6 +609,237 @@ body {
   cursor: pointer;
 }
 
+/* Right-click insert menu. */
+.ctx-menu {
+  position: fixed;
+  z-index: 1000;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  min-width: 210px;
+}
+
+.ctx-item {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.ctx-item:hover {
+  background: rgba(108, 140, 255, 0.18);
+}
+
+/* Submenu: a parent row with a flyout that opens to the right on hover. */
+.ctx-sub {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.ctx-item-parent {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+
+.ctx-sub:hover > .ctx-item-parent {
+  background: rgba(108, 140, 255, 0.18);
+}
+
+.ctx-arrow {
+  opacity: 0.6;
+  font-size: 11px;
+}
+
+.ctx-flyout {
+  position: absolute;
+  left: 100%;
+  top: -5px;
+  margin-left: 2px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  z-index: 1001;
+}
+
+/* Effect stack rows. */
+.effect-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.effect-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Video export overlay. */
+.export-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgba(10, 10, 20, 0.78);
+  backdrop-filter: blur(2px);
+}
+
+.export-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 32px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+  font-size: 15px;
+  text-align: center;
+}
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Generic centered modal (Composition settings). */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 800;
+  display: grid;
+  place-items: center;
+  background: rgba(8, 8, 16, 0.6);
+}
+
+.modal {
+  min-width: 380px;
+  max-width: 90vw;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.modal-title {
+  padding: 12px 16px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+
+.modal-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+
+/* Isolated effect editor overlay. */
+.fx-editor-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 820;
+  display: grid;
+  place-items: center;
+  background: rgba(8, 8, 16, 0.82);
+}
+
+.fx-editor {
+  width: 92vw;
+  height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+}
+
+.fx-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  font-weight: 600;
+}
+
+.fx-editor-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  min-height: 0;
+}
+
+.fx-editor-stage {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  padding: 18px;
+  background:
+    repeating-conic-gradient(#15151c 0% 25%, #101015 0% 50%) 50% / 24px 24px;
+}
+
+.fx-preview-canvas {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+}
+
+.fx-editor-panel {
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+  background: var(--panel);
+}
+
 .preview-wrap {
   width: 100%;
   height: 100%;
@@ -691,12 +1006,46 @@ body {
 .tl-kf {
   position: absolute;
   top: 50%;
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
+  padding: 0;
   transform: translate(-50%, -50%) rotate(45deg);
   background: #fff;
   border: 1px solid rgba(0, 0, 0, 0.35);
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.tl-kf:hover {
+  background: var(--accent);
+  border-color: #fff;
+  box-shadow: 0 0 6px rgba(233, 69, 96, 0.7);
+}
+
+/* Delete-layer button in each timeline row. */
+.tl-del {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.tl-label:hover .tl-del {
+  opacity: 1;
+}
+
+.tl-del:hover {
+  background: rgba(233, 69, 96, 0.25);
+  color: #fff;
 }
 
 .tl-playhead {

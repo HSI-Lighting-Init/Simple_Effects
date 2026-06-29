@@ -40,6 +40,14 @@ pub struct Layer {
     /// Manually toggled off in the layer list (independent of the time range).
     #[serde(default)]
     pub hidden: bool,
+    /// When set, this layer is pinned to a `Shape3D` and renders as a decal on
+    /// its surface instead of flat. Honoured for image and text layers.
+    #[serde(default)]
+    pub attach: Option<Decal>,
+    /// A stack of visual effects applied in order when the layer renders
+    /// (currently honoured for flat image layers). Keyframeable.
+    #[serde(default)]
+    pub effects: Vec<Effect>,
 }
 
 /// What a layer actually draws. Internally tagged so the TS side is a clean
@@ -50,15 +58,8 @@ pub struct Layer {
 pub enum LayerKind {
     /// An image loaded from an absolute path on disk. `width`/`height` are the
     /// image's natural pixel size; the layer is scaled (via its transform) to
-    /// fit the comp when added. When `attach` is set, the image is pinned to a
-    /// `Shape3D` and renders as a decal on its surface instead of flat.
-    Image {
-        src: String,
-        width: u32,
-        height: u32,
-        #[serde(default)]
-        attach: Option<Decal>,
-    },
+    /// fit the comp when added.
+    Image { src: String, width: u32, height: u32 },
     /// An invisible 3D box or cylinder you can spin (the rotation tracks) and
     /// move/scale on the canvas (the layer transform). It draws nothing itself —
     /// `Image` layers pinned to it (via `Decal`) render on its surface. The
@@ -216,28 +217,93 @@ pub enum SurfaceShape {
     Cylinder,
 }
 
-/// Pins an image to a `Shape3D` so it renders as a decal on the shape's surface.
-/// The placement is *within the face's plane*: `(u, v)` is the decal centre in
-/// face coordinates (0..1), `scale` its size (fraction of the face / shape size,
-/// image aspect preserved), and `rotation` its in-plane spin.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+/// Pins a layer (image or text) to a `Shape3D` so it renders as a decal on the
+/// shape's surface. The placement is keyframeable, so the decal can be animated
+/// *across the surface* independently of the shape's own motion: `(u, v)` is the
+/// decal centre in surface coordinates (0..1), `scale` its size (image aspect
+/// preserved), and `rotation` its in-plane spin (box faces only).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct Decal {
-    /// Id of the `Shape3D` layer this image is pinned to.
+    /// Id of the `Shape3D` layer this layer is pinned to.
     pub shape_id: u32,
     /// Which box face (0=front,1=back,2=left,3=right,4=top,5=bottom). For a
-    /// cylinder this is ignored — the decal sits tangent to the surface at `u`.
+    /// cylinder this is ignored — the decal wraps the surface around `u`.
     pub face: u32,
-    pub u: f32,
-    pub v: f32,
-    pub scale: f32,
-    pub rotation: f32,
+    pub u: Track,
+    pub v: Track,
+    pub scale: Track,
+    pub rotation: Track,
 }
 
-impl Default for Decal {
-    fn default() -> Self {
-        Self { shape_id: 0, face: 0, u: 0.5, v: 0.5, scale: 0.5, rotation: 0.0 }
+impl Decal {
+    /// A decal pinned to `shape_id` on `face`, centred, at the given default
+    /// size (constant tracks until the user keyframes them).
+    pub fn new(shape_id: u32, face: u32, scale: f32) -> Self {
+        Decal {
+            shape_id,
+            face,
+            u: Track::constant(0.5),
+            v: Track::constant(0.5),
+            scale: Track::constant(scale),
+            rotation: Track::constant(0.0),
+        }
+    }
+}
+
+/// A visual effect in a layer's effect stack. Most map to a CSS/canvas filter
+/// (applied in order); `Wipe` is a directional gradient mask (the "fade left to
+/// right" / reveal). The numeric parameters are keyframeable Tracks so an effect
+/// can animate (e.g. a wipe sweeping across).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum Effect {
+    /// Desaturate. amount 0 = colour, 1 = full black & white.
+    Grayscale { amount: Track },
+    /// Brightness multiplier (1 = normal).
+    Brightness { amount: Track },
+    /// Contrast multiplier (1 = normal).
+    Contrast { amount: Track },
+    /// Saturation multiplier (1 = normal, 0 = greyscale, >1 = vivid).
+    Saturate { amount: Track },
+    /// Gaussian blur radius in px.
+    Blur { radius: Track },
+    /// Hue rotation in degrees.
+    Hue { degrees: Track },
+    /// Invert colours. amount 0..1.
+    Invert { amount: Track },
+    /// Directional alpha wipe / fade. `angle` is the sweep direction (degrees,
+    /// 0 = left→right). `position` 0..1 is the edge location (keyframe it to
+    /// sweep). `softness` 0..1 is the fade width. `invert` flips which side shows.
+    Wipe {
+        angle: f32,
+        position: Track,
+        softness: Track,
+        invert: bool,
+    },
+}
+
+impl Effect {
+    /// A new effect of the named kind with sensible default tracks.
+    pub fn default_of(kind: &str) -> Option<Effect> {
+        Some(match kind {
+            "grayscale" => Effect::Grayscale { amount: Track::constant(1.0) },
+            "brightness" => Effect::Brightness { amount: Track::constant(1.2) },
+            "contrast" => Effect::Contrast { amount: Track::constant(1.2) },
+            "saturate" => Effect::Saturate { amount: Track::constant(1.5) },
+            "blur" => Effect::Blur { radius: Track::constant(6.0) },
+            "hue" => Effect::Hue { degrees: Track::constant(90.0) },
+            "invert" => Effect::Invert { amount: Track::constant(1.0) },
+            "wipe" => Effect::Wipe {
+                angle: 0.0,
+                position: Track::ramp(0.0, 0, 1.0, 1000, Easing::EaseInOut),
+                softness: Track::constant(0.15),
+                invert: false,
+            },
+            _ => return None,
+        })
     }
 }
 
@@ -334,6 +400,8 @@ impl Project {
             },
             transform: Transform::at(cx, cy),
             hidden: false,
+            attach: None,
+            effects: vec![],
         };
 
         let mut accent_tf = Transform::at(cx, cy - 40.0);
@@ -353,6 +421,8 @@ impl Project {
             },
             transform: accent_tf,
             hidden: false,
+            attach: None,
+            effects: vec![],
         };
 
         let title = Layer {
@@ -377,6 +447,8 @@ impl Project {
             },
             transform: Transform::at(cx, cy + 70.0),
             hidden: false,
+            attach: None,
+            effects: vec![],
         };
 
         Project {
