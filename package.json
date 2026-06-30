@@ -17,7 +17,8 @@
     "konva": "^10.3.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-konva": "^19.2.5"
+    "react-konva": "^19.2.5",
+    "webm-muxer": "^5.1.4"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
@@ -26,5 +27,8 @@
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true
   }
 }

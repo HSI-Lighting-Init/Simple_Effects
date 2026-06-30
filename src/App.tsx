@@ -67,6 +67,11 @@ import {
   analyzeOutputVideo,
   lastReport as lastProbeReport,
 } from "./lib/renderProbe";
+import {
+  encodeDeterministicWebm,
+  isDeterministicSupported,
+  bitrateForLevel,
+} from "./lib/deterministicExport";
 import type { Project } from "./bindings/Project";
 import type { ResolvedLayer } from "./bindings/ResolvedLayer";
 import type { TransformEdit } from "./bindings/TransformEdit";
@@ -807,9 +812,12 @@ export default function App() {
     document.title = `${fileName ?? "Untitled"} — Simple Effects`;
   }, [fileName]);
 
-  // Render the comp to a video: full-resolution canvas captured in real time to
-  // WebM, then saved as-is (webm) or transcoded to MP4 (H.264) by Rust/ffmpeg.
-  // `level` 1..5 = compression; for WebM it also sets the recording bitrate.
+  // Render the comp to a video. Preferred path is DETERMINISTIC: render every
+  // frame at full resolution, then encode it with an exact timestamp via
+  // WebCodecs (VP9 → WebM) so the output is exactly `fps` with no dropped or
+  // duplicated frames regardless of how fast rendering is. Falls back to a
+  // real-time MediaRecorder capture if WebCodecs isn't available. MP4 is the
+  // WebM transcoded by Rust/ffmpeg. `level` 1..5 = compression/bitrate.
   const onExport = useCallback(
     async (format: "mp4" | "webm", level: number, fps: number, burnFps: boolean) => {
       let p = projectRef.current;
@@ -839,8 +847,6 @@ export default function App() {
         await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
         const canvas = document.querySelector(".preview-stage canvas") as HTMLCanvasElement | null;
         if (!canvas) throw new Error("preview canvas not found");
-        // Render marker probe: measure each sampled output frame against the
-        // calibration lines (270 black / 540 white) + CMYK bands.
         const probing = isProbeEnabled();
         if (probing) {
           beginProbeRun(
@@ -848,64 +854,94 @@ export default function App() {
             new Date().toISOString()
           );
         }
-        const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-          ? "video/webm;codecs=vp9"
-          : "video/webm";
-        // MP4 records at high quality (ffmpeg controls the final compression via
-        // CRF); WebM is written as-is, so the recording bitrate is the knob.
-        const webmMbps = [24, 14, 8, 5, 3][level - 1] ?? 8;
-        const bitrate = (format === "mp4" ? 24 : webmMbps) * 1_000_000;
-        const stream = canvas.captureStream(fps);
-        const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: bitrate });
-        const chunks: BlobPart[] = [];
-        rec.ondataavailable = (e) => {
-          if (e.data.size) chunks.push(e.data);
-        };
-        const stopped = new Promise<void>((res) => {
-          rec.onstop = () => res();
-        });
-        rec.start();
-
-        // Play 0 → duration in real time; the canvas updates feed the recorder.
         const duration = p.durationMs;
-        const startWall = performance.now();
-        let lastProbe = -Infinity;
-        // Sample the live render canvas (the intended/preview trace) ~every
-        // 150ms after a paint, so we have a fine curve to compare the decoded
-        // video frames against.
-        const maybeProbe = async (t: number) => {
-          if (!probing || t - lastProbe < 150) return;
-          lastProbe = t;
-          await new Promise((r) => requestAnimationFrame(r));
-          probePreview(canvas, t);
-        };
-        await new Promise<void>((resolve) => {
-          const tick = async () => {
-            const t = performance.now() - startWall;
-            if (t >= duration) {
-              await applyTime(duration);
-              if (probing) {
-                await new Promise((r) => requestAnimationFrame(r));
-                probePreview(canvas, duration);
-              }
-              resolve();
-              return;
-            }
-            setExportMsg(`Rendering… ${Math.round((t / duration) * 100)}%`);
-            await applyTime(t);
-            await maybeProbe(t);
-            requestAnimationFrame(tick);
-          };
-          requestAnimationFrame(tick);
-        });
-        await new Promise((r) => setTimeout(r, 250)); // flush last frame
-        rec.stop();
-        await stopped;
+        const bitrate = bitrateForLevel(level);
 
-        setExportMsg(format === "mp4" ? "Encoding MP4 (ffmpeg)…" : "Saving…");
-        const blob = new Blob(chunks, { type: mime });
-        // Decode the just-captured video and probe its real frames, then compare
-        // to the preview trace to surface the jump/freeze in the actual output.
+        // Wait for the canvas to actually paint the latest applied time.
+        const awaitPaint = () =>
+          new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+        // Realtime capture (fallback) — captures the canvas via MediaRecorder as
+        // the comp plays in wall-clock time. Used only when WebCodecs is absent.
+        const realtimeCapture = async (): Promise<Blob> => {
+          const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+            ? "video/webm;codecs=vp9"
+            : "video/webm";
+          const rec = new MediaRecorder(canvas.captureStream(fps), {
+            mimeType: mime,
+            videoBitsPerSecond: bitrate,
+          });
+          const chunks: BlobPart[] = [];
+          rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+          const stopped = new Promise<void>((res) => (rec.onstop = () => res()));
+          rec.start();
+          const startWall = performance.now();
+          let lastProbe = -Infinity;
+          await new Promise<void>((resolve) => {
+            const tick = async () => {
+              const t = performance.now() - startWall;
+              if (t >= duration) {
+                await applyTime(duration);
+                if (probing) {
+                  await awaitPaint();
+                  probePreview(canvas, duration);
+                }
+                resolve();
+                return;
+              }
+              setExportMsg(`Rendering… ${Math.round((t / duration) * 100)}%`);
+              await applyTime(t);
+              if (probing && t - lastProbe >= 150) {
+                lastProbe = t;
+                await awaitPaint();
+                probePreview(canvas, t);
+              }
+              requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+          });
+          await new Promise((r) => setTimeout(r, 250));
+          rec.stop();
+          await stopped;
+          return new Blob(chunks, { type: mime });
+        };
+
+        // Deterministic path: render each frame, encode with an exact timestamp.
+        let blob: Blob | null = null;
+        if (isDeterministicSupported()) {
+          try {
+            setExportMsg("Rendering frames…");
+            let lastPct = -1;
+            const bytes = await encodeDeterministicWebm({
+              canvas,
+              width: p.width,
+              height: p.height,
+              fps,
+              durationMs: duration,
+              bitrate,
+              renderFrame: async (tMs) => {
+                await applyTime(tMs);
+                await awaitPaint();
+              },
+              onFrameRendered: probing ? (tMs) => probePreview(canvas, tMs) : undefined,
+              onProgress: (frac) => {
+                const pct = Math.round(frac * 100);
+                if (pct !== lastPct) {
+                  lastPct = pct;
+                  setExportMsg(`Rendering frame-accurate… ${pct}%`);
+                }
+              },
+              shouldAbort: () => !exportingRef.current,
+            });
+            blob = new Blob([bytes], { type: "video/webm" });
+          } catch (e) {
+            console.warn("deterministic export failed; falling back to realtime", e);
+            blob = null;
+          }
+        }
+        if (!blob) blob = await realtimeCapture();
+
+        // Decode the produced video and probe its real frames (output trace).
         if (probing) {
           setExportMsg("Analysing output video…");
           try {
@@ -919,7 +955,7 @@ export default function App() {
         setExportMsg(format === "mp4" ? "Encoding MP4 (ffmpeg)…" : "Saving…");
         const base64 = await blobToBase64(blob);
         await exportVideo(base64, path, format, level);
-        recordAction("export_video", { path, format, level });
+        recordAction("export_video", { path, format, level, deterministic: isDeterministicSupported() });
         alert(`Saved video:\n${path}`);
       } catch (e) {
         alert(`Export failed: ${e}`);
