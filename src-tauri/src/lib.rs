@@ -1203,6 +1203,27 @@ fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
     }
 }
 
+/// Duplicate a layer (copy/paste): deep-clone it with a fresh id, named "… copy",
+/// inserted just above the original (so it's drawn on top and ready to edit).
+/// Text layers are re-shaped into the cache. Undoable.
+#[tauri::command]
+fn duplicate_layer(state: State<AppState>, layer_id: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let idx = project
+        .layers
+        .iter()
+        .position(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let mut clone = project.layers[idx].clone();
+    clone.id = next_id;
+    clone.name = format!("{} copy", clone.name);
+    project.layers.insert(idx + 1, clone);
+    reshape_layer(&mut state.shaped.lock().unwrap(), &project.layers[idx + 1]);
+    Ok(project.clone())
+}
+
 /// Delete a layer (object). If it's a shape, any layers pinned to it are detached
 /// back to flat. Undoable.
 #[tauri::command]
@@ -1350,6 +1371,7 @@ pub fn run() {
             set_layer_range,
             move_keyframes_at,
             set_layer_transition,
+            duplicate_layer,
             reorder_layers,
             save_project_file,
             open_project_file,

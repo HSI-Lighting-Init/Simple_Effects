@@ -29,6 +29,7 @@ import {
   deleteKeyframesAt,
   moveKeyframesAt,
   deleteLayer,
+  duplicateLayer,
   dropImageOnShape,
   editKeyframes,
   exportVideo,
@@ -164,6 +165,8 @@ export default function App() {
   // just its display name for the title bar / toolbar.
   const filePathRef = useRef<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
+  // Layer copy/paste clipboard (holds the copied layer's id).
+  const copiedLayerRef = useRef<number | null>(null);
 
   // Refs the rAF loop reads without re-subscribing.
   const timeRef = useRef(0);
@@ -689,6 +692,38 @@ export default function App() {
     [applyTime, recordAction]
   );
 
+  // Duplicate a layer (clone with a fresh id, on top) and select the clone.
+  const duplicateLayerById = useCallback(
+    async (srcId: number) => {
+      if (!projectRef.current?.layers.some((l) => l.id === srcId)) return;
+      const p = await duplicateLayer(srcId);
+      setProject(p);
+      durationRef.current = p.durationMs;
+      const newId = p.layers.reduce((m, l) => Math.max(m, l.id), 0);
+      setSelectedId(newId);
+      await resolveImages(p);
+      await applyTime(timeRef.current);
+      recordAction("duplicate_layer", { srcId, newId });
+    },
+    [resolveImages, applyTime, recordAction]
+  );
+
+  // Copy the selected layer to the clipboard; paste clones whatever was copied.
+  const onCopyLayer = useCallback(() => {
+    if (selectedIdRef.current != null) {
+      copiedLayerRef.current = selectedIdRef.current;
+      recordAction("copy_layer", { layerId: copiedLayerRef.current });
+    }
+  }, [recordAction]);
+
+  const onPasteLayer = useCallback(() => {
+    if (copiedLayerRef.current != null) void duplicateLayerById(copiedLayerRef.current);
+  }, [duplicateLayerById]);
+
+  const onDuplicateLayer = useCallback(() => {
+    if (selectedIdRef.current != null) void duplicateLayerById(selectedIdRef.current);
+  }, [duplicateLayerById]);
+
   // Delete every keyframe at one time on a layer (clicking a timeline diamond).
   const onDeleteKeyframe = useCallback(
     async (layerId: number, tMs: number) => {
@@ -1196,6 +1231,26 @@ export default function App() {
         void doOpenProject();
         return;
       }
+      // Layer copy/paste/duplicate — only outside text fields (so inputs keep
+      // their native clipboard behaviour).
+      if (mod && (e.key === "c" || e.key === "C")) {
+        if (inField || selectedIdRef.current == null) return;
+        e.preventDefault();
+        onCopyLayer();
+        return;
+      }
+      if (mod && (e.key === "v" || e.key === "V")) {
+        if (inField || copiedLayerRef.current == null) return;
+        e.preventDefault();
+        onPasteLayer();
+        return;
+      }
+      if (mod && (e.key === "d" || e.key === "D")) {
+        if (inField || selectedIdRef.current == null) return;
+        e.preventDefault();
+        onDuplicateLayer();
+        return;
+      }
       if (mod && (e.key === "z" || e.key === "Z")) {
         if (inField) return; // let the text field handle its own undo
         e.preventDefault();
@@ -1209,7 +1264,18 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [doUndo, doRedo, onDeleteLayer, decomposeId, doSave, doSaveAs, doOpenProject]);
+  }, [
+    doUndo,
+    doRedo,
+    onDeleteLayer,
+    decomposeId,
+    doSave,
+    doSaveAs,
+    doOpenProject,
+    onCopyLayer,
+    onPasteLayer,
+    onDuplicateLayer,
+  ]);
 
   // Global capture for the session recorder: clicks, JS errors, window resizes.
   useEffect(() => {
@@ -1319,6 +1385,24 @@ export default function App() {
       items: [
         { label: "Undo", onClick: () => void doUndo(), shortcut: "Ctrl+Z" },
         { label: "Redo", onClick: () => void doRedo(), shortcut: "Ctrl+Shift+Z" },
+        { separator: true },
+        {
+          label: "Copy Layer",
+          onClick: onCopyLayer,
+          disabled: selectedId == null,
+          shortcut: "Ctrl+C",
+        },
+        {
+          label: "Paste Layer",
+          onClick: onPasteLayer,
+          shortcut: "Ctrl+V",
+        },
+        {
+          label: "Duplicate Layer",
+          onClick: onDuplicateLayer,
+          disabled: selectedId == null,
+          shortcut: "Ctrl+D",
+        },
         { separator: true },
         {
           label: "Delete Layer",

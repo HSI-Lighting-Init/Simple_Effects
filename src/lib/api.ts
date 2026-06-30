@@ -199,6 +199,10 @@ export const exportVideo = (
 export const deleteLayer = (layerId: number) =>
   invoke<Project>("delete_layer", { layerId });
 
+/** Duplicate a layer (copy/paste); returns the project with the clone on top. */
+export const duplicateLayer = (layerId: number) =>
+  invoke<Project>("duplicate_layer", { layerId });
+
 /** Delete all keyframes at one time on a layer (one timeline diamond). */
 export const deleteKeyframesAt = (layerId: number, tMs: number) =>
   invoke<Project>("delete_keyframes_at", { layerId, tMs });

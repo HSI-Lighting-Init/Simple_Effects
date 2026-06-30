@@ -83,7 +83,25 @@ export default function Timeline({
   const [rowOverId, setRowOverId] = useState<number | null>(null);
   // Keyframe-diamond drag (retime). `fromMs` identifies which diamond is moving.
   const [kfDrag, setKfDrag] = useState<{ id: number; fromMs: number; toMs: number } | null>(null);
+  // Horizontal zoom: content is `zoom * 100%` wide; the tracks area scrolls and
+  // the ruler is kept in sync via transform.
+  const [zoom, setZoom] = useState(1);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const rulerInnerRef = useRef<HTMLDivElement>(null);
   const dur = project.durationMs || 1;
+
+  // Keep the ruler aligned with the (separately clipped) horizontal scroll.
+  const onTracksScroll = () => {
+    const r = rulerInnerRef.current;
+    if (r && scrollRef.current) r.style.transform = `translateX(${-scrollRef.current.scrollLeft}px)`;
+  };
+  const zoomBy = (factor: number) => setZoom((z) => Math.min(40, Math.max(1, z * factor)));
+  // Ctrl/⌘ + wheel zooms the timeline; plain wheel scrolls (native).
+  const onWheel = (e: React.WheelEvent) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    zoomBy(e.deltaY < 0 ? 1.2 : 1 / 1.2);
+  };
   const layers = [...project.layers].reverse();
 
   // Drop layer `dragId` so it sits just *under* `targetId` in z-order. Works in
@@ -243,18 +261,29 @@ export default function Timeline({
   return (
     <div className="timeline">
       <div className="tl-grid">
-        <div className="tl-corner">Layers</div>
+        <div className="tl-corner">
+          <span className="tl-corner-label">Layers</span>
+          <span className="tl-zoom">
+            <button onClick={() => zoomBy(1 / 1.5)} title="Zoom out (Ctrl+wheel)">−</button>
+            <button onClick={() => setZoom(1)} title="Reset zoom">
+              {Math.round(zoom * 100)}%
+            </button>
+            <button onClick={() => zoomBy(1.5)} title="Zoom in (Ctrl+wheel)">＋</button>
+          </span>
+        </div>
 
         <div className="tl-ruler">
-          {ticks.map((s) => (
-            <span
-              key={s}
-              className="tl-tick"
-              style={{ left: `${((s * 1000) / dur) * 100}%` }}
-            >
-              {s}s
-            </span>
-          ))}
+          <div className="tl-ruler-inner" ref={rulerInnerRef} style={{ width: `${zoom * 100}%` }}>
+            {ticks.map((s) => (
+              <span
+                key={s}
+                className="tl-tick"
+                style={{ left: `${((s * 1000) / dur) * 100}%` }}
+              >
+                {s}s
+              </span>
+            ))}
+          </div>
         </div>
 
         <div className="tl-labels">
@@ -304,7 +333,18 @@ export default function Timeline({
           ))}
         </div>
 
-        <div className="tl-tracks" ref={tracksRef} onMouseDown={onMouseDown}>
+        <div
+          className="tl-tracks-scroll"
+          ref={scrollRef}
+          onScroll={onTracksScroll}
+          onWheel={onWheel}
+        >
+          <div
+            className="tl-tracks-inner"
+            ref={tracksRef}
+            style={{ width: `${zoom * 100}%` }}
+            onMouseDown={onMouseDown}
+          >
           {layers.map((l) => {
             // While dragging this layer, render from the live preview range.
             const sMs = drag?.id === l.id ? drag.startMs : l.startMs;
@@ -351,7 +391,8 @@ export default function Timeline({
               </div>
             );
           })}
-          <div className="tl-playhead" style={{ left: `${(time / dur) * 100}%` }} />
+            <div className="tl-playhead" style={{ left: `${(time / dur) * 100}%` }} />
+          </div>
         </div>
       </div>
     </div>
