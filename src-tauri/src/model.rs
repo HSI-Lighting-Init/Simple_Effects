@@ -48,6 +48,38 @@ pub struct Layer {
     /// (currently honoured for flat image layers). Keyframeable.
     #[serde(default)]
     pub effects: Vec<Effect>,
+    /// Optional transition played over the layer's first `dur_ms` (blends it in
+    /// against whatever is below it).
+    #[serde(default)]
+    pub transition_in: Option<Transition>,
+    /// Optional transition played over the layer's last `dur_ms` (blends it out).
+    #[serde(default)]
+    pub transition_out: Option<Transition>,
+}
+
+/// A per-layer in/out transition. Because layers composite back-to-front, a top
+/// layer transitioning in over an overlap with the layer beneath reads as a
+/// cross-transition. `direction` (0=left,1=right,2=up,3=down) is used by Slide
+/// and Wipe; ignored by Dissolve.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct Transition {
+    pub kind: TransitionKind,
+    pub dur_ms: u32,
+    pub direction: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum TransitionKind {
+    /// Cross-fade (animate opacity).
+    Dissolve,
+    /// Slide in/out from an edge (animate position offset).
+    Slide,
+    /// Directional hard reveal (clip).
+    Wipe,
 }
 
 /// What a layer actually draws. Internally tagged so the TS side is a clean
@@ -402,6 +434,8 @@ impl Project {
             hidden: false,
             attach: None,
             effects: vec![],
+            transition_in: None,
+            transition_out: None,
         };
 
         let mut accent_tf = Transform::at(cx, cy - 40.0);
@@ -423,6 +457,8 @@ impl Project {
             hidden: false,
             attach: None,
             effects: vec![],
+            transition_in: None,
+            transition_out: None,
         };
 
         let title = Layer {
@@ -449,6 +485,8 @@ impl Project {
             hidden: false,
             attach: None,
             effects: vec![],
+            transition_in: None,
+            transition_out: None,
         };
 
         Project {

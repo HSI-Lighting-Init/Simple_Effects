@@ -10,6 +10,16 @@ import type { SurfaceShape } from "../bindings/SurfaceShape";
 import type { Decal } from "../bindings/Decal";
 import type { ResolvedEffect } from "../bindings/ResolvedEffect";
 
+type TransitionSlot = "in" | "out";
+type TransitionKindOpt = "none" | "dissolve" | "slide" | "wipe";
+type SetLayerTransition = (
+  layerId: number,
+  slot: TransitionSlot,
+  kind: TransitionKindOpt,
+  durMs: number,
+  direction: number
+) => void;
+
 const PRESETS: { value: LetterPreset | "none"; label: string }[] = [
   { value: "none", label: "None (static)" },
   { value: "fadeIn", label: "Fade in" },
@@ -742,6 +752,76 @@ export function EffectsSection({
   );
 }
 
+// In/out transition controls for the selected layer. Each slot is a kind
+// (none/dissolve/slide/wipe) + duration; slide/wipe also pick a direction.
+function TransitionsSection({
+  layer,
+  onSet,
+}: {
+  layer: Layer;
+  onSet: SetLayerTransition;
+}) {
+  const slots: { slot: TransitionSlot; tr: Layer["transitionIn"] }[] = [
+    { slot: "in", tr: layer.transitionIn },
+    { slot: "out", tr: layer.transitionOut },
+  ];
+  return (
+    <div className="insp-body">
+      <div className="insp-sep">Transitions</div>
+      {slots.map(({ slot, tr }) => {
+        const kind = (tr?.kind ?? "none") as TransitionKindOpt;
+        const durMs = tr?.durMs ?? 800;
+        const direction = tr?.direction ?? 0;
+        return (
+          <div key={slot} className="insp-field">
+            <span style={{ textTransform: "capitalize" }}>{slot}</span>
+            <select
+              value={kind}
+              onChange={(e) =>
+                onSet(layer.id, slot, e.target.value as TransitionKindOpt, durMs, direction)
+              }
+            >
+              <option value="none">None</option>
+              <option value="dissolve">Dissolve (cross-fade)</option>
+              <option value="slide">Slide</option>
+              <option value="wipe">Wipe</option>
+            </select>
+            {kind !== "none" && (
+              <div className="row2">
+                <input
+                  type="number"
+                  min={0}
+                  max={10000}
+                  step={50}
+                  value={durMs}
+                  title="Duration (ms)"
+                  onChange={(e) => onSet(layer.id, slot, kind, Number(e.target.value), direction)}
+                />
+                {(kind === "slide" || kind === "wipe") && (
+                  <select
+                    value={direction}
+                    title="Direction"
+                    onChange={(e) => onSet(layer.id, slot, kind, durMs, Number(e.target.value))}
+                  >
+                    <option value={0}>From left</option>
+                    <option value={1}>From right</option>
+                    <option value={2}>From top</option>
+                    <option value={3}>From bottom</option>
+                  </select>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <p className="insp-hint">
+        In plays over the layer's start, Out over its end. Overlap a layer beneath to
+        cross-blend.
+      </p>
+    </div>
+  );
+}
+
 interface Props {
   layer: Layer | null;
   decomposed: boolean;
@@ -778,6 +858,7 @@ interface Props {
   onToggleDecompose: (layerId: number) => void;
   onClearParts: (layerId: number) => void;
   onDecomposeKey: (layerId: number, value: number) => void;
+  onSetLayerTransition: SetLayerTransition;
 }
 
 export default function Inspector({
@@ -806,6 +887,7 @@ export default function Inspector({
   onToggleDecompose,
   onClearParts,
   onDecomposeKey,
+  onSetLayerTransition,
 }: Props) {
   const decalControls = layer && (layer.kind.kind === "image" || layer.kind.kind === "text") && (
     <DecalControls
@@ -877,6 +959,7 @@ export default function Inspector({
           {layer.kind.kind} layer — drag on the canvas to move/scale, ◆ Key to set a keyframe.
         </span>
       )}
+      {layer && <TransitionsSection layer={layer} onSet={onSetLayerTransition} />}
     </aside>
   );
 }

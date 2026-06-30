@@ -10,7 +10,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::model::{Easing, Effect, LayerKind, LetterAnimation, LetterPreset, Project, Track};
+use crate::model::{
+    Easing, Effect, LayerKind, LetterAnimation, LetterPreset, Project, Track, TransitionKind,
+};
 use crate::surface::{self, ResolvedShapeFrame, ResolvedSurface, ShapeState};
 
 /// A layer's transform fully resolved at one instant in time. Field names are
@@ -40,6 +42,52 @@ pub struct ResolvedLayer {
     /// The layer's effect stack with every parameter sampled at this time, in
     /// apply order. Empty when the layer has no effects.
     pub effects: Vec<ResolvedEffect>,
+    /// Active in/out transition at this time (factor 0 = fully transitioned /
+    /// hidden, 1 = fully present). `None` outside any transition window.
+    pub transition: Option<ResolvedTransition>,
+}
+
+/// A layer's in/out transition resolved at a point in time.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ResolvedTransition {
+    pub kind: TransitionKind,
+    /// 0 = fully transitioned-out, 1 = fully present (eased).
+    pub factor: f32,
+    pub direction: u8,
+}
+
+/// Resolve a layer's active transition (in or out) at `t_ms`, if any. When both
+/// windows overlap, the more-transitioned (smaller factor) one wins.
+fn resolve_transition(layer: &crate::model::Layer, t_ms: u32) -> Option<ResolvedTransition> {
+    let mut factor = 2.0f32; // sentinel above any real factor
+    let mut kind = None;
+    let mut direction = 0u8;
+    if let Some(ti) = &layer.transition_in {
+        if ti.dur_ms > 0 && t_ms < layer.start_ms + ti.dur_ms {
+            let u = t_ms.saturating_sub(layer.start_ms) as f32 / ti.dur_ms as f32;
+            let f = ease(Easing::EaseInOut, u);
+            if f < factor {
+                factor = f;
+                kind = Some(ti.kind);
+                direction = ti.direction;
+            }
+        }
+    }
+    if let Some(to) = &layer.transition_out {
+        let start_out = layer.end_ms.saturating_sub(to.dur_ms);
+        if to.dur_ms > 0 && t_ms > start_out {
+            let u = layer.end_ms.saturating_sub(t_ms) as f32 / to.dur_ms as f32;
+            let f = ease(Easing::EaseInOut, u);
+            if f < factor {
+                factor = f;
+                kind = Some(to.kind);
+                direction = to.direction;
+            }
+        }
+    }
+    kind.map(|kind| ResolvedTransition { kind, factor: factor.clamp(0.0, 1.0), direction })
 }
 
 /// One effect with its parameters resolved at a point in time (camelCase field
@@ -296,6 +344,7 @@ pub fn evaluate(
                 surface: decal,
                 shape,
                 effects,
+                transition: resolve_transition(layer, t_ms),
             }
         })
         .collect()

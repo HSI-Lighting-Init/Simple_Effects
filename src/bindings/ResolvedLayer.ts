@@ -3,6 +3,7 @@ import type { LetterTransform } from "./LetterTransform";
 import type { ResolvedEffect } from "./ResolvedEffect";
 import type { ResolvedShapeFrame } from "./ResolvedShapeFrame";
 import type { ResolvedSurface } from "./ResolvedSurface";
+import type { ResolvedTransition } from "./ResolvedTransition";
 
 /**
  * A layer's transform fully resolved at one instant in time. Field names are
@@ -32,4 +33,9 @@ shape: ResolvedShapeFrame | null,
  * The layer's effect stack with every parameter sampled at this time, in
  * apply order. Empty when the layer has no effects.
  */
-effects: Array<ResolvedEffect>, };
+effects: Array<ResolvedEffect>, 
+/**
+ * Active in/out transition at this time (factor 0 = fully transitioned /
+ * hidden, 1 = fully present). `None` outside any transition window.
+ */
+transition: ResolvedTransition | null, };

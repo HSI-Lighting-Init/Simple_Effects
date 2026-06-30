@@ -36,6 +36,15 @@ export const setLayerRange = (layerId: number, startMs: number, endMs: number) =
 export const moveKeyframesAt = (layerId: number, fromMs: number, toMs: number) =>
   invoke<Project>("move_keyframes_at", { layerId, fromMs, toMs });
 
+/** Set (or clear with kind "none") a layer's in/out transition. */
+export const setLayerTransition = (
+  layerId: number,
+  slot: "in" | "out",
+  kind: "none" | "dissolve" | "slide" | "wipe",
+  durMs: number,
+  direction: number
+) => invoke<Project>("set_layer_transition", { layerId, slot, kind, durMs, direction });
+
 /** Reorder the layer stack. `order` lists every layer id bottom-first (last on top). */
 export const reorderLayers = (order: number[]) =>
   invoke<Project>("reorder_layers", { order });

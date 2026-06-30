@@ -18,7 +18,7 @@ use tauri::{Manager, State};
 use eval::ResolvedLayer;
 use model::{
     Decal, Easing, Effect, Keyframe, Layer, LayerKind, LetterAnimation, LetterOverride, Project,
-    Rgba, SurfaceShape, Track, Transform, TransformEdit,
+    Rgba, SurfaceShape, Track, Transform, TransformEdit, Transition, TransitionKind,
 };
 use text::{Font, ShapedText};
 
@@ -174,6 +174,8 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
         hidden: false,
         attach: None,
         effects: vec![],
+        transition_in: None,
+        transition_out: None,
     });
     state.shaped.lock().unwrap().insert(next_id, shaped);
     project.clone()
@@ -308,6 +310,8 @@ fn add_image_layer(state: State<AppState>, path: String) -> Project {
         hidden: false,
         attach: None,
         effects: vec![],
+        transition_in: None,
+        transition_out: None,
     });
     project.clone()
 }
@@ -490,6 +494,40 @@ fn move_keyframes_at(
     Ok(project.clone())
 }
 
+/// Set (or clear) a layer's in/out transition. `slot` is "in" or "out"; `kind`
+/// is "none" (clear), "dissolve", "slide", or "wipe". `direction` (0=left,
+/// 1=right,2=up,3=down) is used by slide/wipe. Undoable.
+#[tauri::command]
+fn set_layer_transition(
+    state: State<AppState>,
+    layer_id: u32,
+    slot: String,
+    kind: String,
+    dur_ms: u32,
+    direction: u8,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let transition = match kind.as_str() {
+        "none" => None,
+        "dissolve" => Some(Transition { kind: TransitionKind::Dissolve, dur_ms, direction }),
+        "slide" => Some(Transition { kind: TransitionKind::Slide, dur_ms, direction }),
+        "wipe" => Some(Transition { kind: TransitionKind::Wipe, dur_ms, direction }),
+        _ => return Err("unknown transition kind".into()),
+    };
+    match slot.as_str() {
+        "in" => layer.transition_in = transition,
+        "out" => layer.transition_out = transition,
+        _ => return Err("slot must be \"in\" or \"out\"".into()),
+    }
+    Ok(project.clone())
+}
+
 /// Reorder the layer stack (z-order). `order` is the full list of layer ids in
 /// the new draw order: index 0 is the bottom layer, the last is drawn on top.
 /// Must be a permutation of the current ids. Undoable.
@@ -654,6 +692,8 @@ fn add_shape_layer(state: State<AppState>, shape: SurfaceShape) -> Project {
         hidden: false,
         attach: None,
         effects: vec![],
+        transition_in: None,
+        transition_out: None,
     });
     project.clone()
 }
@@ -1309,6 +1349,7 @@ pub fn run() {
             set_comp_fps,
             set_layer_range,
             move_keyframes_at,
+            set_layer_transition,
             reorder_layers,
             save_project_file,
             open_project_file,

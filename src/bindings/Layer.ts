@@ -3,6 +3,7 @@ import type { Decal } from "./Decal";
 import type { Effect } from "./Effect";
 import type { LayerKind } from "./LayerKind";
 import type { Transform } from "./Transform";
+import type { Transition } from "./Transition";
 
 /**
  * One item on the timeline.
@@ -29,4 +30,13 @@ attach: Decal | null,
  * A stack of visual effects applied in order when the layer renders
  * (currently honoured for flat image layers). Keyframeable.
  */
-effects: Array<Effect>, };
+effects: Array<Effect>, 
+/**
+ * Optional transition played over the layer's first `dur_ms` (blends it in
+ * against whatever is below it).
+ */
+transitionIn: Transition | null, 
+/**
+ * Optional transition played over the layer's last `dur_ms` (blends it out).
+ */
+transitionOut: Transition | null, };

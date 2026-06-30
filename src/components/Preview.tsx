@@ -5,7 +5,7 @@
 // transform ends, the changed properties are committed as keyframes at the
 // current playhead time (via onCommit) — that's what turns a manual edit into
 // animation. The component still owns no interpolation math.
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactElement } from "react";
 import {
   Stage,
   Layer as KLayer,
@@ -28,6 +28,7 @@ import { applyEffects } from "../lib/effects";
 import type { Project } from "../bindings/Project";
 import type { Layer } from "../bindings/Layer";
 import type { ResolvedLayer } from "../bindings/ResolvedLayer";
+import type { ResolvedTransition } from "../bindings/ResolvedTransition";
 import type { Rgba } from "../bindings/Rgba";
 import type { BlendMode } from "../bindings/BlendMode";
 import type { TransformEdit } from "../bindings/TransformEdit";
@@ -49,6 +50,53 @@ function composite(blend: BlendMode): GlobalCompositeOperation {
     default:
       return "source-over";
   }
+}
+
+/** Group props that apply a layer's in/out transition (factor 0..1). Dissolve
+ *  fades opacity; Slide offsets position from an edge; Wipe hard-clips a
+ *  directional reveal. `direction`: 0=left,1=right,2=up,3=down. Comp pixels. */
+type GroupTransitionProps = {
+  opacity?: number;
+  x?: number;
+  y?: number;
+  clipFunc?: (ctx: Konva.Context) => void;
+};
+function transitionGroupProps(
+  t: ResolvedTransition | null | undefined,
+  w: number,
+  h: number
+): GroupTransitionProps | null {
+  if (!t) return null;
+  const f = t.factor;
+  if (t.kind === "dissolve") return { opacity: f };
+  if (t.kind === "slide") {
+    const d = 1 - f;
+    if (t.direction === 0) return { x: -w * d };
+    if (t.direction === 1) return { x: w * d };
+    if (t.direction === 2) return { y: -h * d };
+    return { y: h * d };
+  }
+  if (t.kind === "wipe") {
+    return {
+      clipFunc: (ctx: Konva.Context) => {
+        let x = 0,
+          y = 0,
+          cw = w,
+          ch = h;
+        if (t.direction === 0) cw = w * f;
+        else if (t.direction === 1) {
+          x = w * (1 - f);
+          cw = w * f;
+        } else if (t.direction === 2) ch = h * f;
+        else {
+          y = h * (1 - f);
+          ch = h * f;
+        }
+        (ctx as unknown as CanvasRenderingContext2D).rect(x, y, cw, ch);
+      },
+    };
+  }
+  return null;
 }
 
 /** Interaction props shared by every layer node (everything except the ref). */
@@ -805,12 +853,12 @@ export default function Preview({
               const r = resolved[layer.id];
               if (!r || !r.visible) return null;
               const k = layer.kind;
+              let node: ReactElement;
               // Pinned to a shape (image or text) → render as a decal on its
               // surface, regardless of the layer kind.
               if (r.surface) {
-                return (
+                node = (
                   <DecalNode
-                    key={layer.id}
                     layer={layer}
                     src={k.kind === "image" ? images[k.src] : undefined}
                     r={r}
@@ -822,11 +870,9 @@ export default function Preview({
                     onDecalScale={onDecalScale}
                   />
                 );
-              }
-              if (k.kind === "colorpatch") {
-                return (
+              } else if (k.kind === "colorpatch") {
+                node = (
                   <Rect
-                    key={layer.id}
                     ref={register(layer.id)}
                     x={r.x}
                     y={r.y}
@@ -843,11 +889,9 @@ export default function Preview({
                     {...interaction(layer.id)}
                   />
                 );
-              }
-              if (k.kind === "text") {
-                return (
+              } else if (k.kind === "text") {
+                node = (
                   <TextGlyphs
-                    key={layer.id}
                     layerId={layer.id}
                     content={k.content}
                     size={k.size}
@@ -863,11 +907,9 @@ export default function Preview({
                     onCommitPart={onCommitPart}
                   />
                 );
-              }
-              if (k.kind === "shape3d") {
-                return (
+              } else if (k.kind === "shape3d") {
+                node = (
                   <ShapeNode
-                    key={layer.id}
                     layerId={layer.id}
                     r={r}
                     selected={selectedId === layer.id}
@@ -878,26 +920,35 @@ export default function Preview({
                     exporting={exporting}
                   />
                 );
+              } else {
+                // A flat image (not pinned) — draggable onto a shape to pin it.
+                // With effects it goes through the effect renderer.
+                const src = k.kind === "image" ? images[k.src] : undefined;
+                node =
+                  r.effects.length > 0 ? (
+                    <EffectImageNode
+                      src={src}
+                      r={r}
+                      interaction={flatImageInteraction(layer.id)}
+                      registerRef={register(layer.id)}
+                    />
+                  ) : (
+                    <ImageNode
+                      src={src}
+                      r={r}
+                      interaction={flatImageInteraction(layer.id)}
+                      registerRef={register(layer.id)}
+                    />
+                  );
               }
-              // A flat image (not pinned) — draggable onto a shape to pin it.
-              // With effects it goes through the effect renderer.
-              const src = k.kind === "image" ? images[k.src] : undefined;
-              return r.effects.length > 0 ? (
-                <EffectImageNode
-                  key={layer.id}
-                  src={src}
-                  r={r}
-                  interaction={flatImageInteraction(layer.id)}
-                  registerRef={register(layer.id)}
-                />
+              // Wrap in a transition group (dissolve/slide/wipe) when active.
+              const tp = transitionGroupProps(r.transition, project.width, project.height);
+              return tp ? (
+                <Group key={layer.id} {...tp}>
+                  {node}
+                </Group>
               ) : (
-                <ImageNode
-                  key={layer.id}
-                  src={src}
-                  r={r}
-                  interaction={flatImageInteraction(layer.id)}
-                  registerRef={register(layer.id)}
-                />
+                <Group key={layer.id}>{node}</Group>
               );
             })}
 

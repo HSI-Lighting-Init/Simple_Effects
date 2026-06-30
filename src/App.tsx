@@ -19,6 +19,7 @@ import {
   setCompDuration,
   setCompFps,
   setLayerRange,
+  setLayerTransition,
   reorderLayers,
   saveProjectFile,
   openProjectFile,
@@ -695,6 +696,23 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("delete_keyframe", { layerId, tMs });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Set/clear a layer's in/out transition.
+  const onSetLayerTransition = useCallback(
+    async (
+      layerId: number,
+      slot: "in" | "out",
+      kind: "none" | "dissolve" | "slide" | "wipe",
+      durMs: number,
+      direction: number
+    ) => {
+      const p = await setLayerTransition(layerId, slot, kind, durMs, direction);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("layer_transition", { layerId, slot, kind, durMs, direction });
     },
     [applyTime, recordAction]
   );
@@ -1486,6 +1504,7 @@ export default function App() {
           onToggleDecompose={toggleDecompose}
           onClearParts={onClearParts}
           onDecomposeKey={onDecomposeKey}
+          onSetLayerTransition={onSetLayerTransition}
         />
       </div>
 
