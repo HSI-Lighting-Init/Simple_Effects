@@ -16,6 +16,7 @@ import {
   Shape,
   Circle,
   Line,
+  Text,
   Transformer,
 } from "react-konva";
 import Konva from "konva";
@@ -678,6 +679,9 @@ interface Props {
   onDecalScale: (layerId: number, scale: number) => void;
   onShapeContextMenu: (layerId: number, x: number, y: number) => void;
   exporting?: boolean;
+  /** When set (during export with "show FPS" on), burn this fps value into the
+   *  rendered frames as a corner label. Null = no overlay. */
+  fpsOverlay?: number | null;
 }
 
 export default function Preview({
@@ -696,6 +700,7 @@ export default function Preview({
   onDecalScale,
   onShapeContextMenu,
   exporting = false,
+  fpsOverlay = null,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
@@ -895,6 +900,28 @@ export default function Preview({
                 />
               );
             })}
+
+            {/* Burned-in FPS label for the rendered video (export only). Placed
+                in comp space so it scales with the frame; drawn last = on top. */}
+            {fpsOverlay != null && (
+              <Group x={project.width * 0.02} y={project.width * 0.02} listening={false}>
+                <Rect
+                  width={project.height * 0.16}
+                  height={project.height * 0.06}
+                  cornerRadius={project.height * 0.012}
+                  fill="rgba(0,0,0,0.55)"
+                />
+                <Text
+                  text={`${fpsOverlay} FPS`}
+                  x={project.height * 0.02}
+                  y={project.height * 0.013}
+                  fontSize={project.height * 0.034}
+                  fontStyle="bold"
+                  fontFamily="Arial, sans-serif"
+                  fill="#ffffff"
+                />
+              </Group>
+            )}
 
             {!playing && (
               <Transformer

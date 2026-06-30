@@ -17,6 +17,7 @@ import {
   addTextLayer,
   setCompSize,
   setCompDuration,
+  setCompFps,
   setLayerRange,
   reorderLayers,
   saveProjectFile,
@@ -139,6 +140,12 @@ export default function App() {
   const [showCompSettings, setShowCompSettings] = useState(false);
   const [fxEditorId, setFxEditorId] = useState<number | null>(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
+  // Live preview frame rate (measured during playback) and the FPS label burned
+  // into the video while exporting (null = off).
+  const [previewFps, setPreviewFps] = useState(0);
+  const [fpsOverlay, setFpsOverlay] = useState<number | null>(null);
+  const fpsFramesRef = useRef(0);
+  const fpsLastRef = useRef(0);
   // The .sefx file the project is bound to (null = never saved). `fileName` is
   // just its display name for the title bar / toolbar.
   const filePathRef = useRef<string | null>(null);
@@ -270,6 +277,7 @@ export default function App() {
     if (playingRef.current) recordAction("pause");
     playingRef.current = false;
     setPlaying(false);
+    setPreviewFps(0);
     cancelAnimationFrame(rafRef.current);
   }, [recordAction]);
 
@@ -280,6 +288,9 @@ export default function App() {
     setPlaying(true);
     let startWall = performance.now();
     let startTime = timeRef.current >= durationRef.current ? 0 : timeRef.current;
+    // Reset the FPS meter for this run.
+    fpsFramesRef.current = 0;
+    fpsLastRef.current = performance.now();
 
     const tick = async () => {
       if (!playingRef.current) return;
@@ -292,11 +303,20 @@ export default function App() {
       }
       timeRef.current = t;
       setTime(t);
-      // Skip a frame rather than queue overlapping IPC calls.
+      // Skip a frame rather than queue overlapping IPC calls. Each completed
+      // render counts toward the live preview FPS, recomputed ~3×/second.
       if (!evalBusy.current) {
         evalBusy.current = true;
         try {
           await applyTime(t);
+          fpsFramesRef.current += 1;
+          const now = performance.now();
+          const span = now - fpsLastRef.current;
+          if (span >= 333) {
+            setPreviewFps(Math.round((fpsFramesRef.current * 1000) / span));
+            fpsFramesRef.current = 0;
+            fpsLastRef.current = now;
+          }
         } finally {
           evalBusy.current = false;
         }
@@ -784,9 +804,15 @@ export default function App() {
   // WebM, then saved as-is (webm) or transcoded to MP4 (H.264) by Rust/ffmpeg.
   // `level` 1..5 = compression; for WebM it also sets the recording bitrate.
   const onExport = useCallback(
-    async (format: "mp4" | "webm", level: number) => {
-      const p = projectRef.current;
+    async (format: "mp4" | "webm", level: number, fps: number, burnFps: boolean) => {
+      let p = projectRef.current;
       if (!p || exportingRef.current) return;
+      // Persist the chosen frame rate as the comp's fps (keeps toolbar/preview in
+      // sync and is what the capture runs at).
+      if (fps !== p.fps) {
+        p = await setCompFps(fps);
+        setProject(p);
+      }
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       const path = await save({
         defaultPath: `render-${stamp}.${format}`,
@@ -796,6 +822,8 @@ export default function App() {
 
       stop();
       setSelectedId(null);
+      // Burn the fps label into the frames if requested.
+      setFpsOverlay(burnFps ? fps : null);
       exportingRef.current = true;
       setExporting(true);
       setExportMsg("Preparing…");
@@ -804,7 +832,6 @@ export default function App() {
         await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
         const canvas = document.querySelector(".preview-stage canvas") as HTMLCanvasElement | null;
         if (!canvas) throw new Error("preview canvas not found");
-        const fps = p.fps || 30;
         const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
           ? "video/webm;codecs=vp9"
           : "video/webm";
@@ -855,6 +882,7 @@ export default function App() {
       } finally {
         exportingRef.current = false;
         setExporting(false);
+        setFpsOverlay(null);
         setExportMsg("");
         await applyTime(timeRef.current);
       }
@@ -1299,8 +1327,14 @@ export default function App() {
         <span className="time">
           {(time / 1000).toFixed(2)}s / {(project.durationMs / 1000).toFixed(2)}s
         </span>
+        <span
+          className="fps"
+          title="Live preview frame rate while playing (target is the comp fps)"
+        >
+          {playing ? `${previewFps} fps` : `${project.fps} fps`}
+        </span>
         <span className="meta">
-          {project.width}×{project.height} · {project.fps}fps
+          {project.width}×{project.height}
         </span>
       </header>
 
@@ -1322,6 +1356,7 @@ export default function App() {
             onDecalScale={onDecalScale}
             onShapeContextMenu={onShapeContextMenu}
             exporting={exporting}
+            fpsOverlay={fpsOverlay}
           />
           {exporting && (
             <div className="export-overlay">
@@ -1452,7 +1487,11 @@ export default function App() {
       )}
 
       {showExportDialog && (
-        <ExportDialog onExport={onExport} onClose={() => setShowExportDialog(false)} />
+        <ExportDialog
+          defaultFps={project.fps}
+          onExport={onExport}
+          onClose={() => setShowExportDialog(false)}
+        />
       )}
 
       {fxLayer && fxLayer.kind.kind === "image" && (

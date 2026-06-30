@@ -368,6 +368,16 @@ body {
   font-size: 13px;
 }
 
+.toolbar .fps {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: rgba(108, 140, 255, 0.16);
+  border: 1px solid rgba(108, 140, 255, 0.4);
+  border-radius: 5px;
+  padding: 2px 7px;
+  font-size: 12px;
+}
+
 .toolbar .meta {
   color: var(--muted);
   font-size: 12px;

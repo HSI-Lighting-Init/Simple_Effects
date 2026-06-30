@@ -24,6 +24,10 @@ export const setCompSize = (width: number, height: number) =>
 export const setCompDuration = (durationMs: number) =>
   invoke<Project>("set_comp_duration", { durationMs });
 
+/** Set the composition frame rate (fps) — the render/export rate. */
+export const setCompFps = (fps: number) =>
+  invoke<Project>("set_comp_fps", { fps });
+
 /** Set one layer's play range [startMs, endMs] (when it appears on the timeline). */
 export const setLayerRange = (layerId: number, startMs: number, endMs: number) =>
   invoke<Project>("set_layer_range", { layerId, startMs, endMs });

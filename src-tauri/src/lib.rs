@@ -375,6 +375,16 @@ fn set_comp_size(state: State<AppState>, width: u32, height: u32) -> Project {
     project.clone()
 }
 
+/// Set the composition frame rate (fps) — the rate the video renders at.
+/// Clamped to a sane range. Undoable.
+#[tauri::command]
+fn set_comp_fps(state: State<AppState>, fps: u32) -> Project {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    project.fps = fps.clamp(1, 240);
+    project.clone()
+}
+
 /// Set the composition length (ms). Any layer whose range runs past the new end
 /// is trimmed to fit (so blocks stay inside the timeline). Undoable.
 #[tauri::command]
@@ -1240,6 +1250,7 @@ pub fn run() {
             clear_keyframes,
             set_comp_size,
             set_comp_duration,
+            set_comp_fps,
             set_layer_range,
             reorder_layers,
             save_project_file,

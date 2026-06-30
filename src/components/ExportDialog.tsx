@@ -12,15 +12,21 @@ const LEVELS = [
   "Highest compression — smallest file",
 ];
 
+const FPS_OPTIONS = [24, 25, 30, 50, 60];
+
 export default function ExportDialog({
+  defaultFps,
   onExport,
   onClose,
 }: {
-  onExport: (format: "mp4" | "webm", level: number) => void;
+  defaultFps: number;
+  onExport: (format: "mp4" | "webm", level: number, fps: number, burnFps: boolean) => void;
   onClose: () => void;
 }) {
   const [format, setFormat] = useState<"mp4" | "webm">("mp4");
   const [level, setLevel] = useState(2);
+  const [fps, setFps] = useState(defaultFps);
+  const [burnFps, setBurnFps] = useState(false);
   const [ffmpeg, setFfmpeg] = useState<string | null | "checking">("checking");
   const [installing, setInstalling] = useState(false);
 
@@ -69,6 +75,17 @@ export default function ExportDialog({
           </label>
 
           <label className="insp-field">
+            Frame rate
+            <select value={fps} onChange={(e) => setFps(Number(e.target.value))}>
+              {FPS_OPTIONS.map((f) => (
+                <option key={f} value={f}>
+                  {f} fps
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="insp-field">
             Compression — level {level}
             <input
               type="range"
@@ -79,6 +96,15 @@ export default function ExportDialog({
               onChange={(e) => setLevel(Number(e.target.value))}
             />
             <span className="muted">{LEVELS[level - 1]}</span>
+          </label>
+
+          <label className="surf-face">
+            <input
+              type="checkbox"
+              checked={burnFps}
+              onChange={(e) => setBurnFps(e.target.checked)}
+            />
+            Show FPS on the video (burned-in label)
           </label>
 
           {format === "mp4" &&
@@ -105,7 +131,7 @@ export default function ExportDialog({
             className="insp-btn active"
             disabled={needFfmpeg || checking || installing}
             onClick={() => {
-              onExport(format, level);
+              onExport(format, level, fps, burnFps);
               onClose();
             }}
           >
