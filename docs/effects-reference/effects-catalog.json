@@ -1,0 +1,178 @@
+{
+  "_about": "Clean-room reference of per-layer effects, kdenlive-informed. Params are facts (name/type/range/default), not copied code. status: 'have' = already in our Effect enum; 'gap' = to build. renderTechnique: css-filter | pixel | webgl-shader | mask. See README.md.",
+  "categories": ["color", "blur", "stylize", "distort", "key", "geometry"],
+  "effects": [
+    {
+      "id": "grayscale", "name": "Black & White", "category": "color", "status": "have",
+      "kdenliveTag": "avfilter.greyscale / frei0r.saturat0r",
+      "renderTechnique": "css-filter", "priority": "done",
+      "params": [{ "name": "amount", "type": "double", "min": 0, "max": 1, "default": 1 }]
+    },
+    {
+      "id": "brightness", "name": "Brightness", "category": "color", "status": "have",
+      "kdenliveTag": "brightness",
+      "renderTechnique": "css-filter", "priority": "done",
+      "params": [{ "name": "amount", "type": "double", "min": 0, "max": 4, "default": 1.2 }]
+    },
+    {
+      "id": "contrast", "name": "Contrast", "category": "color", "status": "have",
+      "kdenliveTag": "avfilter.eq:contrast",
+      "renderTechnique": "css-filter", "priority": "done",
+      "params": [{ "name": "amount", "type": "double", "min": 0, "max": 4, "default": 1.2 }]
+    },
+    {
+      "id": "saturate", "name": "Saturation", "category": "color", "status": "have",
+      "kdenliveTag": "frei0r.saturat0r",
+      "renderTechnique": "css-filter", "priority": "done",
+      "params": [{ "name": "amount", "type": "double", "min": 0, "max": 4, "default": 1.5 }]
+    },
+    {
+      "id": "blur", "name": "Blur", "category": "blur", "status": "have",
+      "kdenliveTag": "avfilter.gblur / boxblur",
+      "renderTechnique": "css-filter", "priority": "done",
+      "params": [{ "name": "radius", "type": "double", "min": 0, "max": 100, "default": 6 }]
+    },
+    {
+      "id": "hue", "name": "Hue Shift", "category": "color", "status": "have",
+      "kdenliveTag": "avfilter.hue",
+      "renderTechnique": "css-filter", "priority": "done",
+      "params": [{ "name": "degrees", "type": "double", "min": 0, "max": 360, "default": 90 }]
+    },
+    {
+      "id": "invert", "name": "Invert", "category": "color", "status": "have",
+      "kdenliveTag": "avfilter.negate / frei0r.invert0r",
+      "renderTechnique": "css-filter", "priority": "done",
+      "params": [{ "name": "amount", "type": "double", "min": 0, "max": 1, "default": 1 }]
+    },
+    {
+      "id": "wipe", "name": "Wipe / Fade", "category": "stylize", "status": "have",
+      "kdenliveTag": "(our own; cf. transitions/wipe)",
+      "renderTechnique": "mask", "priority": "done",
+      "params": [
+        { "name": "angle", "type": "double", "min": 0, "max": 360, "default": 0 },
+        { "name": "position", "type": "double", "min": 0, "max": 1, "default": 0 },
+        { "name": "softness", "type": "double", "min": 0, "max": 1, "default": 0.15 },
+        { "name": "invert", "type": "bool", "min": 0, "max": 1, "default": 0 }
+      ]
+    },
+
+    {
+      "id": "sepia", "name": "Sepia / Tint", "category": "color", "status": "gap",
+      "kdenliveTag": "sepia / frei0r.tint0r",
+      "renderTechnique": "css-filter", "priority": "high",
+      "params": [
+        { "name": "amount", "type": "double", "min": 0, "max": 1, "default": 1 },
+        { "name": "hue", "type": "double", "min": 0, "max": 360, "default": 35 }
+      ]
+    },
+    {
+      "id": "gamma", "name": "Gamma", "category": "color", "status": "gap",
+      "kdenliveTag": "gamma",
+      "renderTechnique": "pixel", "priority": "high",
+      "params": [{ "name": "gamma", "type": "double", "min": 0.1, "max": 3, "default": 1 }]
+    },
+    {
+      "id": "vignette", "name": "Vignette", "category": "stylize", "status": "gap",
+      "kdenliveTag": "frei0r.vignette / avfilter.vignette",
+      "renderTechnique": "mask", "priority": "high",
+      "params": [
+        { "name": "amount", "type": "double", "min": 0, "max": 1, "default": 0.6 },
+        { "name": "radius", "type": "double", "min": 0, "max": 1, "default": 0.7 },
+        { "name": "softness", "type": "double", "min": 0, "max": 1, "default": 0.5 }
+      ]
+    },
+    {
+      "id": "sharpen", "name": "Sharpen", "category": "stylize", "status": "gap",
+      "kdenliveTag": "avfilter.unsharp / frei0r.sharpness",
+      "renderTechnique": "webgl-shader", "priority": "high",
+      "params": [{ "name": "amount", "type": "double", "min": 0, "max": 3, "default": 0.6 }]
+    },
+    {
+      "id": "color_balance", "name": "Color Balance (Lift/Gamma/Gain)", "category": "color", "status": "gap",
+      "kdenliveTag": "lift_gamma_gain",
+      "renderTechnique": "webgl-shader", "priority": "med",
+      "params": [
+        { "name": "liftR", "type": "double", "min": -1, "max": 1, "default": 0 },
+        { "name": "liftG", "type": "double", "min": -1, "max": 1, "default": 0 },
+        { "name": "liftB", "type": "double", "min": -1, "max": 1, "default": 0 },
+        { "name": "gammaR", "type": "double", "min": 0.1, "max": 3, "default": 1 },
+        { "name": "gammaG", "type": "double", "min": 0.1, "max": 3, "default": 1 },
+        { "name": "gammaB", "type": "double", "min": 0.1, "max": 3, "default": 1 },
+        { "name": "gainR", "type": "double", "min": 0, "max": 3, "default": 1 },
+        { "name": "gainG", "type": "double", "min": 0, "max": 3, "default": 1 },
+        { "name": "gainB", "type": "double", "min": 0, "max": 3, "default": 1 }
+      ]
+    },
+    {
+      "id": "levels", "name": "Levels", "category": "color", "status": "gap",
+      "kdenliveTag": "avfilter.colorlevels / frei0r.levels",
+      "renderTechnique": "pixel", "priority": "med",
+      "params": [
+        { "name": "inBlack", "type": "double", "min": 0, "max": 1, "default": 0 },
+        { "name": "inWhite", "type": "double", "min": 0, "max": 1, "default": 1 },
+        { "name": "gamma", "type": "double", "min": 0.1, "max": 3, "default": 1 },
+        { "name": "outBlack", "type": "double", "min": 0, "max": 1, "default": 0 },
+        { "name": "outWhite", "type": "double", "min": 0, "max": 1, "default": 1 }
+      ]
+    },
+    {
+      "id": "white_balance", "name": "White Balance", "category": "color", "status": "gap",
+      "kdenliveTag": "frei0r.balanc0r / avfilter.colortemperature",
+      "renderTechnique": "webgl-shader", "priority": "med",
+      "params": [
+        { "name": "temperature", "type": "double", "min": 2000, "max": 12000, "default": 6500 },
+        { "name": "tint", "type": "double", "min": -1, "max": 1, "default": 0 }
+      ]
+    },
+    {
+      "id": "threshold", "name": "Threshold", "category": "stylize", "status": "gap",
+      "kdenliveTag": "threshold0r",
+      "renderTechnique": "css-filter", "priority": "low",
+      "params": [{ "name": "level", "type": "double", "min": 0, "max": 1, "default": 0.5 }]
+    },
+    {
+      "id": "pixelate", "name": "Pixelate / Mosaic", "category": "stylize", "status": "gap",
+      "kdenliveTag": "frei0r.pixeliz0r / avfilter.pixelize",
+      "renderTechnique": "pixel", "priority": "low",
+      "params": [{ "name": "size", "type": "double", "min": 1, "max": 128, "default": 12 }]
+    },
+    {
+      "id": "glow", "name": "Glow / Bloom", "category": "stylize", "status": "gap",
+      "kdenliveTag": "frei0r.glow / avfilter.gblur+blend",
+      "renderTechnique": "composite", "priority": "med",
+      "params": [
+        { "name": "radius", "type": "double", "min": 0, "max": 100, "default": 12 },
+        { "name": "amount", "type": "double", "min": 0, "max": 2, "default": 0.8 }
+      ]
+    },
+    {
+      "id": "chroma_key", "name": "Chroma Key (Green/Blue screen)", "category": "key", "status": "gap",
+      "kdenliveTag": "avfilter.chromakey / bluescreen0r",
+      "renderTechnique": "webgl-shader", "priority": "high",
+      "params": [
+        { "name": "keyR", "type": "int", "min": 0, "max": 255, "default": 0 },
+        { "name": "keyG", "type": "int", "min": 0, "max": 255, "default": 255 },
+        { "name": "keyB", "type": "int", "min": 0, "max": 255, "default": 0 },
+        { "name": "variance", "type": "double", "min": 0, "max": 1, "default": 0.25 },
+        { "name": "edge", "type": "double", "min": 0, "max": 1, "default": 0.1 }
+      ]
+    },
+    {
+      "id": "mirror", "name": "Mirror / Flip", "category": "geometry", "status": "gap",
+      "kdenliveTag": "avfilter.hflip / avfilter.vflip / mirror",
+      "renderTechnique": "geometry", "priority": "low",
+      "params": [{ "name": "axis", "type": "enum", "min": 0, "max": 1, "default": 0, "_values": ["horizontal", "vertical"] }]
+    },
+    {
+      "id": "crop", "name": "Crop", "category": "geometry", "status": "gap",
+      "kdenliveTag": "qtcrop / avfilter.crop",
+      "renderTechnique": "geometry", "priority": "low",
+      "params": [
+        { "name": "left", "type": "double", "min": 0, "max": 1, "default": 0 },
+        { "name": "top", "type": "double", "min": 0, "max": 1, "default": 0 },
+        { "name": "right", "type": "double", "min": 0, "max": 1, "default": 0 },
+        { "name": "bottom", "type": "double", "min": 0, "max": 1, "default": 0 }
+      ]
+    }
+  ]
+}

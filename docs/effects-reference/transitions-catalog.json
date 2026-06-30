@@ -1,0 +1,63 @@
+{
+  "_about": "Clean-room reference of cross-layer transitions, kdenlive-informed. We currently have NONE of these. Modeled in our app as per-layer in/out transitions that blend a layer with what is below it (stacked layers compose back-to-front). renderTechnique: opacity | mask | geometry | composite. See IMPLEMENTATION_PLAN.md.",
+  "transitions": [
+    {
+      "id": "dissolve", "name": "Dissolve (cross-fade)", "kdenliveTag": "luma", "priority": "high",
+      "renderTechnique": "opacity",
+      "summary": "Fade the layer in/out by animating its opacity; over an overlap with the layer beneath this reads as a cross-dissolve.",
+      "params": [{ "name": "durationMs", "type": "int", "min": 0, "max": 10000, "default": 800 }]
+    },
+    {
+      "id": "wipe", "name": "Wipe (directional)", "kdenliveTag": "wipe", "priority": "high",
+      "renderTechnique": "mask",
+      "summary": "Directional reveal via an animated alpha gradient. Reuse the existing Wipe effect math (applyWipe in effects.ts).",
+      "params": [
+        { "name": "durationMs", "type": "int", "min": 0, "max": 10000, "default": 800 },
+        { "name": "angle", "type": "double", "min": 0, "max": 360, "default": 0 },
+        { "name": "softness", "type": "double", "min": 0, "max": 1, "default": 0.2 }
+      ]
+    },
+    {
+      "id": "slide", "name": "Slide / Push", "kdenliveTag": "slide", "priority": "high",
+      "renderTechnique": "geometry",
+      "summary": "Translate the layer in from an edge (or push). Offset animates from off-frame to its resting transform over the duration.",
+      "params": [
+        { "name": "durationMs", "type": "int", "min": 0, "max": 10000, "default": 800 },
+        { "name": "direction", "type": "enum", "min": 0, "max": 3, "default": 0, "_values": ["left", "right", "up", "down"] }
+      ]
+    },
+    {
+      "id": "luma", "name": "Luma / Gradient wipe", "kdenliveTag": "luma", "priority": "med",
+      "renderTechnique": "mask",
+      "summary": "Reveal driven by a luma map: pixels appear as an animated threshold sweeps the map's brightness. Start with built-in synthetic gradients (linear/radial/clock); custom luma PNGs later.",
+      "params": [
+        { "name": "durationMs", "type": "int", "min": 0, "max": 10000, "default": 800 },
+        { "name": "map", "type": "enum", "min": 0, "max": 3, "default": 0, "_values": ["linear", "radial", "clock", "barn"] },
+        { "name": "softness", "type": "double", "min": 0, "max": 1, "default": 0.2 }
+      ]
+    },
+    {
+      "id": "composite", "name": "Composite (blend mode)", "kdenliveTag": "qtblend / frei0r.cairoblend", "priority": "low",
+      "renderTechnique": "composite",
+      "summary": "Not really a timed transition; a blend mode between a layer and what is below (normal/multiply/screen/overlay). We already have BlendMode on ColorPatch — generalize it to all layers.",
+      "params": [{ "name": "mode", "type": "enum", "min": 0, "max": 3, "default": 0, "_values": ["normal", "multiply", "screen", "overlay"] }]
+    },
+    {
+      "id": "affine", "name": "Affine (transform)", "kdenliveTag": "affine", "priority": "low",
+      "renderTechnique": "geometry",
+      "summary": "Animated position/scale/rotation move-in. Largely covered by our existing keyframeable transform; expose as a one-click in/out preset.",
+      "params": [{ "name": "durationMs", "type": "int", "min": 0, "max": 10000, "default": 800 }]
+    },
+    {
+      "id": "matte", "name": "Matte / Track matte", "kdenliveTag": "matte", "priority": "low",
+      "renderTechnique": "mask",
+      "summary": "Use one layer's alpha/luma as the matte for another. Larger feature; document as future. Not a timed transition.",
+      "params": []
+    }
+  ],
+  "_omitted": {
+    "mix": "audio crossfade — out of scope (no audio pipeline)",
+    "region": "region-restricted filter application — advanced, future",
+    "vqm": "video quality measurement — not a transition"
+  }
+}
