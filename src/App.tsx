@@ -60,6 +60,12 @@ import {
   startRecording,
   stopRecording,
 } from "./lib/recorder";
+import {
+  beginProbeRun,
+  isProbeEnabled,
+  probeCanvas,
+  lastReport as lastProbeReport,
+} from "./lib/renderProbe";
 import type { Project } from "./bindings/Project";
 import type { ResolvedLayer } from "./bindings/ResolvedLayer";
 import type { TransformEdit } from "./bindings/TransformEdit";
@@ -832,6 +838,16 @@ export default function App() {
         await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
         const canvas = document.querySelector(".preview-stage canvas") as HTMLCanvasElement | null;
         if (!canvas) throw new Error("preview canvas not found");
+        // Render marker probe: measure each sampled output frame against the
+        // calibration lines (270 black / 540 white) + CMYK bands.
+        const probing = isProbeEnabled();
+        if (probing) {
+          beginProbeRun(
+            { width: p.width, height: p.height, fps: p.fps, durationMs: p.durationMs },
+            { width: canvas.width, height: canvas.height },
+            new Date().toISOString()
+          );
+        }
         const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
           ? "video/webm;codecs=vp9"
           : "video/webm";
@@ -853,16 +869,30 @@ export default function App() {
         // Play 0 → duration in real time; the canvas updates feed the recorder.
         const duration = p.durationMs;
         const startWall = performance.now();
+        let lastProbe = -Infinity;
+        // Sample the output ~every 500ms (after a paint) so the probe reads a
+        // fully-rendered frame; tag it with the frame's comp time.
+        const maybeProbe = async (t: number) => {
+          if (!probing || t - lastProbe < 500) return;
+          lastProbe = t;
+          await new Promise((r) => requestAnimationFrame(r));
+          probeCanvas(canvas, t);
+        };
         await new Promise<void>((resolve) => {
           const tick = async () => {
             const t = performance.now() - startWall;
             if (t >= duration) {
               await applyTime(duration);
+              if (probing) {
+                await new Promise((r) => requestAnimationFrame(r));
+                probeCanvas(canvas, duration);
+              }
               resolve();
               return;
             }
             setExportMsg(`Rendering… ${Math.round((t / duration) * 100)}%`);
             await applyTime(t);
+            await maybeProbe(t);
             requestAnimationFrame(tick);
           };
           requestAnimationFrame(tick);
@@ -870,6 +900,7 @@ export default function App() {
         await new Promise((r) => setTimeout(r, 250)); // flush last frame
         rec.stop();
         await stopped;
+        if (probing) record("render_probe", lastProbeReport());
 
         setExportMsg(format === "mp4" ? "Encoding MP4 (ffmpeg)…" : "Saving…");
         const blob = new Blob(chunks, { type: mime });

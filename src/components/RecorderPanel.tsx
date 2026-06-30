@@ -5,6 +5,13 @@
 // title bar to move it out of the way.
 import { useRef, useState } from "react";
 import { currentRecording, recentEvents } from "../lib/recorder";
+import {
+  isProbeEnabled,
+  setProbeEnabled,
+  probeSummary,
+  probeReportJson,
+  lastReport,
+} from "../lib/renderProbe";
 
 interface Props {
   recording: boolean;
@@ -41,6 +48,8 @@ export default function RecorderPanel({
   });
   const dragRef = useRef<{ dx: number; dy: number } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [probe, setProbe] = useState(isProbeEnabled());
+  const [probeCopied, setProbeCopied] = useState(false);
 
   const onHeaderDown = (e: React.MouseEvent) => {
     dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y };
@@ -85,9 +94,32 @@ export default function RecorderPanel({
     setTimeout(() => setCopied(false), 1300);
   };
 
+  const copyProbe = async () => {
+    const json = probeReportJson();
+    try {
+      await navigator.clipboard.writeText(json);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = json;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+      } catch {
+        /* ignore */
+      }
+      document.body.removeChild(ta);
+    }
+    setProbeCopied(true);
+    setTimeout(() => setProbeCopied(false), 1300);
+  };
+
   // recCount referenced so the live log re-renders as events arrive.
   void recCount;
   const events = recentEvents(120);
+  const probeReport = lastReport();
 
   return (
     <div className="rec-panel" style={{ left: pos.x, top: pos.y }}>
@@ -123,6 +155,32 @@ export default function RecorderPanel({
         <button className="rec-btn" onClick={onClear} title="Discard recorded events">
           Clear
         </button>
+      </div>
+
+      <div className="rec-probe">
+        <label className="rec-probe-toggle" title="Sample the rendered output frames at the calibration markers (black line @270px, white line @540px, CMYK bands) during the next export">
+          <input
+            type="checkbox"
+            checked={probe}
+            onChange={(e) => {
+              setProbeEnabled(e.target.checked);
+              setProbe(e.target.checked);
+            }}
+          />
+          🔬 Probe render markers (270 / 540 / CMYK)
+        </label>
+        {probeReport && (
+          <>
+            <button
+              className="rec-btn"
+              onClick={copyProbe}
+              title="Copy the render-probe diagnostics JSON"
+            >
+              {probeCopied ? "✓ Copied" : "⧉ Copy diagnostics"}
+            </button>
+            <pre className="rec-probe-summary">{probeSummary()}</pre>
+          </>
+        )}
       </div>
 
       <div className="rec-log">
