@@ -63,7 +63,8 @@ import {
 import {
   beginProbeRun,
   isProbeEnabled,
-  probeCanvas,
+  probePreview,
+  analyzeOutputVideo,
   lastReport as lastProbeReport,
 } from "./lib/renderProbe";
 import type { Project } from "./bindings/Project";
@@ -844,7 +845,6 @@ export default function App() {
         if (probing) {
           beginProbeRun(
             { width: p.width, height: p.height, fps: p.fps, durationMs: p.durationMs },
-            { width: canvas.width, height: canvas.height },
             new Date().toISOString()
           );
         }
@@ -870,13 +870,14 @@ export default function App() {
         const duration = p.durationMs;
         const startWall = performance.now();
         let lastProbe = -Infinity;
-        // Sample the output ~every 500ms (after a paint) so the probe reads a
-        // fully-rendered frame; tag it with the frame's comp time.
+        // Sample the live render canvas (the intended/preview trace) ~every
+        // 150ms after a paint, so we have a fine curve to compare the decoded
+        // video frames against.
         const maybeProbe = async (t: number) => {
-          if (!probing || t - lastProbe < 500) return;
+          if (!probing || t - lastProbe < 150) return;
           lastProbe = t;
           await new Promise((r) => requestAnimationFrame(r));
-          probeCanvas(canvas, t);
+          probePreview(canvas, t);
         };
         await new Promise<void>((resolve) => {
           const tick = async () => {
@@ -885,7 +886,7 @@ export default function App() {
               await applyTime(duration);
               if (probing) {
                 await new Promise((r) => requestAnimationFrame(r));
-                probeCanvas(canvas, duration);
+                probePreview(canvas, duration);
               }
               resolve();
               return;
@@ -900,10 +901,22 @@ export default function App() {
         await new Promise((r) => setTimeout(r, 250)); // flush last frame
         rec.stop();
         await stopped;
-        if (probing) record("render_probe", lastProbeReport());
 
         setExportMsg(format === "mp4" ? "Encoding MP4 (ffmpeg)…" : "Saving…");
         const blob = new Blob(chunks, { type: mime });
+        // Decode the just-captured video and probe its real frames, then compare
+        // to the preview trace to surface the jump/freeze in the actual output.
+        if (probing) {
+          setExportMsg("Analysing output video…");
+          try {
+            await analyzeOutputVideo(blob);
+          } catch (e) {
+            console.warn("output probe failed", e);
+          }
+          record("render_probe", lastProbeReport());
+        }
+
+        setExportMsg(format === "mp4" ? "Encoding MP4 (ffmpeg)…" : "Saving…");
         const base64 = await blobToBase64(blob);
         await exportVideo(base64, path, format, level);
         recordAction("export_video", { path, format, level });
