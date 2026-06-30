@@ -922,7 +922,12 @@ body {
   padding: 0 10px;
   font-size: 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-  cursor: pointer;
+  cursor: grab;
+  user-select: none;
+}
+
+.tl-label.row-dragging {
+  cursor: grabbing;
 }
 
 .tl-label:hover {

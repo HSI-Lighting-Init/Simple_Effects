@@ -92,6 +92,47 @@ export default function Timeline({
     onReorder(arr);
   };
 
+  // Mouse-driven layer-row reordering. We don't use HTML5 drag-and-drop because
+  // Tauri's WebView2 drag/drop handler swallows it on Windows; instead we track
+  // the pointer and hit-test rows by their `data-layer-id`, committing on release
+  // (so it's one undo step and a plain click still just selects).
+  const startRowDrag = (e: React.MouseEvent, layer: Layer) => {
+    // Let the eye/▼ and delete buttons handle their own clicks.
+    if ((e.target as HTMLElement).closest("button")) return;
+    onSelect(layer.id);
+    const startY = e.clientY;
+    let over: number | null = null;
+    let moved = false;
+
+    const rowIdAt = (x: number, y: number): number | null => {
+      const el = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(
+        ".tl-label"
+      ) as HTMLElement | null;
+      const id = el?.getAttribute("data-layer-id");
+      return id != null ? Number(id) : null;
+    };
+
+    const move = (ev: MouseEvent) => {
+      if (!moved && Math.abs(ev.clientY - startY) > 4) {
+        moved = true;
+        setRowDragId(layer.id);
+      }
+      if (!moved) return;
+      const target = rowIdAt(ev.clientX, ev.clientY);
+      over = target != null && target !== layer.id ? target : null;
+      setRowOverId(over);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      if (moved && over != null) commitReorder(layer.id, over);
+      setRowDragId(null);
+      setRowOverId(null);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
   // Begin dragging a layer block (move it) or one of its trim edges. Converts
   // horizontal mouse motion into ms against the track width, clamps to the comp,
   // and commits the new range once on release (so it's a single undo step).
@@ -187,7 +228,7 @@ export default function Timeline({
           {layers.map((l) => (
             <div
               key={l.id}
-              draggable
+              data-layer-id={l.id}
               className={
                 "tl-label" +
                 (l.id === selectedId ? " selected" : "") +
@@ -199,29 +240,7 @@ export default function Timeline({
               }
               title="Drag onto another layer to drop this one under it"
               onClick={() => onSelect(l.id)}
-              onDragStart={(e) => {
-                setRowDragId(l.id);
-                e.dataTransfer.effectAllowed = "move";
-              }}
-              onDragOver={(e) => {
-                if (rowDragId == null) return;
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "move";
-                if (rowOverId !== l.id) setRowOverId(l.id);
-              }}
-              onDragLeave={() => {
-                if (rowOverId === l.id) setRowOverId(null);
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                if (rowDragId != null) commitReorder(rowDragId, l.id);
-                setRowDragId(null);
-                setRowOverId(null);
-              }}
-              onDragEnd={() => {
-                setRowDragId(null);
-                setRowOverId(null);
-              }}
+              onMouseDown={(e) => startRowDrag(e, l)}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.nativeEvent.stopPropagation();
