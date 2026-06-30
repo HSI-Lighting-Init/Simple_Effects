@@ -28,6 +28,18 @@ export const setCompDuration = (durationMs: number) =>
 export const setLayerRange = (layerId: number, startMs: number, endMs: number) =>
   invoke<Project>("set_layer_range", { layerId, startMs, endMs });
 
+/** Reorder the layer stack. `order` lists every layer id bottom-first (last on top). */
+export const reorderLayers = (order: number[]) =>
+  invoke<Project>("reorder_layers", { order });
+
+/** Save the whole project to a .sefx file (pretty JSON). */
+export const saveProjectFile = (path: string) =>
+  invoke<void>("save_project_file", { path });
+
+/** Open a .sefx project file, replacing the current project. */
+export const openProjectFile = (path: string) =>
+  invoke<Project>("open_project_file", { path });
+
 /** Resolve every layer's transform at one playhead time (comp ms). */
 export const evaluateAt = (tMs: number) =>
   invoke<ResolvedLayer[]>("evaluate_at", { tMs });

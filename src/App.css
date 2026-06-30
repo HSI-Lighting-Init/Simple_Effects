@@ -139,6 +139,15 @@ body {
   font-size: 13px;
 }
 
+.toolbar .filename {
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .toolbar button {
   background: var(--panel-2);
   color: var(--text);
@@ -923,6 +932,16 @@ body {
 .tl-label.selected {
   background: rgba(233, 69, 96, 0.18);
   box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Layer reorder: the row being dragged, and the row it would drop under. */
+.tl-label.row-dragging {
+  opacity: 0.5;
+}
+
+.tl-label.row-over {
+  box-shadow: inset 0 -2px 0 var(--accent);
+  background: rgba(233, 69, 96, 0.1);
 }
 
 .tl-label .dot {

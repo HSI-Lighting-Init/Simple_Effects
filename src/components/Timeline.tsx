@@ -56,6 +56,8 @@ interface Props {
   onDeleteKeyframe: (id: number, tMs: number) => void;
   onLayerContextMenu: (id: number, x: number, y: number) => void;
   onSetLayerRange: (id: number, startMs: number, endMs: number) => void;
+  /** Commit a new z-order (full list of layer ids, bottom-first). */
+  onReorder: (order: number[]) => void;
 }
 
 export default function Timeline({
@@ -69,11 +71,26 @@ export default function Timeline({
   onDeleteKeyframe,
   onLayerContextMenu,
   onSetLayerRange,
+  onReorder,
 }: Props) {
   const tracksRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
+  // Layer-row reorder (drag a layer onto the one you want it under).
+  const [rowDragId, setRowDragId] = useState<number | null>(null);
+  const [rowOverId, setRowOverId] = useState<number | null>(null);
   const dur = project.durationMs || 1;
   const layers = [...project.layers].reverse();
+
+  // Drop layer `dragId` so it sits just *under* `targetId` in z-order. Works in
+  // array space (bottom-first), independent of the reversed row display.
+  const commitReorder = (dragId: number, targetId: number) => {
+    if (dragId === targetId) return;
+    const arr = project.layers.map((l) => l.id).filter((id) => id !== dragId);
+    const tIdx = arr.indexOf(targetId);
+    if (tIdx < 0) return;
+    arr.splice(tIdx, 0, dragId); // dragId at target's index → target moves above it
+    onReorder(arr);
+  };
 
   // Begin dragging a layer block (move it) or one of its trim edges. Converts
   // horizontal mouse motion into ms against the track width, clamps to the comp,
@@ -170,12 +187,41 @@ export default function Timeline({
           {layers.map((l) => (
             <div
               key={l.id}
+              draggable
               className={
                 "tl-label" +
                 (l.id === selectedId ? " selected" : "") +
-                (l.hidden ? " hidden" : "")
+                (l.hidden ? " hidden" : "") +
+                (l.id === rowDragId ? " row-dragging" : "") +
+                (l.id === rowOverId && rowDragId != null && rowOverId !== rowDragId
+                  ? " row-over"
+                  : "")
               }
+              title="Drag onto another layer to drop this one under it"
               onClick={() => onSelect(l.id)}
+              onDragStart={(e) => {
+                setRowDragId(l.id);
+                e.dataTransfer.effectAllowed = "move";
+              }}
+              onDragOver={(e) => {
+                if (rowDragId == null) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                if (rowOverId !== l.id) setRowOverId(l.id);
+              }}
+              onDragLeave={() => {
+                if (rowOverId === l.id) setRowOverId(null);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (rowDragId != null) commitReorder(rowDragId, l.id);
+                setRowDragId(null);
+                setRowOverId(null);
+              }}
+              onDragEnd={() => {
+                setRowDragId(null);
+                setRowOverId(null);
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.nativeEvent.stopPropagation();

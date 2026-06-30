@@ -18,6 +18,9 @@ import {
   setCompSize,
   setCompDuration,
   setLayerRange,
+  reorderLayers,
+  saveProjectFile,
+  openProjectFile,
   attachToShape,
   clearKeyframes,
   clearLetterOverrides,
@@ -80,6 +83,14 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+/** Last path segment (Windows or POSIX separators) — the file's display name. */
+function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+/** Dialog filter for Simple Effects project files. */
+const SEFX_FILTER = [{ name: "Simple Effects Project", extensions: ["sefx"] }];
+
 /** Box faces, in `box_face_basis` order (index = the `face` value). */
 const FACE_LABELS = ["Front", "Back", "Left", "Right", "Top", "Bottom"];
 
@@ -128,6 +139,10 @@ export default function App() {
   const [showCompSettings, setShowCompSettings] = useState(false);
   const [fxEditorId, setFxEditorId] = useState<number | null>(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
+  // The .sefx file the project is bound to (null = never saved). `fileName` is
+  // just its display name for the title bar / toolbar.
+  const filePathRef = useRef<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
 
   // Refs the rAF loop reads without re-subscribing.
   const timeRef = useRef(0);
@@ -696,6 +711,75 @@ export default function App() {
     [applyTime, recordAction]
   );
 
+  // Reorder the layer stack (drag one timeline row onto another). `order` is the
+  // full id list bottom-first.
+  const onReorder = useCallback(
+    async (order: number[]) => {
+      const p = await reorderLayers(order);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("reorder_layers", { order });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Save As: always prompt for a .sefx path, write, and bind the project to it.
+  const doSaveAs = useCallback(async () => {
+    const path = await save({
+      defaultPath: filePathRef.current ?? "untitled.sefx",
+      filters: SEFX_FILTER,
+    });
+    if (!path) return;
+    try {
+      await saveProjectFile(path);
+      filePathRef.current = path;
+      setFileName(baseName(path));
+      recordAction("save_as", { path });
+    } catch (e) {
+      alert(`Save failed: ${e}`);
+    }
+  }, [recordAction]);
+
+  // Save: write to the bound file, or fall back to Save As if there isn't one.
+  const doSave = useCallback(async () => {
+    if (!filePathRef.current) {
+      await doSaveAs();
+      return;
+    }
+    try {
+      await saveProjectFile(filePathRef.current);
+      recordAction("save", { path: filePathRef.current });
+    } catch (e) {
+      alert(`Save failed: ${e}`);
+    }
+  }, [doSaveAs, recordAction]);
+
+  // Open a .sefx project, replacing the current one and loading its images.
+  const doOpenProject = useCallback(async () => {
+    const selected = await open({ multiple: false, filters: SEFX_FILTER });
+    if (typeof selected !== "string") return;
+    try {
+      stop();
+      const p = await openProjectFile(selected);
+      setProject(p);
+      durationRef.current = p.durationMs;
+      filePathRef.current = selected;
+      setFileName(baseName(selected));
+      setSelectedId(null);
+      setDecomposeId(null);
+      await resolveImages(p);
+      seek(0);
+      recordAction("open_project", { path: selected });
+    } catch (e) {
+      alert(`Open failed: ${e}`);
+    }
+  }, [stop, resolveImages, seek, recordAction]);
+
+  // Reflect the bound file name in the window title.
+  useEffect(() => {
+    document.title = `${fileName ?? "Untitled"} — Simple Effects`;
+  }, [fileName]);
+
   // Render the comp to a video: full-resolution canvas captured in real time to
   // WebM, then saved as-is (webm) or transcoded to MP4 (H.264) by Rust/ffmpeg.
   // `level` 1..5 = compression; for WebM it also sets the recording bitrate.
@@ -962,6 +1046,18 @@ export default function App() {
         return;
       }
       const mod = e.ctrlKey || e.metaKey;
+      // File ops work even from a text field (no browser default to preserve).
+      if (mod && (e.key === "s" || e.key === "S")) {
+        e.preventDefault();
+        if (e.shiftKey) void doSaveAs();
+        else void doSave();
+        return;
+      }
+      if (mod && (e.key === "o" || e.key === "O")) {
+        e.preventDefault();
+        void doOpenProject();
+        return;
+      }
       if (mod && (e.key === "z" || e.key === "Z")) {
         if (inField) return; // let the text field handle its own undo
         e.preventDefault();
@@ -975,7 +1071,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [doUndo, doRedo, onDeleteLayer, decomposeId]);
+  }, [doUndo, doRedo, onDeleteLayer, decomposeId, doSave, doSaveAs, doOpenProject]);
 
   // Global capture for the session recorder: clicks, JS errors, window resizes.
   useEffect(() => {
@@ -1067,6 +1163,10 @@ export default function App() {
     {
       title: "File",
       items: [
+        { label: "Open…", onClick: () => void doOpenProject(), shortcut: "Ctrl+O" },
+        { label: "Save", onClick: () => void doSave(), shortcut: "Ctrl+S" },
+        { label: "Save As…", onClick: () => void doSaveAs(), shortcut: "Ctrl+Shift+S" },
+        { separator: true },
         { label: "Import Image…", onClick: onOpenImage },
         { separator: true },
         {
@@ -1170,6 +1270,9 @@ export default function App() {
       <MenuBar menus={menus} />
       <header className="toolbar">
         <span className="brand">simple · effects</span>
+        <span className="filename" title={filePathRef.current ?? "Unsaved project"}>
+          {fileName ?? "Untitled"}
+        </span>
         <button className="primary" onClick={playing ? stop : play}>
           {playing ? "❚❚ Pause" : "▶ Play"}
         </button>
@@ -1273,6 +1376,7 @@ export default function App() {
         onDeleteKeyframe={onDeleteKeyframe}
         onLayerContextMenu={onLayerContextMenu}
         onSetLayerRange={onSetLayerRange}
+        onReorder={onReorder}
       />
 
       {showRecorder && (

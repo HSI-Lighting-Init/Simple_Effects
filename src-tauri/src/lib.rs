@@ -424,6 +424,49 @@ fn set_layer_range(
     Ok(project.clone())
 }
 
+/// Reorder the layer stack (z-order). `order` is the full list of layer ids in
+/// the new draw order: index 0 is the bottom layer, the last is drawn on top.
+/// Must be a permutation of the current ids. Undoable.
+#[tauri::command]
+fn reorder_layers(state: State<AppState>, order: Vec<u32>) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    // Guard: the new order must contain exactly the same ids, no more, no less.
+    let mut have: Vec<u32> = project.layers.iter().map(|l| l.id).collect();
+    let mut want = order.clone();
+    have.sort_unstable();
+    want.sort_unstable();
+    if have != want {
+        return Err("order must be a permutation of the existing layer ids".into());
+    }
+    state.snapshot(&project);
+    let mut by_id: HashMap<u32, Layer> = project.layers.drain(..).map(|l| (l.id, l)).collect();
+    project.layers = order.iter().filter_map(|id| by_id.remove(id)).collect();
+    Ok(project.clone())
+}
+
+/// Save the current project to `path` as a Simple Effects (.sefx) file — pretty
+/// JSON of the whole project, reloadable with `open_project_file`.
+#[tauri::command]
+fn save_project_file(state: State<AppState>, path: String) -> Result<(), String> {
+    let project = state.project.lock().unwrap();
+    let json = serde_json::to_string_pretty(&*project).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("write {path}: {e}"))
+}
+
+/// Open a Simple Effects (.sefx) project file, replacing the current project and
+/// re-shaping its text layers. Returns the loaded project. Undoable.
+#[tauri::command]
+fn open_project_file(state: State<AppState>, path: String) -> Result<Project, String> {
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
+    let loaded: Project = serde_json::from_str(&text).map_err(|e| format!("parse {path}: {e}"))?;
+    let mut current = state.project.lock().unwrap();
+    state.snapshot(&current);
+    let mut shaped = state.shaped.lock().unwrap();
+    reshape_all(&loaded, &mut shaped);
+    *current = loaded;
+    Ok(current.clone())
+}
+
 /// Show/hide a layer manually (independent of its time range). Undoable.
 #[tauri::command]
 fn set_layer_hidden(
@@ -1198,6 +1241,9 @@ pub fn run() {
             set_comp_size,
             set_comp_duration,
             set_layer_range,
+            reorder_layers,
+            save_project_file,
+            open_project_file,
             ffmpeg_status,
             install_ffmpeg,
             export_video,
