@@ -88,12 +88,21 @@ export default function Timeline({
   const [zoom, setZoom] = useState(1);
   const scrollRef = useRef<HTMLDivElement>(null);
   const rulerInnerRef = useRef<HTMLDivElement>(null);
+  const labelsInnerRef = useRef<HTMLDivElement>(null);
   const dur = project.durationMs || 1;
 
-  // Keep the ruler aligned with the (separately clipped) horizontal scroll.
+  // The tracks area scrolls both axes; the frozen ruler mirrors its horizontal
+  // scroll and the frozen labels column mirrors its vertical scroll.
   const onTracksScroll = () => {
-    const r = rulerInnerRef.current;
-    if (r && scrollRef.current) r.style.transform = `translateX(${-scrollRef.current.scrollLeft}px)`;
+    const s = scrollRef.current;
+    if (!s) return;
+    if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(${-s.scrollLeft}px)`;
+    if (labelsInnerRef.current) labelsInnerRef.current.style.transform = `translateY(${-s.scrollTop}px)`;
+  };
+  // Wheeling over the labels column scrolls the tracks vertically (which syncs back).
+  const onLabelsWheel = (e: React.WheelEvent) => {
+    if (e.ctrlKey || e.metaKey) return;
+    if (scrollRef.current) scrollRef.current.scrollTop += e.deltaY;
   };
   const zoomBy = (factor: number) => setZoom((z) => Math.min(40, Math.max(1, z * factor)));
   // Ctrl/⌘ + wheel zooms the timeline; plain wheel scrolls (native).
@@ -286,7 +295,8 @@ export default function Timeline({
           </div>
         </div>
 
-        <div className="tl-labels">
+        <div className="tl-labels" onWheel={onLabelsWheel}>
+          <div className="tl-labels-inner" ref={labelsInnerRef}>
           {layers.map((l) => (
             <div
               key={l.id}
@@ -331,6 +341,7 @@ export default function Timeline({
               </button>
             </div>
           ))}
+          </div>
         </div>
 
         <div

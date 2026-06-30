@@ -984,7 +984,11 @@ body {
   grid-column: 1;
   grid-row: 2;
   border-right: 1px solid var(--line);
-  overflow-y: auto;
+  overflow: hidden;
+}
+
+.tl-labels-inner {
+  min-height: 100%;
 }
 
 .tl-label {
@@ -1067,13 +1071,12 @@ body {
 .tl-tracks-scroll {
   grid-column: 2;
   grid-row: 2;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: auto;
 }
 
 .tl-tracks-inner {
   position: relative;
-  height: 100%;
+  min-height: 100%;
   min-width: 100%;
   cursor: text;
 }
