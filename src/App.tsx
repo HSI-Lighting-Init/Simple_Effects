@@ -26,6 +26,7 @@ import {
   clearKeyframes,
   clearLetterOverrides,
   deleteKeyframesAt,
+  moveKeyframesAt,
   deleteLayer,
   dropImageOnShape,
   editKeyframes,
@@ -694,6 +695,17 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("delete_keyframe", { layerId, tMs });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Retime a keyframe by dragging its timeline diamond.
+  const onMoveKeyframe = useCallback(
+    async (layerId: number, fromMs: number, toMs: number) => {
+      const p = await moveKeyframesAt(layerId, fromMs, toMs);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("move_keyframe", { layerId, fromMs, toMs });
     },
     [applyTime, recordAction]
   );
@@ -1489,6 +1501,7 @@ export default function App() {
         }}
         onDeleteLayer={onDeleteLayer}
         onDeleteKeyframe={onDeleteKeyframe}
+        onMoveKeyframe={onMoveKeyframe}
         onLayerContextMenu={onLayerContextMenu}
         onSetLayerRange={onSetLayerRange}
         onReorder={onReorder}

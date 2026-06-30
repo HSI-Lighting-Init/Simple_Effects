@@ -422,6 +422,8 @@ fn set_layer_range(
         .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
+    let old_start = layer.start_ms;
+    let old_end = layer.end_ms;
     // End first (capped to the comp), then start kept at least MIN_SPAN behind it.
     let mut e = end_ms.min(dur);
     let mut s = start_ms.min(e.saturating_sub(MIN_SPAN_MS));
@@ -429,8 +431,62 @@ fn set_layer_range(
         e = (s + MIN_SPAN_MS).min(dur);
         s = e.saturating_sub(MIN_SPAN_MS);
     }
+    // Keyframes stick to the layer: a pure MOVE (span preserved) shifts every
+    // keyframe — and the per-letter animation start — by the same delta, so the
+    // animation travels with the block. A trim (span changed) leaves them put.
+    let delta = s as i64 - old_start as i64;
+    let span_preserved = (e as i64 - s as i64) == (old_end as i64 - old_start as i64);
+    if span_preserved && delta != 0 {
+        for_each_track_mut(layer, |tr| {
+            for k in tr.keys.iter_mut() {
+                k.time_ms = (k.time_ms as i64 + delta).max(0) as u32;
+            }
+        });
+        if let LayerKind::Text { anim: Some(a), .. } = &mut layer.kind {
+            a.start_ms = (a.start_ms as i64 + delta).max(0) as u32;
+        }
+    }
     layer.start_ms = s;
     layer.end_ms = e;
+    Ok(project.clone())
+}
+
+/// Retime a keyframe: move every key sitting at `from_ms` (one timeline diamond,
+/// which is all of a layer's tracks that share that time) to `to_ms`. Only tracks
+/// that actually have a key at `from_ms` are touched; any existing key at the
+/// destination on those tracks is replaced. Clamped to the comp. Undoable.
+#[tauri::command]
+fn move_keyframes_at(
+    state: State<AppState>,
+    layer_id: u32,
+    from_ms: u32,
+    to_ms: u32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    let dur = project.duration_ms;
+    state.snapshot(&project);
+    let to = to_ms.min(dur);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    if to == from_ms {
+        return Ok(project.clone());
+    }
+    for_each_track_mut(layer, |tr| {
+        if !tr.keys.iter().any(|k| k.time_ms == from_ms) {
+            return;
+        }
+        // Drop any key already at the destination so we don't end up with two.
+        tr.keys.retain(|k| k.time_ms != to);
+        for k in tr.keys.iter_mut() {
+            if k.time_ms == from_ms {
+                k.time_ms = to;
+            }
+        }
+        tr.keys.sort_by(|a, b| a.time_ms.cmp(&b.time_ms));
+    });
     Ok(project.clone())
 }
 
@@ -1252,6 +1308,7 @@ pub fn run() {
             set_comp_duration,
             set_comp_fps,
             set_layer_range,
+            move_keyframes_at,
             reorder_layers,
             save_project_file,
             open_project_file,

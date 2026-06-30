@@ -32,6 +32,10 @@ export const setCompFps = (fps: number) =>
 export const setLayerRange = (layerId: number, startMs: number, endMs: number) =>
   invoke<Project>("set_layer_range", { layerId, startMs, endMs });
 
+/** Retime a keyframe: move all of a layer's keys at `fromMs` to `toMs`. */
+export const moveKeyframesAt = (layerId: number, fromMs: number, toMs: number) =>
+  invoke<Project>("move_keyframes_at", { layerId, fromMs, toMs });
+
 /** Reorder the layer stack. `order` lists every layer id bottom-first (last on top). */
 export const reorderLayers = (order: number[]) =>
   invoke<Project>("reorder_layers", { order });

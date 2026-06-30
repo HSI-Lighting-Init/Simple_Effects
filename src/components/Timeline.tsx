@@ -54,6 +54,8 @@ interface Props {
   onSeek: (t: number) => void;
   onDeleteLayer: (id: number) => void;
   onDeleteKeyframe: (id: number, tMs: number) => void;
+  /** Retime a keyframe (drag a diamond): move all keys at `fromMs` to `toMs`. */
+  onMoveKeyframe: (id: number, fromMs: number, toMs: number) => void;
   onLayerContextMenu: (id: number, x: number, y: number) => void;
   onSetLayerRange: (id: number, startMs: number, endMs: number) => void;
   /** Commit a new z-order (full list of layer ids, bottom-first). */
@@ -69,6 +71,7 @@ export default function Timeline({
   onSeek,
   onDeleteLayer,
   onDeleteKeyframe,
+  onMoveKeyframe,
   onLayerContextMenu,
   onSetLayerRange,
   onReorder,
@@ -78,6 +81,8 @@ export default function Timeline({
   // Layer-row reorder (drag a layer onto the one you want it under).
   const [rowDragId, setRowDragId] = useState<number | null>(null);
   const [rowOverId, setRowOverId] = useState<number | null>(null);
+  // Keyframe-diamond drag (retime). `fromMs` identifies which diamond is moving.
+  const [kfDrag, setKfDrag] = useState<{ id: number; fromMs: number; toMs: number } | null>(null);
   const dur = project.durationMs || 1;
   const layers = [...project.layers].reverse();
 
@@ -180,6 +185,34 @@ export default function Timeline({
       window.removeEventListener("mouseup", up);
       if (next.moved) onSetLayerRange(next.id, next.startMs, next.endMs);
       setDrag(null);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
+  // Drag a keyframe diamond to retime it. A drag commits the new time; a plain
+  // click (no movement) deletes the keyframe (the prior behaviour). The diamond's
+  // x maps to absolute comp time, so it can be dragged anywhere in the track.
+  const startKfDrag = (e: React.MouseEvent, layer: Layer, tm: number) => {
+    e.stopPropagation(); // don't move the block or scrub the playhead
+    const el = tracksRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const startX = e.clientX;
+    let toMs = tm;
+    let moved = false;
+    const move = (ev: MouseEvent) => {
+      if (!moved && Math.abs(ev.clientX - startX) > 3) moved = true;
+      const pct = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+      toMs = Math.round(pct * dur);
+      if (moved) setKfDrag({ id: layer.id, fromMs: tm, toMs });
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      if (moved && toMs !== tm) onMoveKeyframe(layer.id, tm, toMs);
+      else if (!moved) onDeleteKeyframe(layer.id, tm);
+      setKfDrag(null);
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
@@ -298,19 +331,22 @@ export default function Timeline({
                     title="Trim end"
                     onMouseDown={(e) => startBlockDrag(e, l, "end")}
                   />
-                  {keyframeTimes(l).map((tm, i) => (
-                    <button
-                      key={i}
-                      className="tl-kf"
-                      title="Delete keyframe"
-                      style={{ left: `${((tm - sMs) / span) * 100}%` }}
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteKeyframe(l.id, tm);
-                      }}
-                    />
-                  ))}
+                  {keyframeTimes(l).map((tm, i) => {
+                    const effTm =
+                      kfDrag && kfDrag.id === l.id && kfDrag.fromMs === tm ? kfDrag.toMs : tm;
+                    return (
+                      <button
+                        key={i}
+                        className={
+                          "tl-kf" +
+                          (kfDrag && kfDrag.id === l.id && kfDrag.fromMs === tm ? " dragging" : "")
+                        }
+                        title="Drag to retime · click to delete"
+                        style={{ left: `${((effTm - sMs) / span) * 100}%` }}
+                        onMouseDown={(e) => startKfDrag(e, l, tm)}
+                      />
+                    );
+                  })}
                 </div>
               </div>
             );

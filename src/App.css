@@ -1122,6 +1122,13 @@ body {
   box-shadow: 0 0 6px rgba(233, 69, 96, 0.7);
 }
 
+.tl-kf.dragging {
+  background: var(--accent);
+  border-color: #fff;
+  box-shadow: 0 0 8px rgba(233, 69, 96, 0.9);
+  z-index: 3;
+}
+
 /* Delete-layer button in each timeline row. */
 .tl-del {
   flex: none;
