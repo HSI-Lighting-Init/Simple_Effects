@@ -1,12 +1,25 @@
 // The timeline. One track per layer (top layer on top), so every image you add
 // gets its own row. Blocks show each layer's [startMs, endMs] range; diamonds
 // mark keyframes; the playhead is draggable to scrub.
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Project } from "../bindings/Project";
 import type { Layer } from "../bindings/Layer";
 
 /** Smallest range a layer block may be trimmed to (ms) — matches the Rust floor. */
 const MIN_SPAN_MS = 50;
+
+/** Format `ms` as a ruler label. `frames` = show the frame field (M:SS:FF); else
+ * a coarser M:SS / Ns depending on magnitude. */
+function tcLabel(ms: number, fps: number, frames: boolean): string {
+  const tf = Math.round(ms / (1000 / fps));
+  const f = ((tf % fps) + fps) % fps;
+  const totalSec = Math.floor(tf / fps);
+  const s = totalSec % 60;
+  const m = Math.floor(totalSec / 60);
+  if (frames) return `${m}:${String(s).padStart(2, "0")}:${String(f).padStart(2, "0")}`;
+  if (m > 0) return `${m}:${String(s).padStart(2, "0")}`;
+  return `${s}s`;
+}
 
 /** A live drag of a layer block: moving the whole range or trimming one edge. */
 interface Drag {
@@ -93,9 +106,24 @@ export default function Timeline({
   // the ruler is kept in sync via transform.
   const [zoom, setZoom] = useState(1);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const rulerRef = useRef<HTMLDivElement>(null);
   const rulerInnerRef = useRef<HTMLDivElement>(null);
   const labelsInnerRef = useRef<HTMLDivElement>(null);
   const dur = project.durationMs || 1;
+  const fps = project.fps || 30;
+
+  // On-screen width of the ruler (the visible track area), tracked so the tick
+  // scale can adapt to how many pixels a second/frame actually occupies.
+  const [viewW, setViewW] = useState(800);
+  useEffect(() => {
+    const el = rulerRef.current;
+    if (!el) return;
+    const measure = () => setViewW(el.clientWidth || 800);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // The tracks area scrolls both axes; the frozen ruler mirrors its horizontal
   // scroll and the frozen labels column mirrors its vertical scroll.
@@ -300,7 +328,20 @@ export default function Timeline({
     if (!el) return;
     const r = el.getBoundingClientRect();
     const pct = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
-    onSeek(Math.round(pct * dur));
+    const raw = pct * dur;
+    // Snap the playhead onto layer edges (and comp bounds) — the mirror of how
+    // layers snap onto the playhead when they're dragged.
+    const thresholdMs = (7 / (r.width || 1)) * dur;
+    let best = raw;
+    let bestD = thresholdMs;
+    for (const tgt of [0, dur, ...project.layers.flatMap((l) => [l.startMs, l.endMs])]) {
+      const d = Math.abs(raw - tgt);
+      if (d < bestD) {
+        bestD = d;
+        best = tgt;
+      }
+    }
+    onSeek(Math.round(best));
   };
 
   const onMouseDown = (e: React.MouseEvent) => {
@@ -314,8 +355,28 @@ export default function Timeline({
     window.addEventListener("mouseup", up);
   };
 
-  const seconds = Math.ceil(dur / 1000);
-  const ticks = Array.from({ length: seconds + 1 }, (_, i) => i);
+  // Adaptive ruler: pick a labelled interval that keeps ticks ~64px apart at the
+  // current zoom, snapping to a "nice" value (frame multiples when zoomed right
+  // in, then seconds/minutes as you zoom out). When frames are wide enough, draw
+  // thin minor ticks at each frame so you can read the timeline frame by frame.
+  const frameMs = 1000 / fps;
+  const pxPerMs = (viewW * zoom) / dur;
+  const desiredMs = 64 / Math.max(pxPerMs, 1e-6);
+  const niceMs = [
+    ...[1, 2, 5, 10, 15, 30].map((n) => n * frameMs),
+    ...[1, 2, 5, 10, 15, 20, 30, 60, 120, 300, 600, 1200, 1800, 3600].map((s) => s * 1000),
+  ].sort((a, b) => a - b);
+  const labelMs = niceMs.find((c) => c >= desiredMs) ?? niceMs[niceMs.length - 1];
+  const showFrames = labelMs < 1000;
+  const majorTicks: number[] = [];
+  for (let t = 0; t <= dur + 0.5; t += labelMs) majorTicks.push(t);
+  // Minor per-frame ticks — only when a frame is at least ~6px wide and the count
+  // stays reasonable, so scrolling/DOM stays cheap.
+  const pxPerFrame = pxPerMs * frameMs;
+  const frameCount = dur / frameMs;
+  const showMinors = pxPerFrame >= 6 && frameCount <= 2000;
+  const minorTicks: number[] = [];
+  if (showMinors) for (let t = 0; t <= dur + 0.5; t += frameMs) minorTicks.push(t);
 
   return (
     <div className="timeline">
@@ -331,15 +392,22 @@ export default function Timeline({
           </span>
         </div>
 
-        <div className="tl-ruler">
+        <div className="tl-ruler" ref={rulerRef}>
           <div className="tl-ruler-inner" ref={rulerInnerRef} style={{ width: `${zoom * 100}%` }}>
-            {ticks.map((s) => (
+            {minorTicks.map((t) => (
               <span
-                key={s}
+                key={`m${t}`}
+                className="tl-tick-minor"
+                style={{ left: `${(t / dur) * 100}%` }}
+              />
+            ))}
+            {majorTicks.map((t) => (
+              <span
+                key={`M${t}`}
                 className="tl-tick"
-                style={{ left: `${((s * 1000) / dur) * 100}%` }}
+                style={{ left: `${(t / dur) * 100}%` }}
               >
-                {s}s
+                {tcLabel(t, fps, showFrames)}
               </span>
             ))}
           </div>

@@ -34,6 +34,10 @@ export const setCompFps = (fps: number) =>
 export const setLayerRange = (layerId: number, startMs: number, endMs: number) =>
   invoke<Project>("set_layer_range", { layerId, startMs, endMs });
 
+/** Scale an image layer to contain within the comp and centre it. */
+export const scaleLayerToFit = (layerId: number) =>
+  invoke<Project>("scale_layer_to_fit", { layerId });
+
 /** Retime a keyframe: move all of a layer's keys at `fromMs` to `toMs`. */
 export const moveKeyframesAt = (layerId: number, fromMs: number, toMs: number) =>
   invoke<Project>("move_keyframes_at", { layerId, fromMs, toMs });

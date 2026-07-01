@@ -126,6 +126,7 @@ type Interaction = {
   onClick: (e: Konva.KonvaEventObject<MouseEvent>) => void;
   onDragEnd: () => void;
   onTransformEnd: () => void;
+  onContextMenu: (e: Konva.KonvaEventObject<MouseEvent>) => void;
 };
 
 type NodeRef = (n: Konva.Node | null) => void;
@@ -1191,6 +1192,7 @@ interface Props {
   onImageDrop: (layerId: number, x: number, y: number) => void;
   onDecalScale: (layerId: number, scale: number) => void;
   onShapeContextMenu: (layerId: number, x: number, y: number) => void;
+  onLayerContextMenu: (layerId: number, x: number, y: number) => void;
   exporting?: boolean;
   /** When set (during export with "show FPS" on), burn this fps value into the
    *  rendered frames as a corner label. Null = no overlay. */
@@ -1213,6 +1215,7 @@ export default function Preview({
   onImageDrop,
   onDecalScale,
   onShapeContextMenu,
+  onLayerContextMenu,
   exporting = false,
   fpsOverlay = null,
 }: Props) {
@@ -1270,6 +1273,11 @@ export default function Preview({
     },
     onDragEnd: () => commit(id),
     onTransformEnd: () => commit(id),
+    onContextMenu: (e) => {
+      e.evt.preventDefault();
+      e.cancelBubble = true;
+      onLayerContextMenu(id, e.evt.clientX, e.evt.clientY);
+    },
   });
 
   // Flat images: dragging the body either drops onto a shape (→ becomes a decal)

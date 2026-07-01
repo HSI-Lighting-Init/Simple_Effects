@@ -1180,6 +1180,17 @@ body {
   border-left: 1px solid var(--line);
   padding-left: 4px;
   height: 14px;
+  white-space: nowrap;
+}
+
+/* Thin per-frame marks shown when zoomed in far enough to read frames. */
+.tl-tick-minor {
+  position: absolute;
+  bottom: 0;
+  width: 0;
+  height: 5px;
+  border-left: 1px solid var(--line);
+  opacity: 0.5;
 }
 
 .tl-labels {

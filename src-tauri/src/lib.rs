@@ -496,6 +496,33 @@ fn add_image_layer(state: State<AppState>, path: String) -> Project {
     project.clone()
 }
 
+/// Scale an image layer to *contain* within the composition (preserving aspect
+/// ratio) and centre it — the same fit applied when an image is first added.
+/// Replaces the scale/position tracks with constants (drops any keyframes on
+/// them), leaving rotation and opacity untouched.
+#[tauri::command]
+fn scale_layer_to_fit(state: State<AppState>, layer_id: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let (cw, ch) = (project.width as f32, project.height as f32);
+    let (cx, cy) = (cw / 2.0, ch / 2.0);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let (iw, ih) = match &layer.kind {
+        LayerKind::Image { width, height, .. } => (*width as f32, *height as f32),
+        _ => return Err("scale to fit is for image layers".into()),
+    };
+    let fit = (cw / iw.max(1.0)).min(ch / ih.max(1.0));
+    layer.transform.scale_x = Track::constant(fit);
+    layer.transform.scale_y = Track::constant(fit);
+    layer.transform.x = Track::constant(cx);
+    layer.transform.y = Track::constant(cy);
+    Ok(project.clone())
+}
+
 /// Insert or update a keyframe at `t_ms` on a track.
 ///
 /// `seed_start`: if the track is empty (a constant) and the edit is happening
@@ -1659,6 +1686,7 @@ pub fn run() {
             set_letter_override,
             set_letter_color,
             clear_letter_color,
+            scale_layer_to_fit,
             clear_letter_overrides,
             set_decompose_key,
             add_shape_layer,

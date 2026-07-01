@@ -21,6 +21,7 @@ import {
   setCompDuration,
   setCompFps,
   setLayerRange,
+  scaleLayerToFit,
   setLayerTransition,
   reorderLayers,
   saveProjectFile,
@@ -914,6 +915,17 @@ export default function App() {
     [applyTime, seek, recordAction]
   );
 
+  // Scale an image layer to fit (contain) the composition and centre it.
+  const onScaleToFit = useCallback(
+    async (layerId: number) => {
+      const p = await scaleLayerToFit(layerId);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("scale_to_fit", { layerId });
+    },
+    [applyTime, recordAction]
+  );
+
   // Trim/move a layer's play range on the timeline (drag the block or its edges).
   const onSetLayerRange = useCallback(
     async (layerId: number, startMs: number, endMs: number) => {
@@ -1434,6 +1446,47 @@ export default function App() {
         }
         return;
       }
+      // Transport + playhead navigation (not while typing in a field).
+      if (!inField) {
+        // Space toggles play/pause globally — no need to focus the button first.
+        if (e.key === " " || e.code === "Space") {
+          e.preventDefault();
+          if (playingRef.current) stop();
+          else play();
+          return;
+        }
+        // Left/Right step the playhead by one frame.
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          e.preventDefault();
+          const fps = projectRef.current?.fps || 30;
+          const step = 1000 / fps;
+          const dir = e.key === "ArrowLeft" ? -1 : 1;
+          const t = Math.max(0, Math.min(durationRef.current, timeRef.current + dir * step));
+          seek(Math.round(t));
+          return;
+        }
+        // Up/Down jump the playhead to the end/start of the layer it's in
+        // (the selected layer, else the topmost layer under the playhead).
+        if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+          e.preventDefault();
+          const p = projectRef.current;
+          if (!p) return;
+          const now = timeRef.current;
+          let layer = p.layers.find((l) => l.id === selectedIdRef.current) ?? null;
+          if (!layer) {
+            for (let i = p.layers.length - 1; i >= 0; i--) {
+              const l = p.layers[i];
+              if (now >= l.startMs && now <= l.endMs) {
+                layer = l;
+                break;
+              }
+            }
+          }
+          if (!layer) return;
+          seek(e.key === "ArrowUp" ? layer.endMs : layer.startMs);
+          return;
+        }
+      }
       const mod = e.ctrlKey || e.metaKey;
       // File ops work even from a text field (no browser default to preserve).
       if (mod && (e.key === "s" || e.key === "S")) {
@@ -1498,6 +1551,9 @@ export default function App() {
     onPasteLayer,
     onDuplicateLayer,
     onSplitAtPlayhead,
+    seek,
+    play,
+    stop,
   ]);
 
   // Global capture for the session recorder: clicks, JS errors, window resizes.
@@ -1763,7 +1819,16 @@ export default function App() {
           {fileName ?? "Untitled"}
           {dirty && <span className="dirty-dot" title="Unsaved changes"> •</span>}
         </span>
-        <button className="primary" onClick={playing ? stop : play}>
+        <button
+          className="primary"
+          onClick={(e) => {
+            // Blur so the button doesn't keep focus — otherwise Space would fire
+            // both this button's native activation and the global toggle.
+            e.currentTarget.blur();
+            if (playing) stop();
+            else play();
+          }}
+        >
           {playing ? "❚❚ Pause" : "▶ Play"}
         </button>
         <button onClick={setKeyHere} disabled={!selectedLayer} title="Add keyframe at playhead">
@@ -1825,6 +1890,7 @@ export default function App() {
             onImageDrop={onImageDrop}
             onDecalScale={onDecalScale}
             onShapeContextMenu={onShapeContextMenu}
+            onLayerContextMenu={onLayerContextMenu}
             exporting={exporting}
             fpsOverlay={fpsOverlay}
           />
@@ -1950,6 +2016,10 @@ export default function App() {
                 ? [
                     ...(project.layers.find((l) => l.id === ctxMenu.layerId)?.kind.kind === "image"
                       ? [
+                          {
+                            label: "⤢ Scale to fit",
+                            onClick: () => onScaleToFit(ctxMenu.layerId!),
+                          },
                           {
                             label: "＋ Add effect",
                             submenu: [
