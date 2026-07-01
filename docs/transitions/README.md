@@ -168,6 +168,80 @@ show the next clip on the reverse, or a dimmed backface).
 
 ---
 
+# Stage 3 — 3D, Fold/Curl & Patterns
+
+## 3D rendering pipeline (`mesh3d.ts`)
+
+A small software 3D pipeline on 2D canvas: transitions emit textured **quads**
+(4 corners in a centred local 3D space); `renderQuads` projects them through a
+**perspective camera** (`perspective` `0..1` controls strength), **depth-sorts**
+back-to-front, **shades** each by its surface normal (Lambert lighting), draws
+the texture with two affine-mapped triangles, and can add projected **drop
+shadows**. This is the shared foundation for the 3D and fold categories.
+
+## Category 5 (ext) — Advanced 3D Rotation
+
+Common: `perspective` `0..1`, plus `direction` where noted.
+
+| Transition (`id`) | Description | Extra params |
+|---|---|---|
+| **Cube Rotation** (`cube`) | A/B as adjacent cube faces turning 90°. | `direction` |
+| **Card Flip (3D)** (`cardFlip3d`) | Back-to-back flip with thickness. | `direction`, `thickness` |
+| **Tumble** (`tumble`) | A falls/spins/shrinks away (physics). | `spins` |
+| **Doors (3D)** (`doors3d`) | A splits into panels that swing open. | `direction` (H: left/right, V: up/down) |
+| **Curtains (3D)** (`curtains3d`) | A parts into folding strips. | `segments` |
+| **Fly-Through Flip** (`flyThroughFlip`) | Camera pushes in as A flips to B. | `thickness` |
+
+## Category 6 — Page, Fold & Curl
+
+| Transition (`id`) | Description | Extra params |
+|---|---|---|
+| **Fold** (`fold`) | A folds along its centre line, revealing B. | `orientation` |
+| **Accordion Fold** (`accordionFold`) | Alternating panels compress. | `segments` |
+| **Unfold** (`unfold`) | B unfolds flat over A. | `orientation` |
+| **Page Turn (3D)** (`pageTurn`) | A's page peels off a cylinder mesh. | `radius` |
+| **Page Roll** (`pageRoll`) | Tight page turn (rolls like a scroll). | — |
+| **Page Curl** (`pageCurl`) | Corner peels back with a gradient shadow. † | `corner` |
+| **Peel Off** (`peelOff`) | Clip peels from a corner. † | `corner` |
+| **Sticky Peel** (`stickyPeel`) | Peel with extra stretch on the shadow. † | `corner` |
+
+> **† Approximation note:** Page Curl / Peel Off / Sticky Peel are a **stylised
+> 2D** corner reveal (diagonal reveal + gradient curl shadow + fold highlight),
+> not a full 3D curl mesh. Page Turn/Roll use a real cylinder mesh. A true
+> curl-mesh (per-vertex cylinder warp with self-shadowing) is a future refinement.
+
+## Category 7 — Shape, Pattern & Mosaic
+
+Grid-based reveals: `grid` (tiles/axis), `spread` (per-tile stagger), plus
+`count`/`orientation`/`seed` where relevant.
+
+| Transition (`id`) | Description | Extra params |
+|---|---|---|
+| **Checkerboard** (`checkerboard`) | Tiles flip in a checker pattern. | `grid`, `spread` |
+| **Blinds** (`blinds`) | Strips flip (venetian). | `orientation`, `count` |
+| **Box / Expanding Squares** (`boxTiles`) | Tiles grow to reveal B. | `grid`, `spread` |
+| **Diamond Pattern** (`diamondTiles`) | Diamond-ordered reveal from centre. | `grid`, `spread` |
+| **Random Bars** (`randomBars`) | Bars slide in at random times. | `orientation`, `count`, `seed` |
+| **Strips** (`strips`) | Parallel strips slide alternating. | `orientation`, `count` |
+| **Block Dissolve** (`blockDissolve`) | Random blocks fade in. | `grid`, `spread`, `seed` |
+| **Spiral Wipe** (`spiralWipe`) | Tiles reveal along an inward spiral. | `grid`, `spread` |
+| **Wheel** (`wheel`) | Segments reveal around a wheel. | `grid`, `spread` |
+| **Tile Flip** (`tileFlip`) | Tiles flip over like a tile wall. | `grid`, `spread`, `seed` |
+| **Mosaic / Pixelate** (`mosaic`) | Both frames pixelate + crossfade. | `grid` |
+| **Vortex / Swirl** (`vortex`) | Twist into a spiral + dissolve (stylised). | `twist` |
+
+## Performance (complex 3D)
+
+- Quads are depth-sorted and drawn with clipped affine triangles — no per-pixel
+  work except **Gradient Wipe** (Stage 2), **Mosaic** (block downscale), and
+  **Vortex** (concentric ring redraws).
+- Fitted A/B frames are cached per instance; wipe masks reuse a pooled scratch
+  canvas. Page Turn uses ~34 column quads, Page Roll ~48 — the main 3D cost.
+- Shadows are cheap projected silhouettes (not raytraced). For heavy 1080p
+  exports, prefer fewer `segments`/`grid` and lower page-`columns`.
+
+---
+
 ## Demo / preview
 
 In the app: **Window → Transitions Demo…**. Pick a transition, adjust its

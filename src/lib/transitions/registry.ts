@@ -21,6 +21,9 @@ import {
 } from "./wipe";
 import { ZoomIn, ZoomOut, Pan, ZoomAndPan, ZoomMotionBlur, ScaleUp, ScaleDown, ScaleBounce } from "./zoom";
 import { Spin2D, Swivel, FlipVertical, RotateAndScale } from "./rotate";
+import { PatternTransition, Mosaic, Vortex, type PatternKind } from "./tiles";
+import { CubeRotation, CardFlip3D, Tumble, Doors3D, Curtains3D, FlyThroughFlip } from "./rotate3d";
+import { Fold, AccordionFold, Unfold, PageTurn, PageRoll, PageCurl, PeelOff, StickyPeel } from "./fold";
 
 export interface ParamSpec {
   name: string;
@@ -238,6 +241,16 @@ const BACKFACE: ParamSpec = {
   default: true,
   description: "Show the next clip on the reverse of a flip (off = a dimmed backface).",
 };
+
+// --- Stage 3 parameter specs ---
+const GRID: ParamSpec = { name: "grid", label: "Grid size", type: "number", min: 2, max: 40, step: 1, default: 8, description: "Number of tiles per axis." };
+const SPREAD: ParamSpec = { name: "spread", label: "Stagger", type: "number", min: 0, max: 1, step: 0.05, default: 0.6, description: "Per-tile delay spread (0 = together, 1 = sequential)." };
+const COUNT: ParamSpec = { name: "count", label: "Count", type: "number", min: 2, max: 40, step: 1, default: 12, description: "Number of strips/bars." };
+const SEED: ParamSpec = { name: "seed", label: "Seed", type: "number", min: 1, max: 99, step: 1, default: 1, description: "Random seed for randomised orders." };
+const SEGMENTS: ParamSpec = { name: "segments", label: "Segments", type: "number", min: 2, max: 24, step: 1, default: 8, description: "Number of panels/strips." };
+const RADIUS: ParamSpec = { name: "radius", label: "Curl radius", type: "number", min: 0.02, max: 0.4, step: 0.01, default: 0.12, description: "Page-curl cylinder radius (fraction of width)." };
+const THICKNESS: ParamSpec = { name: "thickness", label: "Thickness", type: "number", min: 0, max: 0.1, step: 0.005, default: 0.03, description: "Card/page thickness (fraction of width)." };
+const TWIST: ParamSpec = { name: "twist", label: "Twist", type: "number", min: 0, max: 12, step: 0.5, default: 6, description: "Vortex swirl amount." };
 
 export const REGISTRY: TransitionMeta[] = [
   {
@@ -525,6 +538,161 @@ export const REGISTRY: TransitionMeta[] = [
     description: "2D rotation combined with a scale-in of B.",
     create: (f, t, p) => new RotateAndScale(f, t, p),
     params: [SPINS, ANCHOR_X, ANCHOR_Y, EASING, FIT],
+  },
+
+  // --- Category 7: Shape, Pattern & Mosaic ---
+  ...(
+    [
+      ["checkerboard", "Checkerboard", "Tiles flip in a checker pattern.", "checkerboard", [GRID, SPREAD]],
+      ["blinds", "Blinds", "Horizontal/vertical strips flip like venetian blinds.", "blinds", [ORIENTATION, COUNT]],
+      ["boxTiles", "Box / Expanding Squares", "Rectangular tiles grow to reveal B.", "box", [GRID, SPREAD]],
+      ["diamondTiles", "Diamond Pattern", "Diamond-ordered tiles reveal from the centre.", "diamond", [GRID, SPREAD]],
+      ["randomBars", "Random Bars", "Bars slide in from the edges at random times.", "randomBars", [ORIENTATION, COUNT, SEED]],
+      ["strips", "Strips", "Parallel strips slide in alternating directions.", "strips", [ORIENTATION, COUNT]],
+      ["blockDissolve", "Block Dissolve", "Random blocks fade to reveal B.", "blockDissolve", [GRID, SPREAD, SEED]],
+      ["spiralWipe", "Spiral Wipe", "Tiles reveal along an inward spiral.", "spiral", [GRID, SPREAD]],
+      ["wheel", "Wheel", "Segments reveal around a wheel.", "wheel", [GRID, SPREAD]],
+      ["tileFlip", "Tile Flip", "Tiles flip over like a tile wall.", "tileFlip", [GRID, SPREAD, SEED]],
+    ] as [string, string, string, PatternKind, ParamSpec[]][]
+  ).map(([id, label, description, kind, extra]) => ({
+    id,
+    label,
+    category: "Shape, Pattern & Mosaic",
+    description,
+    create: (f: Clip, t: Clip, p: Record<string, unknown>) => new PatternTransition(id, f, t, p, kind),
+    params: [...extra, EASING, FIT],
+  })),
+  {
+    id: "mosaic",
+    label: "Mosaic / Pixelate",
+    category: "Shape, Pattern & Mosaic",
+    description: "Both frames pixelate into blocks and crossfade.",
+    create: (f, t, p) => new Mosaic(f, t, p),
+    params: [GRID, EASING, FIT],
+  },
+  {
+    id: "vortex",
+    label: "Vortex / Swirl",
+    category: "Shape, Pattern & Mosaic",
+    description: "A twists into a spiral and dissolves as B unwinds in (stylised).",
+    create: (f, t, p) => new Vortex(f, t, p),
+    params: [TWIST, EASING, FIT],
+  },
+
+  // --- Category 5 (ext): Advanced 3D Rotation ---
+  {
+    id: "cube",
+    label: "Cube Rotation",
+    category: "Advanced 3D Rotation",
+    description: "A and B are adjacent faces of a cube that turns 90°.",
+    create: (f, t, p) => new CubeRotation(f, t, p),
+    params: [DIRECTION, PERSPECTIVE, EASING, FIT],
+  },
+  {
+    id: "cardFlip3d",
+    label: "Card Flip (3D)",
+    category: "Advanced 3D Rotation",
+    description: "A and B back-to-back with thickness, flipping over.",
+    create: (f, t, p) => new CardFlip3D(f, t, p),
+    params: [DIRECTION, THICKNESS, PERSPECTIVE, EASING, FIT],
+  },
+  {
+    id: "tumble",
+    label: "Tumble",
+    category: "Advanced 3D Rotation",
+    description: "A tumbles away in 3D (falls, spins, shrinks) revealing B.",
+    create: (f, t, p) => new Tumble(f, t, p),
+    params: [SPINS, PERSPECTIVE, EASING, FIT],
+  },
+  {
+    id: "doors3d",
+    label: "Doors (3D)",
+    category: "Advanced 3D Rotation",
+    description: "A splits into two panels that swing open, revealing B.",
+    create: (f, t, p) => new Doors3D(f, t, p),
+    params: [dirSpec(DIRECTIONS as unknown as string[], "left", "Horizontal (left/right) or vertical (up/down) doors."), PERSPECTIVE, EASING, FIT],
+  },
+  {
+    id: "curtains3d",
+    label: "Curtains (3D)",
+    category: "Advanced 3D Rotation",
+    description: "A parts into strips that gather to the sides with 3D folds.",
+    create: (f, t, p) => new Curtains3D(f, t, p),
+    params: [SEGMENTS, PERSPECTIVE, EASING, FIT],
+  },
+  {
+    id: "flyThroughFlip",
+    label: "Fly-Through Flip",
+    category: "Advanced 3D Rotation",
+    description: "The camera pushes in as A flips, flying through to B.",
+    create: (f, t, p) => new FlyThroughFlip(f, t, p),
+    params: [THICKNESS, PERSPECTIVE, EASING, FIT],
+  },
+
+  // --- Category 6: Page, Fold & Curl ---
+  {
+    id: "fold",
+    label: "Fold",
+    category: "Page, Fold & Curl",
+    description: "A folds along its centre line (away from the viewer), revealing B.",
+    create: (f, t, p) => new Fold(f, t, p),
+    params: [ORIENTATION, PERSPECTIVE, EASING, FIT],
+  },
+  {
+    id: "accordionFold",
+    label: "Accordion Fold",
+    category: "Page, Fold & Curl",
+    description: "Parallel panels fold alternately and compress, revealing B.",
+    create: (f, t, p) => new AccordionFold(f, t, p),
+    params: [SEGMENTS, PERSPECTIVE, EASING, FIT],
+  },
+  {
+    id: "unfold",
+    label: "Unfold",
+    category: "Page, Fold & Curl",
+    description: "B unfolds from edge-on to flat over A.",
+    create: (f, t, p) => new Unfold(f, t, p),
+    params: [ORIENTATION, PERSPECTIVE, EASING, FIT],
+  },
+  {
+    id: "pageTurn",
+    label: "Page Turn (3D)",
+    category: "Page, Fold & Curl",
+    description: "A's page peels off a cylinder from the right edge, revealing B.",
+    create: (f, t, p) => new PageTurn(f, t, p),
+    params: [RADIUS, PERSPECTIVE, EASING, FIT],
+  },
+  {
+    id: "pageRoll",
+    label: "Page Roll",
+    category: "Page, Fold & Curl",
+    description: "A tight page turn that rolls the clip up like a scroll.",
+    create: (f, t, p) => new PageRoll(f, t, p),
+    params: [PERSPECTIVE, EASING, FIT],
+  },
+  {
+    id: "pageCurl",
+    label: "Page Curl",
+    category: "Page, Fold & Curl",
+    description: "A corner peels back with a gradient curl shadow (stylised 2D).",
+    create: (f, t, p) => new PageCurl(f, t, p),
+    params: [CORNER, EASING, FIT],
+  },
+  {
+    id: "peelOff",
+    label: "Peel Off",
+    category: "Page, Fold & Curl",
+    description: "The clip peels away from a corner (stylised 2D).",
+    create: (f, t, p) => new PeelOff(f, t, p),
+    params: [CORNER, EASING, FIT],
+  },
+  {
+    id: "stickyPeel",
+    label: "Sticky Peel",
+    category: "Page, Fold & Curl",
+    description: "Like peeling a sticker, with extra stretch on the shadow (stylised 2D).",
+    create: (f, t, p) => new StickyPeel(f, t, p),
+    params: [CORNER, EASING, FIT],
   },
 ];
 

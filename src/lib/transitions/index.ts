@@ -18,6 +18,10 @@ export * from "./motion";
 export * from "./wipe";
 export * from "./zoom";
 export * from "./rotate";
+export * from "./tiles";
+export * from "./rotate3d";
+export * from "./fold";
+export * as mesh3d from "./mesh3d";
 export {
   REGISTRY,
   getTransitionMeta,
