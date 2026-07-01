@@ -27,7 +27,7 @@ import { sampleTrack, sampleColor } from "../lib/track";
 import { drawSurface } from "../lib/surface3d";
 import type { Texture } from "../lib/surface3d";
 import { applyEffects } from "../lib/effects";
-import { createTransition } from "../lib/transitions";
+import { createTransition, getTransitionMeta } from "../lib/transitions";
 import type { Clip } from "../lib/transitions";
 import type { Project } from "../bindings/Project";
 import type { Layer } from "../bindings/Layer";
@@ -265,11 +265,20 @@ function TransitionImageNode({
       rotation={r.rotation}
       opacity={r.opacity}
       sceneFunc={(ctx) => {
-        // B = the clip (its effect stack baked in); A = empty (reveals beneath).
+        // The clip, with its effect stack baked in.
         const bcv = bRef.current ?? (bRef.current = document.createElement("canvas"));
-        const texB: CanvasImageSource = r.effects.length > 0 ? applyEffects(bcv, img, w, h, r.effects) : img;
-        const B: Clip = { source: texB, width: w, height: h };
-        const A: Clip = { source: null, width: 0, height: 0 };
+        const texClip: CanvasImageSource = r.effects.length > 0 ? applyEffects(bcv, img, w, h, r.effects) : img;
+        const clip: Clip = { source: texClip, width: w, height: h };
+        const empty: Clip = { source: null, width: 0, height: 0 };
+        // Most transitions build up clip B (reveal it in) → clip = B, A = empty.
+        // But "feature A" transitions (disintegration/fold/peel) animate clip A to
+        // reveal B; with an empty A there's nothing to animate, so they'd collapse
+        // to a fade. For those, put the clip on A and play the transition in
+        // reverse so the clip assembles in (or breaks apart on the way out).
+        const featureA = getTransitionMeta(transition.engine ?? "")?.feature === "a";
+        const A: Clip = featureA ? clip : empty;
+        const B: Clip = featureA ? empty : clip;
+        const texB = texClip; // the plain resting clip, for the seam hand-off
         const dir = DIRS[transition.direction] ?? "left";
         const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
         // Per-clip variables (the math knobs), stored as a JSON object.
@@ -299,7 +308,10 @@ function TransitionImageNode({
             direction: dir,
             ...userParams,
           });
-          tr.render(off, f);
+          // Feature-A transitions run in reverse: the clip (on A) is fully present
+          // at f=1 (progress 0) and gone at f=0 (progress 1), so it assembles in /
+          // breaks apart with the window instead of just fading.
+          tr.render(off, featureA ? 1 - f : f);
           c.globalAlpha = fromEmpty;
           c.drawImage(off, 0, 0);
           if (toPlain > 0) {

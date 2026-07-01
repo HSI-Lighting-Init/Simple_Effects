@@ -56,6 +56,15 @@ export interface TransitionMeta {
   description: string;
   create: (from: Clip, to: Clip, params: Record<string, unknown>) => TransitionEffect;
   params: ParamSpec[];
+  /**
+   * Which clip the transition FEATURES (animates on screen):
+   *  - "b" (default): it builds up / reveals clip B (B slides/fades/wipes in).
+   *  - "a": it animates or destroys clip A to reveal B (disintegration, fold,
+   *    page-peel). Applied to a single clip these must run with the clip as A
+   *    (played in reverse), or A is empty and there's nothing to animate — so
+   *    they collapse to a plain fade.
+   */
+  feature?: "a" | "b";
 }
 
 const EASING: ParamSpec = {
@@ -768,6 +777,17 @@ export const REGISTRY: TransitionMeta[] = [
   { id: "spin360", label: "360 Spin", category: "Camera Movement & Depth", description: "A full turn swaps the front (A) for the back (B) (3D).", create: (f, t, p) => new Spin360("spin360", f, t, p), params: [EASING, FIT] },
   { id: "perspectiveSlide", label: "Perspective Slide", category: "Camera Movement & Depth", description: "Tilted-in-perspective frames slide across (3D).", create: (f, t, p) => new PerspectiveSlide("perspectiveSlide", f, t, p), params: [EASING, FIT] },
 ];
+
+// Transitions that FEATURE clip A — they animate or destroy A to reveal B
+// (disintegration, folds, page peels). Everything else builds up / reveals B.
+// See `TransitionMeta.feature`. Marked here so a single-clip transition can put
+// the clip on the correct side (otherwise A is empty and they'd just fade).
+const FEATURE_A_IDS = new Set<string>([
+  "particleDissolve", "shatter", "explosion", "smokeBurst", "sandstorm", "bubbles",
+  "confetti", "fire", "magicDust", "lowPolyExplode", "crumble",
+  "fold", "accordionFold", "pageTurn", "pageRoll", "pageCurl", "peelOff", "stickyPeel",
+]);
+for (const m of REGISTRY) m.feature = FEATURE_A_IDS.has(m.id) ? "a" : "b";
 
 const BY_ID = new Map(REGISTRY.map((m) => [m.id, m]));
 
