@@ -133,6 +133,11 @@ pub enum LayerKind {
         /// Font size in px (the letter "height").
         size: f32,
         color: Rgba,
+        /// Keyframeable fill colour. When non-empty this overrides `color` and is
+        /// interpolated at the current time, so the text colour animates over the
+        /// clip. Empty = the static `color` fill (back-compatible).
+        #[serde(default, rename = "colorKeys")]
+        color_keys: Vec<ColorKey>,
         font: Font,
         anim: Option<LetterAnimation>,
         #[serde(default)]
@@ -223,6 +228,18 @@ pub enum Easing {
     Hold,
 }
 
+/// A keyframe on a text layer's fill colour. `easing` shapes the segment that
+/// STARTS at this key (mirrors `Keyframe` for scalar tracks). A colour can't ride
+/// a scalar `Track` (it's four channels), so text colour gets its own key list.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ColorKey {
+    pub time_ms: u32,
+    pub color: Rgba,
+    pub easing: Easing,
+}
+
 /// Per-letter animation for `Text` layers, driven by a named preset. Each glyph
 /// runs the preset over `duration_ms`, offset from its neighbour by `stagger_ms`
 /// — so the letters animate in sequence. The actual per-letter math lives in the
@@ -261,19 +278,33 @@ pub enum LetterPreset {
 
 /// A manual per-glyph transform for "decompose" mode: move / rotate / scale one
 /// letter by hand. Added on top of (independent of) any preset animation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+///
+/// Each channel is its own keyframe track, so an individual letter can be
+/// animated over time — drag it at one playhead position, drag it at another,
+/// and it tweens between — exactly like the whole layer's transform keyframes.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct LetterOverride {
-    pub dx: f32,
-    pub dy: f32,
-    pub rotation: f32,
-    pub scale: f32,
+    pub dx: Track,
+    pub dy: Track,
+    pub rotation: Track,
+    pub scale: Track,
+    /// Keyframeable per-letter fill colour. Empty = the letter uses the layer's
+    /// colour; non-empty overrides it (and animates, like the layer colour).
+    #[serde(default, rename = "colorKeys")]
+    pub color_keys: Vec<ColorKey>,
 }
 
 impl Default for LetterOverride {
     fn default() -> Self {
-        Self { dx: 0.0, dy: 0.0, rotation: 0.0, scale: 1.0 }
+        Self {
+            dx: Track::constant(0.0),
+            dy: Track::constant(0.0),
+            rotation: Track::constant(0.0),
+            scale: Track::constant(1.0),
+            color_keys: Vec::new(),
+        }
     }
 }
 
@@ -688,9 +719,21 @@ impl Transform {
 }
 
 impl Project {
-    /// A small demo project so the very first run shows something animating:
-    /// a dark backdrop, an accent square that scales + fades in (Ken Burns),
-    /// and a title that slides up while fading in. No external assets required.
+    /// A blank project — the app opens with an empty timeline (no layers).
+    pub fn empty() -> Self {
+        Project {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            duration_ms: 4000,
+            layers: vec![],
+        }
+    }
+
+    /// A small demo project (dark backdrop, an accent square that scales/fades
+    /// in, and a title that rises in). Kept for the evaluator tests; the app now
+    /// opens with `empty()`.
+    #[cfg(test)]
     pub fn demo() -> Self {
         let (w, h) = (1920u32, 1080u32);
         let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
@@ -746,6 +789,7 @@ impl Project {
                 content: "آموزش اتوکد پی‌دی‌اف رایگان".into(),
                 size: 92.0,
                 color: Rgba { r: 240, g: 240, b: 245, a: 255 },
+                color_keys: vec![],
                 font: Font("Vazirmatn".into()),
                 anim: Some(LetterAnimation {
                     preset: LetterPreset::RiseUp,

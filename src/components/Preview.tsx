@@ -22,6 +22,8 @@ import {
 import Konva from "konva";
 
 import { getShaped } from "../lib/api";
+import type { LetterPose } from "../lib/api";
+import { sampleTrack, sampleColor } from "../lib/track";
 import { drawSurface } from "../lib/surface3d";
 import type { Texture } from "../lib/surface3d";
 import { applyEffects } from "../lib/effects";
@@ -750,7 +752,9 @@ function DecalNode({
   if (!ready || !surface || surface.quads.length === 0) return null;
 
   const textColor: Rgba =
-    layer.kind.kind === "text" ? layer.kind.color : { r: 255, g: 255, b: 255, a: 255 };
+    layer.kind.kind === "text"
+      ? r.color ?? layer.kind.color
+      : { r: 255, g: 255, b: 255, a: 255 };
   const layerId = layer.id;
   // A box decal is one quad; a cylinder decal is a curved band of many quads.
   const polys = surface.quads.map((q) =>
@@ -957,6 +961,7 @@ function TextGlyphs({
   interaction,
   registerRef,
   parts,
+  timeMs,
   decompose,
   selectedPart,
   handleScale,
@@ -976,11 +981,12 @@ function TextGlyphs({
   interaction: Interaction;
   registerRef: NodeRef;
   parts: LetterOverride[];
+  timeMs: number;
   decompose: boolean;
   selectedPart: number | null;
   handleScale: number;
   onSelectPart: (i: number | null) => void;
-  onCommitPart: (layerId: number, index: number, part: LetterOverride) => void;
+  onCommitPart: (layerId: number, index: number, pose: LetterPose) => void;
 }) {
   const [shaped, setShaped] = useState<ShapedText | null>(null);
   const glyphRefs = useRef<Record<number, Konva.Path>>({});
@@ -1091,7 +1097,15 @@ function TextGlyphs({
         const p = parts[i];
         const lt = r.letters[i];
         const off = decompose
-          ? { dx: p?.dx ?? 0, dy: p?.dy ?? 0, rotation: p?.rotation ?? 0, scale: p?.scale ?? 1, opacity: 1 }
+          ? {
+              // The letter's OWN keyframed pose at the current playhead — so
+              // scrubbing shows it animate, and dragging keys a new pose here.
+              dx: p ? sampleTrack(p.dx, timeMs) : 0,
+              dy: p ? sampleTrack(p.dy, timeMs) : 0,
+              rotation: p ? sampleTrack(p.rotation, timeMs) : 0,
+              scale: p ? sampleTrack(p.scale, timeMs) : 1,
+              opacity: 1,
+            }
           : {
               dx: lt?.dx ?? 0,
               dy: lt?.dy ?? 0,
@@ -1099,6 +1113,12 @@ function TextGlyphs({
               scale: lt?.scale ?? 1,
               opacity: lt?.opacity ?? 1,
             };
+        // Per-letter colour: while decomposing, glyphs are plain vector Paths, so
+        // colour each from its own keyframed fill (else the layer colour).
+        const glyphFill =
+          decompose && p && p.colorKeys.length
+            ? rgbaCss(sampleColor(p.colorKeys, color, timeMs))
+            : fill;
         return (
           <Path
             key={i}
@@ -1111,7 +1131,7 @@ function TextGlyphs({
                 : undefined
             }
             data={g.d}
-            fill={fill}
+            fill={glyphFill}
             x={left + g.x + g.cx + off.dx}
             y={baseline + g.cy + off.dy}
             offsetX={g.cx}
@@ -1158,6 +1178,8 @@ interface Props {
   project: Project;
   resolved: Record<number, ResolvedLayer>;
   images: Record<string, string>;
+  /** Current playhead time (ms) — used to key decomposed glyphs at this instant. */
+  timeMs: number;
   selectedId: number | null;
   playing: boolean;
   decomposeId: number | null;
@@ -1165,7 +1187,7 @@ interface Props {
   onSelect: (id: number | null) => void;
   onCommit: (id: number, edit: TransformEdit) => void;
   onSelectPart: (i: number | null) => void;
-  onCommitPart: (layerId: number, index: number, part: LetterOverride) => void;
+  onCommitPart: (layerId: number, index: number, pose: LetterPose) => void;
   onImageDrop: (layerId: number, x: number, y: number) => void;
   onDecalScale: (layerId: number, scale: number) => void;
   onShapeContextMenu: (layerId: number, x: number, y: number) => void;
@@ -1179,6 +1201,7 @@ export default function Preview({
   project,
   resolved,
   images,
+  timeMs,
   selectedId,
   playing,
   decomposeId,
@@ -1339,8 +1362,8 @@ export default function Preview({
                     content={k.content}
                     size={k.size}
                     font={k.font}
-                    fill={rgbaCss(k.color)}
-                    color={k.color}
+                    fill={rgbaCss(r.color ?? k.color)}
+                    color={r.color ?? k.color}
                     style={k.style}
                     layerStyles={k.layerStyles}
                     perChar3d={k.perChar3d}
@@ -1348,6 +1371,7 @@ export default function Preview({
                     interaction={interaction(layer.id)}
                     registerRef={register(layer.id)}
                     parts={k.parts}
+                    timeMs={timeMs}
                     decompose={decomposeId === layer.id}
                     selectedPart={decomposeId === layer.id ? selectedPart : null}
                     handleScale={h}

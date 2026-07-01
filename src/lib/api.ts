@@ -8,7 +8,6 @@ import type { ShapedText } from "../bindings/ShapedText";
 import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { Font } from "../bindings/Font";
 import type { Rgba } from "../bindings/Rgba";
-import type { LetterOverride } from "../bindings/LetterOverride";
 import type { SurfaceShape } from "../bindings/SurfaceShape";
 import type { TextStyle } from "../bindings/TextStyle";
 import type { TextAnimator } from "../bindings/TextAnimator";
@@ -88,8 +87,15 @@ export const addTextLayer = (content: string, size: number) =>
 export const setTextContent = (layerId: number, content: string, size: number) =>
   invoke<Project>("set_text_content", { layerId, content, size });
 
-export const setTextColor = (layerId: number, color: Rgba) =>
-  invoke<Project>("set_text_color", { layerId, color });
+export const setTextColor = (
+  layerId: number,
+  color: Rgba,
+  tMs: number,
+  seedStart: boolean
+) => invoke<Project>("set_text_color", { layerId, color, tMs, seedStart });
+
+export const clearTextColorKeys = (layerId: number, color: Rgba) =>
+  invoke<Project>("clear_text_color_keys", { layerId, color });
 
 export const setTextFont = (layerId: number, font: Font) =>
   invoke<Project>("set_text_font", { layerId, font });
@@ -113,13 +119,51 @@ export const setTextLayerStyles = (layerId: number, styles: TextLayerStyles | nu
 export const setTextPerChar3d = (layerId: number, enabled: boolean, rx: number, ry: number, spread: number) =>
   invoke<Project>("set_text_per_char_3d", { layerId, enabled, rx, ry, spread });
 
-/** Set one glyph's manual transform (decompose mode). */
-export const setLetterOverride = (layerId: number, index: number, part: LetterOverride) =>
-  invoke<Project>("set_letter_override", { layerId, index, part });
+/** A single glyph's manual pose (decompose mode) at one instant. */
+export interface LetterPose {
+  dx: number;
+  dy: number;
+  rotation: number;
+  scale: number;
+}
+
+/** Key one glyph's manual transform at `tMs` (decompose mode) — keyframeable so
+ * each letter can be animated over time. */
+export const setLetterOverride = (
+  layerId: number,
+  index: number,
+  pose: LetterPose,
+  tMs: number,
+  seedStart: boolean
+) =>
+  invoke<Project>("set_letter_override", {
+    layerId,
+    index,
+    dx: pose.dx,
+    dy: pose.dy,
+    rotation: pose.rotation,
+    scale: pose.scale,
+    tMs,
+    seedStart,
+  });
 
 /** Clear all manual per-glyph overrides on a text layer. */
 export const clearLetterOverrides = (layerId: number) =>
   invoke<Project>("clear_letter_overrides", { layerId });
+
+/** Key one glyph's fill colour at `tMs` (decompose mode) — colour a letter
+ * individually, keyframeable over time. */
+export const setLetterColor = (
+  layerId: number,
+  index: number,
+  color: Rgba,
+  tMs: number,
+  seedStart: boolean
+) => invoke<Project>("set_letter_color", { layerId, index, color, tMs, seedStart });
+
+/** Revert one glyph's colour to the layer colour. */
+export const clearLetterColor = (layerId: number, index: number) =>
+  invoke<Project>("clear_letter_color", { layerId, index });
 
 /** Key the decompose amount (0..1) at a time — animates the decompose effect. */
 export const setDecomposeKey = (

@@ -11,7 +11,7 @@
 //! export, so what you see matches what you render.
 
 use std::collections::BTreeSet;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -31,14 +31,37 @@ const SHABNAM: &[u8] = include_bytes!("../fonts/Shabnam.ttf");
 const GANDOM: &[u8] = include_bytes!("../fonts/Gandom.ttf");
 const BUILTINS: [&str; 4] = ["Vazirmatn", "Sahel", "Shabnam", "Gandom"];
 
-/// The lazily-loaded system font database (scans the OS font dirs once).
-fn db() -> &'static fontdb::Database {
-    static DB: OnceLock<fontdb::Database> = OnceLock::new();
-    DB.get_or_init(|| {
-        let mut db = fontdb::Database::new();
-        db.load_system_fonts();
-        db
-    })
+/// Build a fresh font database: the OS system fonts plus the Windows per-user
+/// fonts directory (where fonts installed without admin land, and which
+/// `load_system_fonts` can miss).
+fn build_db() -> fontdb::Database {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let mut dir = std::path::PathBuf::from(local);
+        dir.push("Microsoft");
+        dir.push("Windows");
+        dir.push("Fonts");
+        if dir.is_dir() {
+            db.load_fonts_dir(dir);
+        }
+    }
+    db
+}
+
+/// The system font database, behind an RwLock so it can be reloaded at runtime
+/// (to pick up newly-installed fonts without restarting).
+fn db() -> &'static RwLock<fontdb::Database> {
+    static DB: OnceLock<RwLock<fontdb::Database>> = OnceLock::new();
+    DB.get_or_init(|| RwLock::new(build_db()))
+}
+
+/// Re-scan the OS for fonts (call before listing so new installs show up, and so
+/// they're resolvable when shaping).
+pub fn reload_fonts() {
+    if let Ok(mut guard) = db().write() {
+        *guard = build_db();
+    }
 }
 
 /// Resolve a family name to font bytes + face index. Built-ins are embedded;
@@ -51,13 +74,15 @@ fn font_data(family: &str) -> (Vec<u8>, u32) {
         "Gandom" => return (GANDOM.to_vec(), 0),
         _ => {}
     }
-    let query = fontdb::Query {
-        families: &[fontdb::Family::Name(family)],
-        ..Default::default()
-    };
-    if let Some(id) = db().query(&query) {
-        if let Some(data) = db().with_face_data(id, |data, index| (data.to_vec(), index)) {
-            return data;
+    if let Ok(db) = db().read() {
+        let query = fontdb::Query {
+            families: &[fontdb::Family::Name(family)],
+            ..Default::default()
+        };
+        if let Some(id) = db.query(&query) {
+            if let Some(data) = db.with_face_data(id, |data, index| (data.to_vec(), index)) {
+                return data;
+            }
         }
     }
     (VAZIRMATN.to_vec(), 0)
@@ -67,9 +92,11 @@ fn font_data(family: &str) -> (Vec<u8>, u32) {
 /// (sorted, de-duplicated).
 pub fn list_font_families() -> Vec<String> {
     let mut system: BTreeSet<String> = BTreeSet::new();
-    for face in db().faces() {
-        for (name, _lang) in &face.families {
-            system.insert(name.clone());
+    if let Ok(db) = db().read() {
+        for face in db.faces() {
+            for (name, _lang) in &face.families {
+                system.insert(name.clone());
+            }
         }
     }
     for b in BUILTINS {

@@ -17,8 +17,8 @@ use tauri::{Manager, State};
 
 use eval::ResolvedLayer;
 use model::{
-    Decal, Easing, Effect, Keyframe, Layer, LayerKind, LetterAnimation, LetterOverride, Project,
-    Rgba, SurfaceShape, Track, Transform, TransformEdit, Transition, TransitionKind,
+    ColorKey, Decal, Easing, Effect, Keyframe, Layer, LayerKind, LetterAnimation, LetterOverride,
+    Project, Rgba, SurfaceShape, Track, Transform, TransformEdit, Transition, TransitionKind,
 };
 use text::{Font, ShapedText};
 
@@ -165,10 +165,14 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
             content,
             size,
             color: Rgba { r: 245, g: 245, b: 250, a: 255 },
+            color_keys: vec![],
             font,
             anim: None,
             parts: vec![],
-            decompose: Track::constant(0.0),
+            // Full strength: per-letter overrides apply directly, so keyframing a
+            // decomposed letter animates it without also keying this amount. Key
+            // it toward 0 to gather the letters back for an explode/assemble.
+            decompose: Track::constant(1.0),
             style: None,
             animators: vec![],
             layer_styles: None,
@@ -219,9 +223,71 @@ fn set_text_content(
     Ok(project.clone())
 }
 
-/// Change a text layer's fill colour (no reshape needed).
+/// Insert or update a text colour keyframe at `t_ms`.
+///
+/// `seed_start`: if there are no keys yet and the edit is *after* the layer's
+/// start, first drop a key at the start holding the previous colour — so a single
+/// colour change at a later frame animates from the clip's beginning rather than
+/// recolouring the whole clip. One key = a constant colour (no animation).
+fn upsert_color_key(
+    keys: &mut Vec<ColorKey>,
+    t_ms: u32,
+    color: Rgba,
+    prev: Rgba,
+    seed_start: bool,
+    start_ms: u32,
+) {
+    if keys.is_empty() && seed_start && start_ms < t_ms {
+        keys.push(ColorKey { time_ms: start_ms, color: prev, easing: Easing::EaseInOut });
+    }
+    if let Some(k) = keys.iter_mut().find(|k| k.time_ms == t_ms) {
+        k.color = color;
+    } else {
+        keys.push(ColorKey { time_ms: t_ms, color, easing: Easing::EaseInOut });
+        keys.sort_by(|a, b| a.time_ms.cmp(&b.time_ms));
+    }
+}
+
+/// Change a text layer's fill colour by keying it at the playhead (`t_ms`), so
+/// colour animates over the clip instead of applying to the whole timeline.
 #[tauri::command]
-fn set_text_color(state: State<AppState>, layer_id: u32, color: Rgba) -> Result<Project, String> {
+fn set_text_color(
+    state: State<AppState>,
+    layer_id: u32,
+    color: Rgba,
+    t_ms: u32,
+    seed_start: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let start = layer.start_ms;
+    match &mut layer.kind {
+        LayerKind::Text { color: c, color_keys, .. } => {
+            let prev = color_keys.last().map(|k| k.color).unwrap_or(*c);
+            upsert_color_key(color_keys, t_ms, color, prev, seed_start, start);
+            // Keep the static fill in sync with the first key so the swatch and
+            // any renderer that ignores keys still shows a sensible colour.
+            if let Some(first) = color_keys.first() {
+                *c = first.color;
+            }
+        }
+        _ => return Err("not a text layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Clear all text colour keyframes, collapsing back to a single static fill.
+#[tauri::command]
+fn clear_text_color_keys(
+    state: State<AppState>,
+    layer_id: u32,
+    color: Rgba,
+) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
     let layer = project
@@ -230,7 +296,10 @@ fn set_text_color(state: State<AppState>, layer_id: u32, color: Rgba) -> Result<
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
     match &mut layer.kind {
-        LayerKind::Text { color: c, .. } => *c = color,
+        LayerKind::Text { color: c, color_keys, .. } => {
+            color_keys.clear();
+            *c = color;
+        }
         _ => return Err("not a text layer".into()),
     }
     Ok(project.clone())
@@ -264,8 +333,11 @@ fn set_text_font(state: State<AppState>, layer_id: u32, font: Font) -> Result<Pr
 }
 
 /// List every selectable font family (built-ins first, then system fonts).
+/// Re-scans the OS each call, so fonts installed while the app is running show up
+/// (and become resolvable when shaping).
 #[tauri::command]
 fn list_fonts() -> Vec<String> {
+    text::reload_fonts();
     text::list_font_families()
 }
 
@@ -705,14 +777,24 @@ fn set_layer_hidden(
     Ok(project.clone())
 }
 
-/// Set the manual transform for one glyph of a text layer (decompose mode). The
-/// `parts` vec is grown to the shaped glyph count on demand.
+/// Key one glyph's manual transform at `t_ms` (decompose mode). Each channel is
+/// its own track, so dragging a letter at different playhead positions animates
+/// it over time — like the whole layer's keyframes. `parts` is grown to the
+/// shaped glyph count on demand. `seed_start` drops a rest keyframe at the layer
+/// start when the letter isn't yet keyed, so a single edit later animates from
+/// the beginning.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn set_letter_override(
     state: State<AppState>,
     layer_id: u32,
     index: usize,
-    part: LetterOverride,
+    dx: f32,
+    dy: f32,
+    rotation: f32,
+    scale: f32,
+    t_ms: u32,
+    seed_start: bool,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
@@ -728,13 +810,84 @@ fn set_letter_override(
         .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
+    let start = layer.start_ms;
     match &mut layer.kind {
         LayerKind::Text { parts, .. } => {
             if parts.len() < count {
-                parts.resize(count, LetterOverride::default());
+                parts.resize_with(count, LetterOverride::default);
             }
             if let Some(slot) = parts.get_mut(index) {
-                *slot = part;
+                upsert_key(&mut slot.dx, t_ms, Some(dx), seed_start, start);
+                upsert_key(&mut slot.dy, t_ms, Some(dy), seed_start, start);
+                upsert_key(&mut slot.rotation, t_ms, Some(rotation), seed_start, start);
+                upsert_key(&mut slot.scale, t_ms, Some(scale), seed_start, start);
+            }
+        }
+        _ => return Err("not a text layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Key one glyph's fill colour at `t_ms` (decompose mode) so each letter can be
+/// coloured individually — and animated, like the layer colour. `parts` grows to
+/// the shaped glyph count on demand.
+#[tauri::command]
+fn set_letter_color(
+    state: State<AppState>,
+    layer_id: u32,
+    index: usize,
+    color: Rgba,
+    t_ms: u32,
+    seed_start: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let count = state
+        .shaped
+        .lock()
+        .unwrap()
+        .get(&layer_id)
+        .map(|s| s.glyphs.len())
+        .unwrap_or(0);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let start = layer.start_ms;
+    match &mut layer.kind {
+        LayerKind::Text { color: layer_color, parts, .. } => {
+            if parts.len() < count {
+                parts.resize_with(count, LetterOverride::default);
+            }
+            if let Some(slot) = parts.get_mut(index) {
+                let prev = slot.color_keys.last().map(|k| k.color).unwrap_or(*layer_color);
+                upsert_color_key(&mut slot.color_keys, t_ms, color, prev, seed_start, start);
+            }
+        }
+        _ => return Err("not a text layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Clear one glyph's manual colour keys (revert it to the layer colour).
+#[tauri::command]
+fn clear_letter_color(
+    state: State<AppState>,
+    layer_id: u32,
+    index: usize,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Text { parts, .. } => {
+            if let Some(slot) = parts.get_mut(index) {
+                slot.color_keys.clear();
             }
         }
         _ => return Err("not a text layer".into()),
@@ -1288,7 +1441,15 @@ fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
     f(&mut tf.rotation);
     f(&mut tf.opacity);
     match &mut layer.kind {
-        LayerKind::Text { decompose, .. } => f(decompose),
+        LayerKind::Text { decompose, parts, .. } => {
+            f(decompose);
+            for p in parts.iter_mut() {
+                f(&mut p.dx);
+                f(&mut p.dy);
+                f(&mut p.rotation);
+                f(&mut p.scale);
+            }
+        }
         LayerKind::Shape3D { rotation_x, rotation_y, rotation_z, .. } => {
             f(rotation_x);
             f(rotation_y);
@@ -1475,7 +1636,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let project = Project::demo();
+            // Open with a clear timeline (no default layers).
+            let project = Project::empty();
             let mut shaped = HashMap::new();
             for l in &project.layers {
                 reshape_layer(&mut shaped, l);
@@ -1495,6 +1657,8 @@ pub fn run() {
             edit_keyframes,
             set_layer_hidden,
             set_letter_override,
+            set_letter_color,
+            clear_letter_color,
             clear_letter_overrides,
             set_decompose_key,
             add_shape_layer,
@@ -1529,6 +1693,7 @@ pub fn run() {
             add_text_layer,
             set_text_content,
             set_text_color,
+            clear_text_color_keys,
             set_text_font,
             set_text_anim,
             list_fonts,

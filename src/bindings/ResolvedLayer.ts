@@ -4,6 +4,7 @@ import type { ResolvedEffect } from "./ResolvedEffect";
 import type { ResolvedShapeFrame } from "./ResolvedShapeFrame";
 import type { ResolvedSurface } from "./ResolvedSurface";
 import type { ResolvedTransition } from "./ResolvedTransition";
+import type { Rgba } from "./Rgba";
 
 /**
  * A layer's transform fully resolved at one instant in time. Field names are
@@ -19,6 +20,11 @@ visible: boolean, x: number, y: number, scaleX: number, scaleY: number, rotation
  * in glyph order). Empty for everything else.
  */
 letters: Array<LetterTransform>, 
+/**
+ * Text fill colour sampled at this time (interpolated from `color_keys`, or
+ * the static fill when the layer isn't keyed). `None` for non-text layers.
+ */
+color: Rgba | null, 
 /**
  * Paint-ready decal quads when this is an image pinned to a `Shape3D`.
  * `None` = render the image flat.

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import Preview from "./components/Preview";
 import Timeline from "./components/Timeline";
@@ -41,6 +42,9 @@ import {
   setDecomposeKey,
   setDecalFace,
   setLetterOverride,
+  setLetterColor,
+  clearLetterColor,
+  type LetterPose,
   setShapeParams,
   setShapeRotationKey,
   setWipeStatic,
@@ -52,6 +56,7 @@ import {
   setLayerHidden,
   setTextAnim,
   setTextColor,
+  clearTextColorKeys,
   setTextContent,
   setTextFont,
   listFonts,
@@ -88,7 +93,6 @@ import type { TransformEdit } from "./bindings/TransformEdit";
 import type { LetterAnimation } from "./bindings/LetterAnimation";
 import type { Font } from "./bindings/Font";
 import type { Rgba } from "./bindings/Rgba";
-import type { LetterOverride } from "./bindings/LetterOverride";
 import type { SurfaceShape } from "./bindings/SurfaceShape";
 import type { TextStyle } from "./bindings/TextStyle";
 import type { TextAnimator } from "./bindings/TextAnimator";
@@ -176,6 +180,11 @@ export default function App() {
   // just its display name for the title bar / toolbar.
   const filePathRef = useRef<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
+  // Unsaved-changes tracking for the close-confirmation prompt.
+  const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(false);
+  const pristineRef = useRef(true); // suppress the dirty mark on load/open
+  const [showClosePrompt, setShowClosePrompt] = useState(false);
   // Layer copy/paste clipboard (holds the copied layer's id).
   const copiedLayerRef = useRef<number | null>(null);
   // Razor (cut) tool: when on, clicking a timeline block splits it there.
@@ -290,6 +299,44 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Re-scan installed fonts (picks up fonts installed while the app is running).
+  const refreshFonts = useCallback(() => {
+    listFonts().then(setFonts).catch(() => {});
+  }, []);
+
+  // Mirror `dirty` into a ref the (non-React) window close handler can read.
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+
+  // Any edit replaces `project` with a new object → mark it unsaved. The initial
+  // load and Open are pristine (suppressed via pristineRef).
+  useEffect(() => {
+    if (!project) return;
+    if (pristineRef.current) {
+      pristineRef.current = false;
+      return;
+    }
+    setDirty(true);
+  }, [project]);
+
+  // Intercept the OS window close: if there are unsaved changes, cancel it and
+  // show the Save / Don't-save / Cancel prompt instead.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow()
+      .onCloseRequested((event) => {
+        if (!dirtyRef.current) return; // clean → allow the close
+        event.preventDefault();
+        setShowClosePrompt(true);
+      })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch(() => {});
+    return () => unlisten?.();
+  }, []);
+
   const seek = useCallback(
     (t: number) => {
       timeRef.current = t;
@@ -397,13 +444,18 @@ export default function App() {
     [applyTime, recordAction]
   );
 
-  // Decompose mode: per-glyph manual transforms.
+  // Decompose mode: per-glyph manual transforms, keyed at the playhead so each
+  // letter can be animated over time (drag at t1, drag at t2 → it tweens).
   const onCommitPart = useCallback(
-    async (layerId: number, index: number, part: LetterOverride) => {
-      const p = await setLetterOverride(layerId, index, part);
+    async (layerId: number, index: number, pose: LetterPose) => {
+      const t = Math.round(timeRef.current);
+      const layer = projectRef.current?.layers.find((l) => l.id === layerId);
+      const seedStart = layer ? t > layer.startMs : false;
+      const p = await setLetterOverride(layerId, index, pose, t, seedStart);
       setProject(p);
+      durationRef.current = p.durationMs;
       await applyTime(timeRef.current);
-      recordAction("letter_move", { layerId, index, part });
+      recordAction("letter_move", { layerId, index, pose, timeMs: t });
     },
     [applyTime, recordAction]
   );
@@ -415,6 +467,31 @@ export default function App() {
       setSelectedPart(null);
       await applyTime(timeRef.current);
       recordAction("letters_reset", { layerId });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Colour one decomposed letter at the playhead (keyframeable per letter).
+  const onLetterColor = useCallback(
+    async (layerId: number, index: number, color: Rgba) => {
+      const t = Math.round(timeRef.current);
+      const layer = projectRef.current?.layers.find((l) => l.id === layerId);
+      const seedStart = layer ? t > layer.startMs : false;
+      const p = await setLetterColor(layerId, index, color, t, seedStart);
+      setProject(p);
+      durationRef.current = p.durationMs;
+      await applyTime(timeRef.current);
+      recordAction("letter_color", { layerId, index, color, timeMs: t });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onClearLetterColor = useCallback(
+    async (layerId: number, index: number) => {
+      const p = await clearLetterColor(layerId, index);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("letter_color_clear", { layerId, index });
     },
     [applyTime, recordAction]
   );
@@ -861,35 +938,52 @@ export default function App() {
   );
 
   // Save As: always prompt for a .sefx path, write, and bind the project to it.
-  const doSaveAs = useCallback(async () => {
+  // Returns true when the file was actually written.
+  const doSaveAs = useCallback(async (): Promise<boolean> => {
     const path = await save({
       defaultPath: filePathRef.current ?? "untitled.sefx",
       filters: SEFX_FILTER,
     });
-    if (!path) return;
+    if (!path) return false;
     try {
       await saveProjectFile(path);
       filePathRef.current = path;
       setFileName(baseName(path));
+      setDirty(false);
       recordAction("save_as", { path });
+      return true;
     } catch (e) {
       alert(`Save failed: ${e}`);
+      return false;
     }
   }, [recordAction]);
 
   // Save: write to the bound file, or fall back to Save As if there isn't one.
-  const doSave = useCallback(async () => {
+  const doSave = useCallback(async (): Promise<boolean> => {
     if (!filePathRef.current) {
-      await doSaveAs();
-      return;
+      return doSaveAs();
     }
     try {
       await saveProjectFile(filePathRef.current);
+      setDirty(false);
       recordAction("save", { path: filePathRef.current });
+      return true;
     } catch (e) {
       alert(`Save failed: ${e}`);
+      return false;
     }
   }, [doSaveAs, recordAction]);
+
+  // Close-confirmation prompt actions.
+  const closeWithoutSaving = useCallback(async () => {
+    setShowClosePrompt(false);
+    await getCurrentWindow().destroy();
+  }, []);
+  const saveThenClose = useCallback(async () => {
+    const ok = await doSave();
+    if (ok) await getCurrentWindow().destroy();
+    // If Save As was cancelled, keep the prompt open so nothing is lost.
+  }, [doSave]);
 
   // Open a .sefx project, replacing the current one and loading its images.
   const doOpenProject = useCallback(async () => {
@@ -898,7 +992,9 @@ export default function App() {
     try {
       stop();
       const p = await openProjectFile(selected);
+      pristineRef.current = true; // a freshly-opened file is not "unsaved"
       setProject(p);
+      setDirty(false);
       durationRef.current = p.durationMs;
       filePathRef.current = selected;
       setFileName(baseName(selected));
@@ -912,10 +1008,10 @@ export default function App() {
     }
   }, [stop, resolveImages, seek, recordAction]);
 
-  // Reflect the bound file name in the window title.
+  // Reflect the bound file name (and unsaved-changes dot) in the window title.
   useEffect(() => {
-    document.title = `${fileName ?? "Untitled"} — Simple Effects`;
-  }, [fileName]);
+    document.title = `${dirty ? "• " : ""}${fileName ?? "Untitled"} — Simple Effects`;
+  }, [fileName, dirty]);
 
   // Render the comp to a video. Preferred path is DETERMINISTIC: render every
   // frame at full resolution, then encode it with an exact timestamp via
@@ -1112,10 +1208,23 @@ export default function App() {
 
   const onSetColor = useCallback(
     async (layerId: number, color: Rgba) => {
-      const p = await setTextColor(layerId, color);
+      const t = Math.round(timeRef.current);
+      const layer = projectRef.current?.layers.find((l) => l.id === layerId);
+      const seedStart = layer ? t > layer.startMs : false;
+      const p = await setTextColor(layerId, color, t, seedStart);
       setProject(p);
       await applyTime(timeRef.current);
-      recordAction("text_color", { layerId, color });
+      recordAction("text_color", { layerId, color, timeMs: t });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onClearColorKeys = useCallback(
+    async (layerId: number, color: Rgba) => {
+      const p = await clearTextColorKeys(layerId, color);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("text_color_clear", { layerId });
     },
     [applyTime, recordAction]
   );
@@ -1462,6 +1571,14 @@ export default function App() {
   const decalVisible = !!selDecal && selDecal.quads.length > 0;
   // The selected layer's effect stack, sampled at the playhead (for the sliders).
   const resolvedEffects = (selectedId != null ? resolved[selectedId]?.effects : null) ?? [];
+  // The selected text layer's fill colour AT THE PLAYHEAD (so the swatch shows the
+  // keyframed colour at the current time, not the static/first-key colour).
+  const textColorNow = (selectedId != null ? resolved[selectedId]?.color : null) ?? null;
+  // The selected decomposed letter's resolved fill at the playhead (for its swatch).
+  const letterColorNow =
+    selectedId != null && selectedPart != null
+      ? resolved[selectedId]?.letters[selectedPart]?.fill ?? null
+      : null;
   // The image layer open in the isolated Effect Editor (if any).
   const fxLayer = fxEditorId != null ? project.layers.find((l) => l.id === fxEditorId) ?? null : null;
 
@@ -1644,6 +1761,7 @@ export default function App() {
         <span className="brand">simple · effects</span>
         <span className="filename" title={filePathRef.current ?? "Unsaved project"}>
           {fileName ?? "Untitled"}
+          {dirty && <span className="dirty-dot" title="Unsaved changes"> •</span>}
         </span>
         <button className="primary" onClick={playing ? stop : play}>
           {playing ? "❚❚ Pause" : "▶ Play"}
@@ -1695,6 +1813,7 @@ export default function App() {
             project={project}
             resolved={resolved}
             images={images}
+            timeMs={time}
             selectedId={selectedId}
             playing={playing}
             decomposeId={decomposeId}
@@ -1722,6 +1841,7 @@ export default function App() {
         <Inspector
           layer={selectedLayer}
           fonts={fonts}
+          onRefreshFonts={refreshFonts}
           decomposed={selectedLayer != null && decomposeId === selectedLayer.id}
           shapes={shapes}
           shapeAngles={shapeAngles}
@@ -1739,8 +1859,12 @@ export default function App() {
           onSetDecalFace={onSetDecalFace}
           onRevealFace={onRevealFace}
           onDecalKeyAll={onDecalKeyAll}
+          textColorNow={textColorNow}
+          selectedPart={selectedPart}
+          letterColorNow={letterColorNow}
           onContent={onSetContent}
           onColor={onSetColor}
+          onClearColorKeys={onClearColorKeys}
           onFont={onSetFont}
           onAnim={onSetAnim}
           onSetTextStyle={onSetTextStyle}
@@ -1749,6 +1873,8 @@ export default function App() {
           onSetTextPerChar3d={onSetTextPerChar3d}
           onToggleDecompose={toggleDecompose}
           onClearParts={onClearParts}
+          onLetterColor={onLetterColor}
+          onClearLetterColor={onClearLetterColor}
           onDecomposeKey={onDecomposeKey}
           onSetLayerTransition={onSetLayerTransition}
         />
@@ -1899,6 +2025,29 @@ export default function App() {
           onSetWipeStatic={onSetWipeStatic}
           onClose={() => setFxEditorId(null)}
         />
+      )}
+
+      {showClosePrompt && (
+        <div className="modal-backdrop" onMouseDown={() => setShowClosePrompt(false)}>
+          <div className="modal-box" onMouseDown={(e) => e.stopPropagation()}>
+            <h3 className="modal-title">Unsaved changes</h3>
+            <p className="modal-text">
+              You have unsaved changes{fileName ? ` in “${fileName}”` : ""}. Do you want to save
+              before closing?
+            </p>
+            <div className="modal-actions">
+              <button className="insp-btn" onClick={() => setShowClosePrompt(false)}>
+                Cancel
+              </button>
+              <button className="insp-btn modal-danger" onClick={closeWithoutSaving}>
+                Close without saving
+              </button>
+              <button className="insp-btn active" onClick={saveThenClose}>
+                Save &amp; close
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

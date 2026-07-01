@@ -1,6 +1,6 @@
 // Right-hand inspector. For text layers it edits content (Arabic/RTL aware),
 // font, colour, size (height), and the per-letter animation preset + timing.
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { Layer } from "../bindings/Layer";
 import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { LetterPreset } from "../bindings/LetterPreset";
@@ -480,6 +480,7 @@ function TextInspector({
   color,
   font,
   fonts,
+  onRefreshFonts,
   anim,
   style,
   animators,
@@ -491,6 +492,8 @@ function TextInspector({
   decomposed,
   onContent,
   onColor,
+  onClearColorKeys,
+  colorKeyCount,
   onFont,
   onAnim,
   onSetTextStyle,
@@ -500,6 +503,10 @@ function TextInspector({
   onToggleDecompose,
   onClearParts,
   onDecomposeKey,
+  selectedPart,
+  letterColorNow,
+  onLetterColor,
+  onClearLetterColor,
 }: {
   layerId: number;
   content: string;
@@ -507,6 +514,7 @@ function TextInspector({
   color: Rgba;
   font: Font;
   fonts: string[];
+  onRefreshFonts: () => void;
   anim: LetterAnimation | null;
   style: TextStyle | null;
   animators: TextAnimator[];
@@ -518,6 +526,8 @@ function TextInspector({
   decomposed: boolean;
   onContent: (layerId: number, content: string, size: number) => void;
   onColor: (layerId: number, color: Rgba) => void;
+  onClearColorKeys: (layerId: number, color: Rgba) => void;
+  colorKeyCount: number;
   onFont: (layerId: number, font: Font) => void;
   onAnim: (layerId: number, anim: LetterAnimation | null) => void;
   onSetTextStyle: (layerId: number, style: TextStyle | null) => void;
@@ -527,6 +537,10 @@ function TextInspector({
   onToggleDecompose: (layerId: number) => void;
   onClearParts: (layerId: number) => void;
   onDecomposeKey: (layerId: number, value: number) => void;
+  selectedPart: number | null;
+  letterColorNow: Rgba | null;
+  onLetterColor: (layerId: number, index: number, color: Rgba) => void;
+  onClearLetterColor: (layerId: number, index: number) => void;
 }) {
   const [content, setContent] = useState(content0);
   const [size, setSize] = useState(size0);
@@ -534,6 +548,16 @@ function TextInspector({
     setContent(content0);
     setSize(size0);
   }, [layerId, content0, size0]);
+
+  // Grow the text box to fit its content so long text isn't hidden behind a
+  // 2-row scroll — height tracks the wrapped line count (min 2 rows, max ~12).
+  const textRef = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const ta = textRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight, 260)}px`;
+  }, [content]);
 
   const preset: LetterPreset | "none" = anim?.preset ?? "none";
 
@@ -561,6 +585,7 @@ function TextInspector({
       <label className="insp-field">
         Text
         <textarea
+          ref={textRef}
           className="insp-text"
           dir="auto"
           rows={2}
@@ -572,13 +597,22 @@ function TextInspector({
 
       <label className="insp-field">
         Font
-        <select value={font} onChange={(e) => onFont(layerId, e.target.value as Font)}>
-          {(fonts.includes(font) ? fonts : [font, ...fonts]).map((f) => (
-            <option key={f} value={f}>
-              {f}
-            </option>
-          ))}
-        </select>
+        <div className="font-row">
+          <select
+            value={font}
+            onMouseDown={onRefreshFonts}
+            onChange={(e) => onFont(layerId, e.target.value as Font)}
+          >
+            {(fonts.includes(font) ? fonts : [font, ...fonts]).map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </select>
+          <button className="insp-btn" title="Re-scan installed fonts" onClick={onRefreshFonts}>
+            ↻
+          </button>
+        </div>
       </label>
 
       <div className="row2">
@@ -594,7 +628,19 @@ function TextInspector({
           />
         </label>
         <label className="insp-field">
-          Colour
+          <span className="field-label-row">
+            Colour
+            {colorKeyCount > 0 && (
+              <button
+                type="button"
+                className="key-clear"
+                title={`${colorKeyCount} colour keyframe${colorKeyCount === 1 ? "" : "s"} — click to clear`}
+                onClick={() => onClearColorKeys(layerId, color)}
+              >
+                ◆{colorKeyCount}
+              </button>
+            )}
+          </span>
           <input
             type="color"
             className="insp-color"
@@ -703,6 +749,29 @@ function TextInspector({
               ◆ Decomposed
             </button>
           </div>
+          {selectedPart != null ? (
+            <label className="insp-field">
+              <span className="field-label-row">
+                Letter #{selectedPart + 1} colour
+                <button
+                  type="button"
+                  className="key-clear"
+                  title="Revert this letter to the layer colour"
+                  onClick={() => onClearLetterColor(layerId, selectedPart)}
+                >
+                  reset
+                </button>
+              </span>
+              <input
+                type="color"
+                className="insp-color"
+                value={rgbToHex(letterColorNow ?? color)}
+                onChange={(e) => onLetterColor(layerId, selectedPart, hexToRgb(e.target.value))}
+              />
+            </label>
+          ) : (
+            <p className="insp-hint">Select a letter to colour it individually.</p>
+          )}
           <button className="insp-btn" onClick={() => onClearParts(layerId)}>
             Reset letters
           </button>
@@ -1398,6 +1467,7 @@ function TransitionsSection({
 interface Props {
   layer: Layer | null;
   fonts: string[];
+  onRefreshFonts: () => void;
   decomposed: boolean;
   shapes: ShapeRef[];
   shapeAngles: { x: number; y: number; z: number } | null;
@@ -1425,8 +1495,10 @@ interface Props {
   onSetDecalFace: (layerId: number, face: number) => void;
   onRevealFace: (shapeId: number, face: number) => void;
   onDecalKeyAll: (layerId: number) => void;
+  textColorNow: Rgba | null;
   onContent: (layerId: number, content: string, size: number) => void;
   onColor: (layerId: number, color: Rgba) => void;
+  onClearColorKeys: (layerId: number, color: Rgba) => void;
   onFont: (layerId: number, font: Font) => void;
   onAnim: (layerId: number, anim: LetterAnimation | null) => void;
   onSetTextStyle: (layerId: number, style: TextStyle | null) => void;
@@ -1436,12 +1508,17 @@ interface Props {
   onToggleDecompose: (layerId: number) => void;
   onClearParts: (layerId: number) => void;
   onDecomposeKey: (layerId: number, value: number) => void;
+  selectedPart: number | null;
+  letterColorNow: Rgba | null;
+  onLetterColor: (layerId: number, index: number, color: Rgba) => void;
+  onClearLetterColor: (layerId: number, index: number) => void;
   onSetLayerTransition: SetLayerTransition;
 }
 
 export default function Inspector({
   layer,
   fonts,
+  onRefreshFonts,
   decomposed,
   shapes,
   shapeAngles,
@@ -1459,8 +1536,10 @@ export default function Inspector({
   onSetDecalFace,
   onRevealFace,
   onDecalKeyAll,
+  textColorNow,
   onContent,
   onColor,
+  onClearColorKeys,
   onFont,
   onAnim,
   onSetTextStyle,
@@ -1470,6 +1549,10 @@ export default function Inspector({
   onToggleDecompose,
   onClearParts,
   onDecomposeKey,
+  selectedPart,
+  letterColorNow,
+  onLetterColor,
+  onClearLetterColor,
   onSetLayerTransition,
 }: Props) {
   const decalControls = layer && (layer.kind.kind === "image" || layer.kind.kind === "text") && (
@@ -1495,9 +1578,11 @@ export default function Inspector({
           layerId={layer.id}
           content={layer.kind.content}
           size={layer.kind.size}
-          color={layer.kind.color}
+          color={textColorNow ?? layer.kind.color}
+          colorKeyCount={layer.kind.colorKeys?.length ?? 0}
           font={layer.kind.font}
           fonts={fonts}
+          onRefreshFonts={onRefreshFonts}
           anim={layer.kind.anim}
           style={layer.kind.style}
           animators={layer.kind.animators}
@@ -1509,6 +1594,7 @@ export default function Inspector({
           decomposed={decomposed}
           onContent={onContent}
           onColor={onColor}
+          onClearColorKeys={onClearColorKeys}
           onFont={onFont}
           onAnim={onAnim}
           onSetTextStyle={onSetTextStyle}
@@ -1518,6 +1604,10 @@ export default function Inspector({
           onToggleDecompose={onToggleDecompose}
           onClearParts={onClearParts}
           onDecomposeKey={onDecomposeKey}
+          selectedPart={selectedPart}
+          letterColorNow={letterColorNow}
+          onLetterColor={onLetterColor}
+          onClearLetterColor={onClearLetterColor}
         />
       )}
       {layer && layer.kind.kind === "shape3d" && (

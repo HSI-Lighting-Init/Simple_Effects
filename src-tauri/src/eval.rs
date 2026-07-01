@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::model::{
-    AnimSelector, Easing, Effect, LayerKind, LetterAnimation, LetterPreset, Project, RangeShape,
-    Rgba, SelectorKind, TextAnimator, Track, TransitionKind,
+    AnimSelector, ColorKey, Easing, Effect, LayerKind, LetterAnimation, LetterPreset, Project,
+    RangeShape, Rgba, SelectorKind, TextAnimator, Track, TransitionKind,
 };
 use crate::surface::{self, ResolvedShapeFrame, ResolvedSurface, ShapeState};
 
@@ -34,6 +34,9 @@ pub struct ResolvedLayer {
     /// Per-letter offsets for animated `Text` layers (one per shaped glyph,
     /// in glyph order). Empty for everything else.
     pub letters: Vec<LetterTransform>,
+    /// Text fill colour sampled at this time (interpolated from `color_keys`, or
+    /// the static fill when the layer isn't keyed). `None` for non-text layers.
+    pub color: Option<Rgba>,
     /// Paint-ready decal quads when this is an image pinned to a `Shape3D`.
     /// `None` = render the image flat.
     pub surface: Option<ResolvedSurface>,
@@ -247,6 +250,34 @@ pub fn sample_track(track: &Track, t_ms: u32) -> f32 {
     k0.value + (k1.value - k0.value) * e
 }
 
+/// Sample a text layer's fill colour at `t_ms`. Empty `keys` → the static
+/// `default` fill. Otherwise clamps outside the range and interpolates between
+/// the two surrounding keys using the left key's easing (Hold snaps).
+pub fn sample_color(keys: &[ColorKey], default: Rgba, t_ms: u32) -> Rgba {
+    if keys.is_empty() {
+        return default;
+    }
+    if t_ms <= keys[0].time_ms {
+        return keys[0].color;
+    }
+    let last = &keys[keys.len() - 1];
+    if t_ms >= last.time_ms {
+        return last.color;
+    }
+    let mut i = 0;
+    while i + 1 < keys.len() && keys[i + 1].time_ms <= t_ms {
+        i += 1;
+    }
+    let k0 = &keys[i];
+    let k1 = &keys[i + 1];
+    if matches!(k0.easing, Easing::Hold) {
+        return k0.color;
+    }
+    let span = (k1.time_ms - k0.time_ms).max(1) as f32;
+    let u = (t_ms - k0.time_ms) as f32 / span;
+    blend_rgba(k0.color, k1.color, ease(k0.easing, u))
+}
+
 /// Build a `ShapeState` for a layer at `t_ms` if it's a `Shape3D` (samples its
 /// 3D rotation + 2D placement). Shared by `evaluate` and the drag/drop pick.
 pub fn shape_state_for(layer: &crate::model::Layer, t_ms: u32) -> Option<ShapeState> {
@@ -315,6 +346,14 @@ pub fn evaluate(
             let visible =
                 !layer.hidden && t_ms >= layer.start_ms && t_ms <= layer.end_ms && opacity > 0.0;
 
+            // Text fill colour, sampled at this time (keyframeable).
+            let text_color = match &layer.kind {
+                LayerKind::Text { color, color_keys, .. } => {
+                    Some(sample_color(color_keys, *color, t_ms))
+                }
+                _ => None,
+            };
+
             let letters = match &layer.kind {
                 LayerKind::Text {
                     anim,
@@ -322,7 +361,6 @@ pub fn evaluate(
                     parts,
                     decompose,
                     animators,
-                    color,
                     per_char_3d,
                     per_char_rx,
                     per_char_ry,
@@ -342,10 +380,22 @@ pub fn evaluate(
                     if amount != 0.0 {
                         for (i, lt) in base.iter_mut().enumerate() {
                             if let Some(p) = parts.get(i) {
-                                lt.dx += p.dx * amount;
-                                lt.dy += p.dy * amount;
-                                lt.rotation += p.rotation * amount;
-                                lt.scale *= 1.0 + (p.scale - 1.0) * amount;
+                                lt.dx += sample_track(&p.dx, t_ms) * amount;
+                                lt.dy += sample_track(&p.dy, t_ms) * amount;
+                                lt.rotation += sample_track(&p.rotation, t_ms) * amount;
+                                lt.scale *= 1.0 + (sample_track(&p.scale, t_ms) - 1.0) * amount;
+                            }
+                        }
+                    }
+                    // Per-letter manual colour (independent of the decompose amount).
+                    if !parts.is_empty() {
+                        let base_col =
+                            text_color.unwrap_or(Rgba { r: 255, g: 255, b: 255, a: 255 });
+                        for (i, lt) in base.iter_mut().enumerate() {
+                            if let Some(p) = parts.get(i) {
+                                if !p.color_keys.is_empty() {
+                                    lt.fill = Some(sample_color(&p.color_keys, base_col, t_ms));
+                                }
                             }
                         }
                     }
@@ -354,7 +404,8 @@ pub fn evaluate(
                         if base.len() != count {
                             base = vec![LetterTransform::IDENTITY; count];
                         }
-                        apply_animators(&mut base, animators, count, t_ms, *color, *per_char_3d);
+                        let base_color = text_color.unwrap_or(Rgba { r: 255, g: 255, b: 255, a: 255 });
+                        apply_animators(&mut base, animators, count, t_ms, base_color, *per_char_3d);
                     }
                     // Base per-character 3D pose (each glyph about its own centre).
                     if *per_char_3d && (*per_char_rx != 0.0 || *per_char_ry != 0.0 || *per_char_spread != 0.0) {
@@ -415,6 +466,7 @@ pub fn evaluate(
                 scale_y: if attached { 1.0 } else { sample_track(&tf.scale_y, t_ms) },
                 rotation: if attached { 0.0 } else { sample_track(&tf.rotation, t_ms) },
                 opacity,
+                color: text_color,
                 letters,
                 surface: decal,
                 shape,
@@ -661,6 +713,41 @@ mod tests {
         };
         assert_eq!(sample_track(&t, 999), 10.0);
         assert_eq!(sample_track(&t, 1000), 20.0);
+    }
+
+    #[test]
+    fn color_no_keys_uses_static() {
+        let white = Rgba { r: 255, g: 255, b: 255, a: 255 };
+        assert_eq!(sample_color(&[], white, 0).r, 255);
+        assert_eq!(sample_color(&[], white, 5000).r, 255);
+    }
+
+    #[test]
+    fn color_interpolates_between_keys() {
+        let black = Rgba { r: 0, g: 0, b: 0, a: 255 };
+        let white = Rgba { r: 255, g: 255, b: 255, a: 255 };
+        let keys = vec![
+            ColorKey { time_ms: 0, color: black, easing: Easing::Linear },
+            ColorKey { time_ms: 1000, color: white, easing: Easing::Linear },
+        ];
+        // Endpoints hold; midpoint is halfway grey.
+        assert_eq!(sample_color(&keys, black, 0).r, 0);
+        assert_eq!(sample_color(&keys, black, 1000).r, 255);
+        assert_eq!(sample_color(&keys, black, 2000).r, 255); // clamps after last
+        let mid = sample_color(&keys, black, 500).r;
+        assert!((120..=135).contains(&mid), "midpoint grey was {mid}");
+    }
+
+    #[test]
+    fn color_hold_steps() {
+        let a = Rgba { r: 10, g: 0, b: 0, a: 255 };
+        let b = Rgba { r: 200, g: 0, b: 0, a: 255 };
+        let keys = vec![
+            ColorKey { time_ms: 0, color: a, easing: Easing::Hold },
+            ColorKey { time_ms: 1000, color: b, easing: Easing::Linear },
+        ];
+        assert_eq!(sample_color(&keys, a, 999).r, 10);
+        assert_eq!(sample_color(&keys, a, 1000).r, 200);
     }
 
     #[test]
