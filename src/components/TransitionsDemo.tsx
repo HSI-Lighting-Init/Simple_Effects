@@ -84,18 +84,29 @@ export default function TransitionsDemo({ onClose }: { onClose: () => void }) {
     setParams(defaultsFor(getTransitionMeta(id)!.params));
   }, [id]);
 
-  // Render on any change.
-  useEffect(() => {
-    const cv = canvasRef.current;
-    if (!cv) return;
+  // Build the transition only when id/params change (not per progress), so the
+  // base can cache its fitted frames across a scrub/play.
+  const built = useMemo(() => {
     try {
       const tr = createTransition(id, clips.from, clips.to, { ...params, outWidth: OUT_W, outHeight: OUT_H });
-      tr.render(cv, progress);
+      return { tr, err: null as string | null };
+    } catch (e) {
+      return { tr: null, err: String(e instanceof Error ? e.message : e) };
+    }
+  }, [id, params, clips]);
+
+  useEffect(() => setError(built.err), [built]);
+
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv || !built.tr) return;
+    try {
+      built.tr.render(cv, progress);
       setError(null);
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
     }
-  }, [id, params, progress, clips]);
+  }, [built, progress]);
 
   // Play loop (~1.6s, ping-pong so you see it both ways).
   useEffect(() => {

@@ -44,7 +44,7 @@ You can also construct classes directly: `new Fade(from, to, params)`,
 
 | Param | Values | Default | Description |
 |---|---|---|---|
-| `easing` | `linear` \| `easeIn` \| `easeOut` \| `easeInOut` | `linear` | Timing curve applied to progress. |
+| `easing` | `linear` \| `easeIn` \| `easeOut` \| `easeInOut` \| `spring` \| `bounce`, **or** a `{type:"bezier",x1,y1,x2,y2}` / `{type:"spring",tension,friction,mass}` object | `linear` | Timing curve applied to progress. Spring/bounce can overshoot 1. |
 | `fit` | `contain` \| `cover` \| `stretch` | `cover` | How each clip fits the output frame (contain letterboxes, cover fills + crops, stretch distorts). |
 | `outWidth`, `outHeight` | px | from-clip size | Output frame size. |
 | `durationMs` | ms ≥ 0 | — | Informational; rendering is driven by `progress`. |
@@ -90,6 +90,81 @@ All take `direction: left | right | up | down` (default `left`).
 | **Push** (`push`) | Incoming pushes the outgoing out of frame (both move together). | edge the incoming enters from |
 | **Cover** (`cover`) | Incoming slides in over the stationary outgoing, with a soft leading-edge shadow. | edge the incoming enters from |
 | **Uncover** (`uncover`) | Outgoing slides away on top to reveal the stationary incoming underneath. | direction the outgoing slides off |
+
+---
+
+# Stage 2 — Wipes, Zoom/Scale/Pan, Rotation/Flip
+
+## Custom easing & spring physics
+
+Beyond the named easings, `easing` accepts:
+- **Cubic bezier** — `{ type: "bezier", x1, y1, x2, y2 }` (like CSS `cubic-bezier`).
+- **Spring** — `{ type: "spring", tension?, friction?, mass? }`. Integrated from
+  rest to 1 and time-normalised to settle at progress = 1; low `friction`
+  overshoots and oscillates (bounce). Named presets `spring` and `bounce` are
+  shorthands. Implemented in `spring.ts` (results cached per parameter set).
+
+## Category 3 — Wipe, Reveal & Edge
+
+All wipes take **`softness`** `0..1` (edge feather). Softness is applied as a blur
+on the reveal mask, so any shape can be feathered.
+
+| Transition (`id`) | Description | Extra params |
+|---|---|---|
+| **Horizontal Wipe** (`horizontalWipe`) | Vertical edge sweeps left/right. | `direction: left\|right` |
+| **Vertical Wipe** (`verticalWipe`) | Horizontal edge sweeps up/down. | `direction: up\|down` |
+| **Diagonal Wipe** (`diagonalWipe`) | Edge sweeps corner→opposite corner. | `corner: tl\|tr\|bl\|br` |
+| **Iris Wipe** (`irisWipe`) | Circle expanding/contracting at centre. | `mode: expand\|contract` |
+| **Diamond Wipe** (`diamondWipe`) | Diamond opening/closing. | `mode` |
+| **Box Wipe** (`boxWipe`) | Rectangle expanding/contracting. | `mode` |
+| **Clock Wipe** (`clockWipe`) | Radial clock-hand sweep from 12 o'clock. | `sweep: cw\|ccw` |
+| **Radial Wipe** (`radialWipe`) | Radius wipe from a corner. | `corner` |
+| **Gradient Wipe** (`gradientWipe`) | Soft wipe thresholding a luminance map. | `softness`, `gradientMap?` (CanvasImageSource, in code) |
+| **Edge Feather Wipe** (`edgeFeatherWipe`) | Linear wipe, adjustable feather (default softness 0.2). | `direction`, `softness` |
+| **Barn Doors** (`barnDoors`) | Two edges close/open. | `orientation: horizontal\|vertical`, `mode: close\|open` |
+| **Soft Wipe** (`softWipe`) | Linear wipe with a large blur feather (default softness 0.6). | `direction`, `softness` |
+
+## Category 4 — Zoom, Scale & Pan
+
+Anchor for zoom/scale: **`anchorX`, `anchorY`** `0..1` (default centre).
+**`zoom`** `0..3` extra scale. **`motionBlur`** `0..1` (streak strength).
+
+| Transition (`id`) | Description | Extra params |
+|---|---|---|
+| **Zoom In** (`zoomIn`) | Push into A, then B settles from an over-zoom. | `zoom`, `anchorX/Y`, `motionBlur` |
+| **Zoom Out** (`zoomOut`) | A shrinks to reveal B growing behind. | `zoom`, `anchorX/Y`, `motionBlur` |
+| **Pan** (`pan`) | Camera pans A→B. | `direction: left\|right\|up\|down` |
+| **Zoom & Pan** (`zoomAndPan`) | Directional pan + push-in zoom. | `direction`, `zoom`, `anchorX/Y` |
+| **Zoom with Motion Blur** (`zoomMotionBlur`) | Fast zoom with directional streaks. | `zoom`, `motionBlur`, `anchorX/Y` |
+| **Scale Up** (`scaleUp`) | B scales up from nothing over A. | `anchorX/Y` |
+| **Scale Down** (`scaleDown`) | A scales to nothing revealing B. | `anchorX/Y` |
+| **Scale Bounce** (`scaleBounce`) | B scales in with spring overshoot. | `tension` `20..400`, `friction` (bounce damping) `2..60`, `anchorX/Y` |
+
+## Category 5 — Rotation & Flip
+
+Flips take **`perspective`** `0..1` (3D foreshortening) and **`backface`** (bool:
+show the next clip on the reverse, or a dimmed backface).
+
+| Transition (`id`) | Description | Extra params |
+|---|---|---|
+| **Spin (2D)** (`spin2d`) | 2D rotation crossfade. | `spins` `0.25..4` |
+| **Swivel** (`swivel`) | 3D flip around the vertical axis (card flip). | `perspective`, `backface` |
+| **Flip Vertical** (`flipVertical`) | 3D flip around the horizontal axis. | `perspective`, `backface` |
+| **Rotate & Scale** (`rotateAndScale`) | 2D rotation + scale-in of B. | `spins`, `anchorX/Y` |
+
+> **3D note:** the flips are faked on 2D canvas (axis scaled by `cos(angle)` +
+> a perspective squeeze), not a true 3D projection — good enough for card-flip
+> looks without a WebGL pass.
+
+## Performance (1080p real-time)
+
+- Prepared/fitted frames are **cached per transition instance** (`base.ts`), so
+  re-rendering at a new progress only recomposites.
+- Wipes reuse a **pooled scratch canvas** (`xform.ts`) instead of allocating per
+  frame; masks are composited with GPU-accelerated canvas ops + a single blur.
+- The one heavy path is **Gradient Wipe** (per-pixel threshold) — fine at preview
+  sizes; for 1080p export it costs a full-frame pass. A shader version is a
+  Stage-3 candidate.
 
 ---
 

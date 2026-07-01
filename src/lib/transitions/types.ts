@@ -6,7 +6,13 @@
 
 export type Direction = "left" | "right" | "up" | "down";
 export type FitMode = "contain" | "cover" | "stretch";
-export type EasingName = "linear" | "easeIn" | "easeOut" | "easeInOut";
+export type EasingName = "linear" | "easeIn" | "easeOut" | "easeInOut" | "spring" | "bounce";
+
+/** Custom timing curve: a named easing, a cubic-bezier, or a spring. */
+export type EasingSpec =
+  | EasingName
+  | { type: "bezier"; x1: number; y1: number; x2: number; y2: number }
+  | { type: "spring"; tension?: number; friction?: number; mass?: number };
 
 /** A source frame. `source` null = an empty / fully transparent input. */
 export interface Clip {
@@ -27,7 +33,8 @@ export interface RGBA {
 export interface BaseParams {
   /** Informational (the engine renders from `progress`, not wall-clock). */
   durationMs?: number;
-  easing?: EasingName;
+  /** Named easing, cubic-bezier, or spring. */
+  easing?: EasingSpec;
   /** How each clip is fitted into the output frame. Default "cover". */
   fit?: FitMode;
   /** Output frame size. Defaults to the from-clip's size (then to-clip). */

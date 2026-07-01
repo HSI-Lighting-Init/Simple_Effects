@@ -8,12 +8,16 @@
 // A `Clip` is `{ source, width, height }` where `source` is any CanvasImageSource
 // (image, video, canvas) or null for an empty/transparent input.
 
-export type { Clip, RGBA, Direction, FitMode, EasingName, BaseParams } from "./types";
+export type { Clip, RGBA, Direction, FitMode, EasingName, EasingSpec, BaseParams } from "./types";
 export { DIRECTIONS, FIT_MODES } from "./types";
-export { EASINGS, ease, clamp01 } from "./easing";
+export { EASINGS, ease, resolveEasing, clamp01 } from "./easing";
+export { makeSpring, cubicBezier, type SpringParams } from "./spring";
 export { TransitionEffect, TransitionError } from "./base";
 export * from "./blend";
 export * from "./motion";
+export * from "./wipe";
+export * from "./zoom";
+export * from "./rotate";
 export {
   REGISTRY,
   getTransitionMeta,

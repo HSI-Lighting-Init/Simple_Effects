@@ -9,7 +9,7 @@
 
 import type { BaseParams, Clip, Direction, FitMode, RGBA } from "./types";
 import { DIRECTIONS, FIT_MODES } from "./types";
-import { ease, clamp01 } from "./easing";
+import { resolveEasing, clamp01, type EasingFn } from "./easing";
 import { glBlend } from "./gl";
 
 export class TransitionError extends Error {}
@@ -37,7 +37,7 @@ export abstract class TransitionEffect<P extends BaseParams = BaseParams> {
   protected fromClip: Clip;
   protected toClip: Clip;
   protected params: P;
-  protected easingName: BaseParams["easing"];
+  protected easingFn: EasingFn;
   protected fit: FitMode;
   protected preferGpu: boolean;
   protected outW: number;
@@ -52,11 +52,8 @@ export abstract class TransitionEffect<P extends BaseParams = BaseParams> {
     this.toClip = toClip;
     this.params = params;
 
-    this.easingName = params.easing ?? "linear";
-    assert(
-      ["linear", "easeIn", "easeOut", "easeInOut"].includes(this.easingName),
-      `unknown easing "${this.easingName}"`
-    );
+    // Resolve any easing spec (named / bezier / spring) up front; throws on bad input.
+    this.easingFn = resolveEasing(params.easing);
     this.fit = params.fit ?? "cover";
     assert(FIT_MODES.includes(this.fit), `unknown fit "${this.fit}"`);
     if (params.durationMs != null) assert(params.durationMs >= 0, "durationMs must be >= 0");
@@ -90,6 +87,9 @@ export abstract class TransitionEffect<P extends BaseParams = BaseParams> {
     ctx.restore();
   }
 
+  private _fromFrame?: HTMLCanvasElement;
+  private _toFrame?: HTMLCanvasElement;
+
   /** A full-frame offscreen canvas with the clip fitted in (transparent if empty). */
   protected prepareFrame(clip: Clip): HTMLCanvasElement {
     const cv = document.createElement("canvas");
@@ -98,6 +98,15 @@ export abstract class TransitionEffect<P extends BaseParams = BaseParams> {
     const ctx = cv.getContext("2d");
     if (ctx) this.drawFitted(ctx, clip);
     return cv;
+  }
+
+  /** Prepared from/to frames, fitted once and cached for the instance's lifetime
+   *  (clips + output size + fit are fixed) — avoids re-fitting every frame. */
+  protected get frameA(): HTMLCanvasElement {
+    return (this._fromFrame ??= this.prepareFrame(this.fromClip));
+  }
+  protected get frameB(): HTMLCanvasElement {
+    return (this._toFrame ??= this.prepareFrame(this.toClip));
   }
 
   /** Compose the output at eased progress `p` (0..1). Subclasses implement this. */
@@ -114,13 +123,13 @@ export abstract class TransitionEffect<P extends BaseParams = BaseParams> {
    * transition supports it) or the CPU path.
    */
   render(target: HTMLCanvasElement, progress: number): void {
-    const p = ease(this.easingName ?? "linear", progress);
+    const p = this.easingFn(clamp01(progress));
     if (target.width !== this.outW) target.width = this.outW;
     if (target.height !== this.outH) target.height = this.outH;
     const ctx = target.getContext("2d");
     assert(ctx, "could not get a 2D context on the target canvas");
-    const a = this.prepareFrame(this.fromClip);
-    const b = this.prepareFrame(this.toClip);
+    const a = this.frameA;
+    const b = this.frameB;
     if (this.preferGpu && this.glMode != null) {
       if (glBlend(ctx, a, b, this.outW, this.outH, p, this.glMode)) return;
     }
