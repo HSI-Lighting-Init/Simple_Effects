@@ -30,6 +30,7 @@ import {
   moveKeyframesAt,
   deleteLayer,
   duplicateLayer,
+  splitLayer,
   dropImageOnShape,
   editKeyframes,
   exportVideo,
@@ -167,6 +168,8 @@ export default function App() {
   const [fileName, setFileName] = useState<string | null>(null);
   // Layer copy/paste clipboard (holds the copied layer's id).
   const copiedLayerRef = useRef<number | null>(null);
+  // Razor (cut) tool: when on, clicking a timeline block splits it there.
+  const [razor, setRazor] = useState(false);
 
   // Refs the rAF loop reads without re-subscribing.
   const timeRef = useRef(0);
@@ -724,6 +727,28 @@ export default function App() {
     if (selectedIdRef.current != null) void duplicateLayerById(selectedIdRef.current);
   }, [duplicateLayerById]);
 
+  // Cut a layer at a time into two segments; selects the new (second) segment.
+  const onSplitLayer = useCallback(
+    async (layerId: number, tMs: number) => {
+      try {
+        const p = await splitLayer(layerId, tMs);
+        setProject(p);
+        durationRef.current = p.durationMs;
+        setSelectedId(p.layers.reduce((m, l) => Math.max(m, l.id), 0));
+        await applyTime(timeRef.current);
+        recordAction("split_layer", { layerId, tMs });
+      } catch {
+        // cut point outside the layer — ignore
+      }
+    },
+    [applyTime, recordAction]
+  );
+
+  // Split the selected layer at the current playhead.
+  const onSplitAtPlayhead = useCallback(() => {
+    if (selectedIdRef.current != null) void onSplitLayer(selectedIdRef.current, Math.round(timeRef.current));
+  }, [onSplitLayer]);
+
   // Delete every keyframe at one time on a layer (clicking a timeline diamond).
   const onDeleteKeyframe = useCallback(
     async (layerId: number, tMs: number) => {
@@ -1206,6 +1231,7 @@ export default function App() {
         setSelectedPart(null);
         setDecomposeId(null);
         setSelectedId(null);
+        setRazor(false);
         return;
       }
       // Delete / Backspace removes the selected layer (not while in decompose
@@ -1251,6 +1277,12 @@ export default function App() {
         onDuplicateLayer();
         return;
       }
+      if (mod && (e.key === "k" || e.key === "K")) {
+        if (inField || selectedIdRef.current == null) return;
+        e.preventDefault();
+        onSplitAtPlayhead();
+        return;
+      }
       if (mod && (e.key === "z" || e.key === "Z")) {
         if (inField) return; // let the text field handle its own undo
         e.preventDefault();
@@ -1275,6 +1307,7 @@ export default function App() {
     onCopyLayer,
     onPasteLayer,
     onDuplicateLayer,
+    onSplitAtPlayhead,
   ]);
 
   // Global capture for the session recorder: clicks, JS errors, window resizes.
@@ -1403,6 +1436,16 @@ export default function App() {
           disabled: selectedId == null,
           shortcut: "Ctrl+D",
         },
+        {
+          label: "Split at Playhead",
+          onClick: onSplitAtPlayhead,
+          disabled: selectedId == null,
+          shortcut: "Ctrl+K",
+        },
+        {
+          label: (razor ? "✓ " : "") + "Cut Tool (click to split)",
+          onClick: () => setRazor((v) => !v),
+        },
         { separator: true },
         {
           label: "Delete Layer",
@@ -1503,6 +1546,13 @@ export default function App() {
         </button>
         <button onClick={doUndo} title="Undo (Ctrl+Z)">↶</button>
         <button onClick={doRedo} title="Redo (Ctrl+Shift+Z)">↷</button>
+        <button
+          className={razor ? "cut on" : "cut"}
+          onClick={() => setRazor((v) => !v)}
+          title="Cut tool — click a timeline block to split it (Ctrl+K splits at playhead; Esc exits)"
+        >
+          ✂
+        </button>
         <button
           onClick={() => setShowExportDialog(true)}
           disabled={exporting}
@@ -1608,6 +1658,8 @@ export default function App() {
         onLayerContextMenu={onLayerContextMenu}
         onSetLayerRange={onSetLayerRange}
         onReorder={onReorder}
+        razor={razor}
+        onSplitLayer={onSplitLayer}
       />
 
       {showRecorder && (

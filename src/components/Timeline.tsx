@@ -60,6 +60,10 @@ interface Props {
   onSetLayerRange: (id: number, startMs: number, endMs: number) => void;
   /** Commit a new z-order (full list of layer ids, bottom-first). */
   onReorder: (order: number[]) => void;
+  /** Cut tool: when true, clicking a block splits it at the click. */
+  razor: boolean;
+  /** Split a layer at a time (used by the cut tool). */
+  onSplitLayer: (id: number, tMs: number) => void;
 }
 
 export default function Timeline({
@@ -75,6 +79,8 @@ export default function Timeline({
   onLayerContextMenu,
   onSetLayerRange,
   onReorder,
+  razor,
+  onSplitLayer,
 }: Props) {
   const tracksRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -168,18 +174,49 @@ export default function Timeline({
   // Begin dragging a layer block (move it) or one of its trim edges. Converts
   // horizontal mouse motion into ms against the track width, clamps to the comp,
   // and commits the new range once on release (so it's a single undo step).
+  // Cut the layer at the comp time under `clientX` (the razor tool).
+  const splitAt = (clientX: number, layer: Layer) => {
+    const el = tracksRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const pct = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    onSplitLayer(layer.id, Math.round(pct * dur));
+  };
+
   const startBlockDrag = (
     e: React.MouseEvent,
     layer: Layer,
     mode: Drag["mode"]
   ) => {
     e.stopPropagation(); // don't scrub the playhead
+    if (razor) {
+      splitAt(e.clientX, layer);
+      return;
+    }
     onSelect(layer.id);
     const el = tracksRef.current;
     if (!el) return;
     const trackW = el.getBoundingClientRect().width || 1;
     const span = layer.endMs - layer.startMs;
     const startX = e.clientX;
+    // Snap targets: the comp bounds, the playhead, and every other layer's edges.
+    const thresholdMs = (7 / trackW) * dur;
+    const snapTargets = [0, dur, time];
+    for (const o of project.layers) {
+      if (o.id !== layer.id) snapTargets.push(o.startMs, o.endMs);
+    }
+    const snap = (v: number) => {
+      let best = v;
+      let bestD = thresholdMs;
+      for (const tgt of snapTargets) {
+        const d = Math.abs(v - tgt);
+        if (d < bestD) {
+          bestD = d;
+          best = tgt;
+        }
+      }
+      return best;
+    };
     let next: Drag = {
       id: layer.id,
       mode,
@@ -194,15 +231,24 @@ export default function Timeline({
       let s = layer.startMs;
       let en = layer.endMs;
       if (mode === "move") {
-        let ns = Math.max(0, Math.min(dur - span, layer.startMs + dMs));
+        let ns = layer.startMs + dMs;
+        // Snap whichever edge lands closest to a target; move both together.
+        const snS = snap(ns);
+        const snE = snap(ns + span);
+        if (snS !== ns && (snE === ns + span || Math.abs(snS - ns) <= Math.abs(snE - (ns + span)))) {
+          ns = snS;
+        } else if (snE !== ns + span) {
+          ns = snE - span;
+        }
+        ns = Math.max(0, Math.min(dur - span, ns));
         s = Math.round(ns);
         en = Math.round(ns + span);
       } else if (mode === "start") {
-        s = Math.round(Math.max(0, Math.min(layer.endMs - MIN_SPAN_MS, layer.startMs + dMs)));
+        s = Math.round(Math.max(0, Math.min(layer.endMs - MIN_SPAN_MS, snap(layer.startMs + dMs))));
         en = layer.endMs;
       } else {
         s = layer.startMs;
-        en = Math.round(Math.min(dur, Math.max(layer.startMs + MIN_SPAN_MS, layer.endMs + dMs)));
+        en = Math.round(Math.min(dur, Math.max(layer.startMs + MIN_SPAN_MS, snap(layer.endMs + dMs))));
       }
       next = { ...next, startMs: s, endMs: en, moved: next.moved || Math.abs(ev.clientX - startX) > 3 };
       setDrag(next);
@@ -222,6 +268,10 @@ export default function Timeline({
   // x maps to absolute comp time, so it can be dragged anywhere in the track.
   const startKfDrag = (e: React.MouseEvent, layer: Layer, tm: number) => {
     e.stopPropagation(); // don't move the block or scrub the playhead
+    if (razor) {
+      splitAt(e.clientX, layer);
+      return;
+    }
     const el = tracksRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -351,7 +401,7 @@ export default function Timeline({
           onWheel={onWheel}
         >
           <div
-            className="tl-tracks-inner"
+            className={"tl-tracks-inner" + (razor ? " razor" : "")}
             ref={tracksRef}
             style={{ width: `${zoom * 100}%` }}
             onMouseDown={onMouseDown}

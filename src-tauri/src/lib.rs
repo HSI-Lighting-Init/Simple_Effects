@@ -1224,6 +1224,37 @@ fn duplicate_layer(state: State<AppState>, layer_id: u32) -> Result<Project, Str
     Ok(project.clone())
 }
 
+/// Split ("cut") a layer at `t_ms` into two independent segments: the original
+/// keeps [start_ms, t_ms] and a fresh clone takes [t_ms, end_ms] (same
+/// keyframes / effects / transitions). The transition at the cut boundary is
+/// dropped on both sides. No-op unless start_ms < t_ms < end_ms. Undoable.
+#[tauri::command]
+fn split_layer(state: State<AppState>, layer_id: u32, t_ms: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    let idx = project
+        .layers
+        .iter()
+        .position(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    {
+        let l = &project.layers[idx];
+        if t_ms <= l.start_ms || t_ms >= l.end_ms {
+            return Err("cut point must be inside the layer".into());
+        }
+    }
+    state.snapshot(&project);
+    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let mut second = project.layers[idx].clone();
+    second.id = next_id;
+    second.start_ms = t_ms;
+    second.transition_in = None; // it now starts mid-clip
+    project.layers[idx].end_ms = t_ms;
+    project.layers[idx].transition_out = None; // it now ends at the cut
+    project.layers.insert(idx + 1, second);
+    reshape_layer(&mut state.shaped.lock().unwrap(), &project.layers[idx + 1]);
+    Ok(project.clone())
+}
+
 /// Delete a layer (object). If it's a shape, any layers pinned to it are detached
 /// back to flat. Undoable.
 #[tauri::command]
@@ -1372,6 +1403,7 @@ pub fn run() {
             move_keyframes_at,
             set_layer_transition,
             duplicate_layer,
+            split_layer,
             reorder_layers,
             save_project_file,
             open_project_file,

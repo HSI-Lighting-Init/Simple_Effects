@@ -178,6 +178,13 @@ body {
   border-color: var(--line);
 }
 
+/* Cut (razor) tool toggle */
+.toolbar button.cut.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 /* Session recorder button */
 .toolbar button.rec {
   color: #ff6b6b;
@@ -1079,6 +1086,14 @@ body {
   min-height: 100%;
   min-width: 100%;
   cursor: text;
+}
+
+/* Cut (razor) tool: crosshair over the tracks and blocks. */
+.tl-tracks-inner.razor,
+.tl-tracks-inner.razor .tl-block,
+.tl-tracks-inner.razor .tl-trim,
+.tl-tracks-inner.razor .tl-kf {
+  cursor: crosshair;
 }
 
 .tl-track {

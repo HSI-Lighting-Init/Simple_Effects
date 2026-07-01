@@ -203,6 +203,10 @@ export const deleteLayer = (layerId: number) =>
 export const duplicateLayer = (layerId: number) =>
   invoke<Project>("duplicate_layer", { layerId });
 
+/** Split ("cut") a layer at `tMs` into two independent segments. */
+export const splitLayer = (layerId: number, tMs: number) =>
+  invoke<Project>("split_layer", { layerId, tMs });
+
 /** Delete all keyframes at one time on a layer (one timeline diamond). */
 export const deleteKeyframesAt = (layerId: number, tMs: number) =>
   invoke<Project>("delete_keyframes_at", { layerId, tMs });
