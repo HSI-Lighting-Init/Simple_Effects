@@ -10,6 +10,9 @@ import type { Font } from "../bindings/Font";
 import type { Rgba } from "../bindings/Rgba";
 import type { LetterOverride } from "../bindings/LetterOverride";
 import type { SurfaceShape } from "../bindings/SurfaceShape";
+import type { TextStyle } from "../bindings/TextStyle";
+import type { TextAnimator } from "../bindings/TextAnimator";
+import type { TextLayerStyles } from "../bindings/TextLayerStyles";
 
 export const getProject = () => invoke<Project>("get_project");
 
@@ -90,6 +93,22 @@ export const setTextColor = (layerId: number, color: Rgba) =>
 
 export const setTextFont = (layerId: number, font: Font) =>
   invoke<Project>("set_text_font", { layerId, font });
+
+/** Set (or clear with null) the typographic + fill/stroke style on a text layer. */
+export const setTextStyle = (layerId: number, style: TextStyle | null) =>
+  invoke<Project>("set_text_style", { layerId, style });
+
+/** Set a text layer's After Effects-style per-character animators. */
+export const setTextAnimators = (layerId: number, animators: TextAnimator[]) =>
+  invoke<Project>("set_text_animators", { layerId, animators });
+
+/** Set (or clear with null) a text layer's whole-layer styles. */
+export const setTextLayerStyles = (layerId: number, styles: TextLayerStyles | null) =>
+  invoke<Project>("set_text_layer_styles", { layerId, styles });
+
+/** Toggle per-character 3D on a text layer + set its base rotation controls (deg). */
+export const setTextPerChar3d = (layerId: number, enabled: boolean, rx: number, ry: number, spread: number) =>
+  invoke<Project>("set_text_per_char_3d", { layerId, enabled, rx, ry, spread });
 
 /** Set one glyph's manual transform (decompose mode). */
 export const setLetterOverride = (layerId: number, index: number, part: LetterOverride) =>

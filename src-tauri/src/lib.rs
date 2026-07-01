@@ -169,6 +169,13 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
             anim: None,
             parts: vec![],
             decompose: Track::constant(0.0),
+            style: None,
+            animators: vec![],
+            layer_styles: None,
+            per_char_3d: false,
+            per_char_rx: 0.0,
+            per_char_ry: 0.0,
+            per_char_spread: 0.0,
         },
         transform: Transform::at(cx, cy),
         hidden: false,
@@ -272,6 +279,101 @@ fn set_text_anim(
         .ok_or("layer not found")?;
     match &mut layer.kind {
         LayerKind::Text { anim: a, .. } => *a = anim,
+        _ => return Err("not a text layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Set (or clear) the typographic + fill/stroke style on a text layer. Static
+/// (no reshape needed) — the renderer reads it directly.
+#[tauri::command]
+fn set_text_style(
+    state: State<AppState>,
+    layer_id: u32,
+    style: Option<crate::model::TextStyle>,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Text { style: s, .. } => *s = style,
+        _ => return Err("not a text layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Set a text layer's After Effects-style per-character animators.
+#[tauri::command]
+fn set_text_animators(
+    state: State<AppState>,
+    layer_id: u32,
+    animators: Vec<crate::model::TextAnimator>,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Text { animators: a, .. } => *a = animators,
+        _ => return Err("not a text layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Set (or clear) a text layer's whole-layer styles (shadow/glow/bevel/gradient).
+#[tauri::command]
+fn set_text_layer_styles(
+    state: State<AppState>,
+    layer_id: u32,
+    styles: Option<crate::model::TextLayerStyles>,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Text { layer_styles, .. } => *layer_styles = styles,
+        _ => return Err("not a text layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Toggle per-character 3D on a text layer and set its base rotation controls
+/// (degrees): `rx`/`ry` applied to every glyph about its own centre, `spread`
+/// adding `index * spread` to the Y rotation.
+#[tauri::command]
+fn set_text_per_char_3d(
+    state: State<AppState>,
+    layer_id: u32,
+    enabled: bool,
+    rx: f32,
+    ry: f32,
+    spread: f32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Text { per_char_3d, per_char_rx, per_char_ry, per_char_spread, .. } => {
+            *per_char_3d = enabled;
+            *per_char_rx = rx;
+            *per_char_ry = ry;
+            *per_char_spread = spread;
+        }
         _ => return Err("not a text layer".into()),
     }
     Ok(project.clone())
@@ -1423,6 +1525,10 @@ pub fn run() {
             set_text_color,
             set_text_font,
             set_text_anim,
+            set_text_style,
+            set_text_animators,
+            set_text_layer_styles,
+            set_text_per_char_3d,
             get_shaped,
             load_image_data_url,
             undo,

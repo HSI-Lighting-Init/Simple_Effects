@@ -5,6 +5,9 @@ import type { LetterAnimation } from "./LetterAnimation";
 import type { LetterOverride } from "./LetterOverride";
 import type { Rgba } from "./Rgba";
 import type { SurfaceShape } from "./SurfaceShape";
+import type { TextAnimator } from "./TextAnimator";
+import type { TextLayerStyles } from "./TextLayerStyles";
+import type { TextStyle } from "./TextStyle";
 import type { Track } from "./Track";
 
 /**
@@ -40,4 +43,29 @@ size: number, color: Rgba, font: Font, anim: LetterAnimation | null, parts: Arra
  * Keyframeable 0..1: how much of `parts` is applied. 0 = composed,
  * 1 = fully decomposed. Keyframe it to animate the decompose effect.
  */
-decompose: Track, } | { "kind": "colorpatch", color: Rgba, blend: BlendMode, width: number, height: number, };
+decompose: Track, 
+/**
+ * Optional typographic + fill/stroke style (After Effects-style). `None`
+ * = the plain single-colour fill from `color` (back-compatible).
+ */
+style: TextStyle | null, 
+/**
+ * After Effects-style per-character animators (Range/Wiggly selectors
+ * driving position/scale/rotation/opacity/tracking/skew/blur/colour).
+ */
+animators: Array<TextAnimator>, 
+/**
+ * Whole-layer non-destructive layer styles (shadow/glow/bevel/gradient).
+ */
+layerStyles: TextLayerStyles | null, 
+/**
+ * Enable per-character 3D (animator rotationX/Y + positionZ apply, and
+ * the base per-character rotation below).
+ */
+perChar3d: boolean, 
+/**
+ * Base per-character 3D rotation applied to EVERY glyph about its own
+ * centre (degrees). `per_char_spread` adds `index * spread` to the Y
+ * rotation so the characters fan out in a 3D wave.
+ */
+perCharRx: number, perCharRy: number, perCharSpread: number, } | { "kind": "colorpatch", color: Rgba, blend: BlendMode, width: number, height: number, };

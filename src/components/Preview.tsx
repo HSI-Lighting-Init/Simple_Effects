@@ -36,9 +36,25 @@ import type { BlendMode } from "../bindings/BlendMode";
 import type { TransformEdit } from "../bindings/TransformEdit";
 import type { ShapedText } from "../bindings/ShapedText";
 import type { LetterOverride } from "../bindings/LetterOverride";
+import type { TextStyle } from "../bindings/TextStyle";
+import type { TextLayerStyles } from "../bindings/TextLayerStyles";
 
 function rgbaCss(c: Rgba): string {
   return `rgba(${c.r}, ${c.g}, ${c.b}, ${c.a / 255})`;
+}
+
+// A small pool of reusable offscreen canvases for text compositing (keyed by
+// name+size), so styled/animated text doesn't allocate canvases every frame.
+const _scratchPool = new Map<string, HTMLCanvasElement>();
+function scratch(name: string, w: number, h: number): HTMLCanvasElement {
+  let cv = _scratchPool.get(name);
+  if (!cv) {
+    cv = document.createElement("canvas");
+    _scratchPool.set(name, cv);
+  }
+  if (cv.width !== w) cv.width = w;
+  if (cv.height !== h) cv.height = h;
+  return cv;
 }
 
 function composite(blend: BlendMode): GlobalCompositeOperation {
@@ -378,6 +394,287 @@ function rasterizeText(
   return off;
 }
 
+// Draw one glyph's ordered fill/stroke paint stack. `style` may be null (plain
+// text with a per-letter colour animator); `letterFill` overrides the fill.
+// Stroke `position` is honoured with clipping (inside = clip to glyph, outside =
+// clip to its complement).
+function paintGlyph(
+  ctx: CanvasRenderingContext2D,
+  path: Path2D,
+  letterAlpha: number,
+  style: TextStyle | null,
+  base: Rgba,
+  letterFill?: Rgba | null
+) {
+  const fills = letterFill
+    ? [{ color: letterFill, opacity: 100 }]
+    : style && style.fills.length
+    ? style.fills
+    : [{ color: base, opacity: 100 }];
+  const strokes = style ? style.strokes : [];
+  const drawFills = () => {
+    for (const f of fills) {
+      ctx.globalAlpha = letterAlpha * (f.color.a / 255) * (f.opacity / 100);
+      ctx.fillStyle = `rgb(${f.color.r},${f.color.g},${f.color.b})`;
+      ctx.fill(path);
+    }
+  };
+  const drawStrokes = () => {
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    for (const s of strokes) {
+      if (s.width <= 0) continue;
+      ctx.globalAlpha = letterAlpha * (s.color.a / 255) * (s.opacity / 100);
+      ctx.strokeStyle = `rgb(${s.color.r},${s.color.g},${s.color.b})`;
+      if (s.position === "center") {
+        ctx.lineWidth = s.width;
+        ctx.stroke(path);
+      } else if (s.position === "inside") {
+        ctx.save();
+        ctx.clip(path);
+        ctx.lineWidth = s.width * 2;
+        ctx.stroke(path);
+        ctx.restore();
+      } else {
+        const comp = new Path2D();
+        comp.rect(-100000, -100000, 200000, 200000);
+        comp.addPath(path);
+        ctx.save();
+        ctx.clip(comp, "evenodd");
+        ctx.lineWidth = s.width * 2;
+        ctx.stroke(path);
+        ctx.restore();
+      }
+    }
+  };
+  if (style?.fillOverStroke) {
+    drawStrokes();
+    drawFills();
+  } else {
+    drawFills();
+    drawStrokes();
+  }
+}
+
+// Fill `src`'s alpha shape with `color`, optionally blurred — for shadows/glows.
+function tintedAlpha(src: HTMLCanvasElement, w: number, h: number, color: Rgba, blurPx: number, name: string): HTMLCanvasElement {
+  const t = scratch(name, w, h);
+  const c = t.getContext("2d");
+  if (c) {
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = "source-over";
+    c.filter = "none";
+    c.clearRect(0, 0, w, h);
+    c.drawImage(src, 0, 0);
+    c.globalCompositeOperation = "source-in";
+    c.fillStyle = `rgb(${color.r},${color.g},${color.b})`;
+    c.fillRect(0, 0, w, h);
+    c.globalCompositeOperation = "source-over";
+  }
+  if (blurPx <= 0.1) return t;
+  const b = scratch(name + "-b", w, h);
+  const bc = b.getContext("2d");
+  if (bc) {
+    bc.setTransform(1, 0, 0, 1, 0, 0);
+    bc.clearRect(0, 0, w, h);
+    bc.filter = `blur(${blurPx}px)`;
+    bc.drawImage(t, 0, 0);
+    bc.filter = "none";
+  }
+  return b;
+}
+
+// Composite the whole-layer styles (shadow → outer glow → text → gradient →
+// inner glow → bevel) onto `ctx` from the plain `textCv`. All px are device px
+// (already × SS). Stylised canvas-2D approximations of the AE layer styles.
+function applyLayerStyles(ctx: CanvasRenderingContext2D, textCv: HTMLCanvasElement, w: number, h: number, ls: TextLayerStyles, ss: number) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (ls.dropShadow) {
+    const d = ls.dropShadow;
+    const rad = (d.angle * Math.PI) / 180;
+    const ox = Math.cos(rad) * d.distance * ss;
+    const oy = -Math.sin(rad) * d.distance * ss;
+    const sh = tintedAlpha(textCv, w, h, d.color, d.size * ss, "ls-shadow");
+    ctx.save();
+    ctx.globalAlpha = (d.opacity / 100) * (d.color.a / 255);
+    ctx.drawImage(sh, ox, oy);
+    ctx.restore();
+  }
+  if (ls.outerGlow) {
+    const g = ls.outerGlow;
+    const gl = tintedAlpha(textCv, w, h, g.color, g.size * ss, "ls-oglow");
+    ctx.save();
+    ctx.globalCompositeOperation = composite(g.mode);
+    ctx.globalAlpha = g.opacity / 100;
+    ctx.drawImage(gl, 0, 0);
+    if (g.range > 50) ctx.drawImage(gl, 0, 0); // denser glow
+    ctx.restore();
+  }
+  // Base text.
+  ctx.save();
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 1;
+  ctx.drawImage(textCv, 0, 0);
+  ctx.restore();
+  if (ls.gradient && ls.gradient.stops.length >= 2) {
+    const go = ls.gradient;
+    const gcv = scratch("ls-grad", w, h);
+    const gc = gcv.getContext("2d");
+    if (gc) {
+      gc.setTransform(1, 0, 0, 1, 0, 0);
+      gc.clearRect(0, 0, w, h);
+      const rad = (go.angle * Math.PI) / 180;
+      const cx = w / 2, cy = h / 2, len = Math.max(w, h) / 2;
+      const grad = gc.createLinearGradient(cx - Math.cos(rad) * len, cy - Math.sin(rad) * len, cx + Math.cos(rad) * len, cy + Math.sin(rad) * len);
+      for (const st of [...go.stops].sort((a, b) => a.position - b.position)) {
+        grad.addColorStop(Math.max(0, Math.min(1, st.position / 100)), `rgba(${st.color.r},${st.color.g},${st.color.b},${st.color.a / 255})`);
+      }
+      gc.fillStyle = grad;
+      gc.fillRect(0, 0, w, h);
+      gc.globalCompositeOperation = "destination-in";
+      gc.drawImage(textCv, 0, 0);
+      gc.globalCompositeOperation = "source-over";
+    }
+    ctx.save();
+    ctx.globalCompositeOperation = composite(go.blend);
+    ctx.globalAlpha = go.opacity / 100;
+    ctx.drawImage(gcv, 0, 0);
+    ctx.restore();
+  }
+  if (ls.innerGlow) {
+    const ig = ls.innerGlow;
+    const gl = tintedAlpha(textCv, w, h, ig.color, ig.size * ss, "ls-iglow");
+    ctx.save();
+    ctx.globalCompositeOperation = "source-atop"; // clip to the text
+    ctx.globalAlpha = ig.opacity / 100;
+    ctx.drawImage(gl, 0, 0);
+    ctx.restore();
+  }
+  if (ls.bevel) {
+    const b = ls.bevel;
+    const rad = (b.angle * Math.PI) / 180;
+    const off = (b.size * 0.3 + 1) * ss;
+    const ox = Math.cos(rad) * off, oy = -Math.sin(rad) * off;
+    const hi = tintedAlpha(textCv, w, h, { r: 255, g: 255, b: 255, a: 255 }, b.soften * ss, "ls-bevhi");
+    const sh = tintedAlpha(textCv, w, h, { r: 0, g: 0, b: 0, a: 255 }, b.soften * ss, "ls-bevsh");
+    const amt = Math.max(0, Math.min(1, (b.depth / 100) * 0.6));
+    ctx.save();
+    ctx.globalCompositeOperation = "source-atop";
+    ctx.globalAlpha = amt;
+    ctx.drawImage(hi, -ox, -oy);
+    ctx.drawImage(sh, ox, oy);
+    ctx.restore();
+  }
+}
+
+// Rasterise a text run with fills/strokes/order + typography (tracking, baseline)
+// + per-letter animator properties (position/scale/rotation/opacity/skew/blur/
+// tracking/fill + optional 2.5D per-char rotation) into a padded, supersampled
+// canvas, then composite whole-layer styles. Returns placement so the caller can
+// align it with the plain vector layout.
+function rasterizeStyledText(
+  off: HTMLCanvasElement,
+  shaped: ShapedText,
+  base: Rgba,
+  letters: ResolvedLayer["letters"],
+  style: TextStyle | null,
+  layerStyles: TextLayerStyles | null,
+  perChar3d: boolean
+): { logicalW: number; logicalH: number; imageX: number; imageY: number } {
+  const SS = 2;
+  const count = shaped.glyphs.length;
+  const baseTrack = style?.tracking ?? 0;
+  const baselineShift = style?.baselineShift ?? 0;
+  const perLetterTrack = letters.reduce((s, l) => s + (l?.tracking ?? 0), 0);
+  const trackedWidth = Math.max(1, shaped.width + baseTrack * Math.max(0, count - 1) + perLetterTrack);
+  const maxStroke = (style?.strokes ?? []).reduce((m, s) => Math.max(m, s.position === "center" ? s.width / 2 : s.width), 0);
+  let maxBlur = 0, maxOff = 0, maxScale = 1;
+  for (const l of letters) {
+    if (!l) continue;
+    maxBlur = Math.max(maxBlur, l.blur);
+    maxOff = Math.max(maxOff, Math.abs(l.dx), Math.abs(l.dy));
+    maxScale = Math.max(maxScale, l.scale);
+  }
+  // Extra room for layer styles (shadow reach, glow/bevel radius).
+  let styleExtent = 0;
+  if (layerStyles) {
+    const d = layerStyles.dropShadow;
+    styleExtent = Math.max(
+      styleExtent,
+      d ? d.distance + d.size : 0,
+      layerStyles.outerGlow?.size ?? 0,
+      layerStyles.bevel?.size ?? 0
+    );
+  }
+  const pad = Math.ceil(maxStroke + Math.abs(baselineShift) + maxBlur + maxOff + (maxScale - 1) * shaped.ascender + styleExtent + 4);
+  const logicalW = Math.ceil(trackedWidth) + pad * 2;
+  const logicalH = Math.ceil(shaped.ascender + shaped.descender) + pad * 2;
+  if (off.width !== logicalW * SS || off.height !== logicalH * SS) {
+    off.width = logicalW * SS;
+    off.height = logicalH * SS;
+  }
+
+  const baselineTop = shaped.ascender - baselineShift;
+  const drawGlyphs = (ctx: CanvasRenderingContext2D) => {
+    ctx.setTransform(SS, 0, 0, SS, 0, 0);
+    ctx.clearRect(0, 0, logicalW, logicalH);
+    let trackAcc = 0;
+    shaped.glyphs.forEach((g, i) => {
+      const lt = letters[i];
+      if (g.d) {
+        ctx.save();
+        ctx.translate(pad + g.x + baseTrack * i + trackAcc + g.cx + (lt?.dx ?? 0), pad + baselineTop + g.cy + (lt?.dy ?? 0));
+        ctx.rotate(((lt?.rotation ?? 0) * Math.PI) / 180);
+        let sx = lt?.scale ?? 1, sy = lt?.scale ?? 1;
+        const use3d = perChar3d && lt && (lt.rx !== 0 || lt.ry !== 0 || lt.dz !== 0);
+        let shearY = 0, shearX = 0;
+        if (use3d && lt) {
+          const ryR = (lt.ry * Math.PI) / 180;
+          const rxR = (lt.rx * Math.PI) / 180;
+          const persp = lt.dz ? 800 / (800 - Math.max(-700, Math.min(700, lt.dz))) : 1;
+          // Foreshorten along each axis + a perspective shear so it reads as a
+          // real turn/tilt rather than a flat squash (stylised 2.5D).
+          sx *= Math.cos(ryR) * persp;
+          sy *= Math.cos(rxR) * persp;
+          shearY = Math.sin(ryR) * 0.45;
+          shearX = -Math.sin(rxR) * 0.45;
+        }
+        ctx.scale(sx, sy);
+        if (use3d) ctx.transform(1, shearY, shearX, 1, 0, 0);
+        if (lt?.skew) {
+          const ax = ((lt.skewAxis ?? 0) * Math.PI) / 180;
+          ctx.rotate(ax);
+          ctx.transform(1, 0, Math.tan((lt.skew * Math.PI) / 180), 1, 0, 0);
+          ctx.rotate(-ax);
+        }
+        if (lt?.blur) ctx.filter = `blur(${lt.blur}px)`;
+        ctx.translate(-g.cx, -g.cy);
+        paintGlyph(ctx, new Path2D(g.d), lt?.opacity ?? 1, style, base, lt?.fill ?? null);
+        ctx.restore();
+      }
+      trackAcc += lt?.tracking ?? 0;
+    });
+    ctx.globalAlpha = 1;
+    ctx.filter = "none";
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  };
+
+  const offCtx = off.getContext("2d");
+  if (offCtx) {
+    if (!layerStyles) {
+      drawGlyphs(offCtx);
+    } else {
+      const textCv = scratch("ls-text", off.width, off.height);
+      const tctx = textCv.getContext("2d");
+      if (tctx) drawGlyphs(tctx);
+      applyLayerStyles(offCtx, textCv, off.width, off.height, layerStyles, SS);
+    }
+  }
+  const imageY = (shaped.ascender - shaped.descender) / 2 - shaped.ascender - pad;
+  return { logicalW, logicalH, imageX: -pad - trackedWidth / 2, imageY };
+}
+
 function ImageNode({
   src,
   r,
@@ -651,6 +948,10 @@ function TextGlyphs({
   content,
   size,
   fill,
+  color,
+  style,
+  layerStyles,
+  perChar3d,
   r,
   interaction,
   registerRef,
@@ -665,6 +966,10 @@ function TextGlyphs({
   content: string;
   size: number;
   fill: string;
+  color: Rgba;
+  style: TextStyle | null;
+  layerStyles: TextLayerStyles | null;
+  perChar3d: boolean;
   r: ResolvedLayer;
   interaction: Interaction;
   registerRef: NodeRef;
@@ -678,6 +983,7 @@ function TextGlyphs({
   const [shaped, setShaped] = useState<ShapedText | null>(null);
   const glyphRefs = useRef<Record<number, Konva.Path>>({});
   const glyphTrRef = useRef<Konva.Transformer>(null);
+  const styledOffRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -703,6 +1009,26 @@ function TextGlyphs({
   // Centre the run on the layer origin; baseline so it's vertically centred too.
   const left = -shaped.width / 2;
   const baseline = (shaped.ascender - shaped.descender) / 2;
+  // Styled (fills/strokes/tracking/baseline) text — or plain text whose animator
+  // uses skew/blur/tracking/colour — rasterises to one image; everything else
+  // (incl. position/scale/rotation/opacity animators) keeps crisp vector paths.
+  const advanced =
+    !decompose &&
+    r.letters.some(
+      (l) => !!l && (l.skew !== 0 || l.blur !== 0 || l.tracking !== 0 || !!l.fill || l.rx !== 0 || l.ry !== 0 || l.dz !== 0)
+    );
+  const styled =
+    (style || layerStyles || advanced) && !decompose
+      ? rasterizeStyledText(
+          styledOffRef.current ?? (styledOffRef.current = document.createElement("canvas")),
+          shaped,
+          color,
+          r.letters,
+          style,
+          layerStyles,
+          perChar3d
+        )
+      : null;
 
   // In decompose mode the glyph sits at base + its manual override, so its node
   // transform IS the override — commit is a direct read.
@@ -745,7 +1071,20 @@ function TextGlyphs({
           perfectDrawEnabled={false}
         />
       )}
-      {shaped.glyphs.map((g, i) => {
+      {styled && (
+        // A Shape (not KImage): the fresh sceneFunc closure each render forces
+        // Konva to repaint the styled/animated raster every preview frame — a
+        // KImage keeps the same canvas ref, so it never re-draws during playback.
+        <Shape
+          sceneFunc={(ctx) => {
+            const cv = styledOffRef.current;
+            if (cv) (ctx as unknown as CanvasRenderingContext2D).drawImage(cv, styled.imageX, styled.imageY, styled.logicalW, styled.logicalH);
+          }}
+          listening={false}
+          perfectDrawEnabled={false}
+        />
+      )}
+      {!styled && shaped.glyphs.map((g, i) => {
         if (!g.d) return null; // whitespace: advance only, no outline
         const p = parts[i];
         const lt = r.letters[i];
@@ -998,6 +1337,10 @@ export default function Preview({
                     content={k.content}
                     size={k.size}
                     fill={rgbaCss(k.color)}
+                    color={k.color}
+                    style={k.style}
+                    layerStyles={k.layerStyles}
+                    perChar3d={k.perChar3d}
                     r={r}
                     interaction={interaction(layer.id)}
                     registerRef={register(layer.id)}

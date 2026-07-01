@@ -605,6 +605,72 @@ body {
   padding: 2px 6px;
 }
 
+/* Text style (fills / strokes) rows. */
+.ts-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted);
+  margin: 6px 0 2px;
+}
+.ts-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 0;
+}
+.ts-row input[type="number"] {
+  width: 100%;
+  min-width: 0;
+}
+.ts-row input[type="color"] {
+  flex: 0 0 auto;
+}
+.ts-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+/* Text animator editor. */
+.an-box {
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  padding: 6px;
+  margin: 4px 0;
+}
+.an-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted);
+}
+.an-sep {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 6px 0 2px;
+}
+.an-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 4px 6px;
+}
+.an-num {
+  display: flex;
+  flex-direction: column;
+  font-size: 10px;
+  color: var(--muted);
+}
+.an-num input {
+  width: 100%;
+  min-width: 0;
+}
+
 .row2 {
   display: grid;
   grid-template-columns: 1fr 1fr;

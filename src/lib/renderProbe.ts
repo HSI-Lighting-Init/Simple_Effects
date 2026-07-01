@@ -70,6 +70,9 @@ export interface LayerSubject {
   transitionIn: { engine: string | null; kind: string; durMs: number; direction: number; params: string | null } | null;
   transitionOut: { engine: string | null; kind: string; durMs: number; direction: number; params: string | null } | null;
   effects: string[];
+  /** For text layers: whether a fill/stroke style is set, and how many animators. */
+  textStyle?: boolean;
+  textAnimators?: number;
 }
 export interface ProbeSubject {
   /** Distinct transition-engine ids in play (e.g. ["parallaxCamera"]). */

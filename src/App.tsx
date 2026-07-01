@@ -54,6 +54,10 @@ import {
   setTextColor,
   setTextContent,
   setTextFont,
+  setTextStyle,
+  setTextAnimators,
+  setTextLayerStyles,
+  setTextPerChar3d,
   undo,
 } from "./lib/api";
 import {
@@ -85,6 +89,9 @@ import type { Font } from "./bindings/Font";
 import type { Rgba } from "./bindings/Rgba";
 import type { LetterOverride } from "./bindings/LetterOverride";
 import type { SurfaceShape } from "./bindings/SurfaceShape";
+import type { TextStyle } from "./bindings/TextStyle";
+import type { TextAnimator } from "./bindings/TextAnimator";
+import type { TextLayerStyles } from "./bindings/TextLayerStyles";
 import type { ShapeParams } from "./components/Inspector";
 import "./App.css";
 
@@ -952,6 +959,8 @@ export default function App() {
             transitionIn: trInfo(l.transitionIn),
             transitionOut: trInfo(l.transitionOut),
             effects: l.effects.map((e) => e.kind),
+            textStyle: l.kind.kind === "text" ? !!l.kind.style : undefined,
+            textAnimators: l.kind.kind === "text" ? l.kind.animators.length : undefined,
           }));
           const transitions = [
             ...new Set(
@@ -1124,6 +1133,50 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("preset", { layerId, anim });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Set / clear a text layer's typographic + fill/stroke style.
+  const onSetTextStyle = useCallback(
+    async (layerId: number, style: TextStyle | null) => {
+      const p = await setTextStyle(layerId, style);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("text_style", { layerId });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Set a text layer's per-character animators.
+  const onSetTextAnimators = useCallback(
+    async (layerId: number, animators: TextAnimator[]) => {
+      const p = await setTextAnimators(layerId, animators);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("text_animators", { layerId });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Set / clear a text layer's whole-layer styles.
+  const onSetTextLayerStyles = useCallback(
+    async (layerId: number, styles: TextLayerStyles | null) => {
+      const p = await setTextLayerStyles(layerId, styles);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("text_layer_styles", { layerId });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Toggle per-character 3D on a text layer + its base rotation controls.
+  const onSetTextPerChar3d = useCallback(
+    async (layerId: number, enabled: boolean, rx: number, ry: number, spread: number) => {
+      const p = await setTextPerChar3d(layerId, enabled, rx, ry, spread);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("text_3d", { layerId, enabled });
     },
     [applyTime, recordAction]
   );
@@ -1685,6 +1738,10 @@ export default function App() {
           onColor={onSetColor}
           onFont={onSetFont}
           onAnim={onSetAnim}
+          onSetTextStyle={onSetTextStyle}
+          onSetTextAnimators={onSetTextAnimators}
+          onSetTextLayerStyles={onSetTextLayerStyles}
+          onSetTextPerChar3d={onSetTextPerChar3d}
           onToggleDecompose={toggleDecompose}
           onClearParts={onClearParts}
           onDecomposeKey={onDecomposeKey}

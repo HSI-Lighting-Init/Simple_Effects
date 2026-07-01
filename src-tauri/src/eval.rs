@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::model::{
-    Easing, Effect, LayerKind, LetterAnimation, LetterPreset, Project, Track, TransitionKind,
+    AnimSelector, Easing, Effect, LayerKind, LetterAnimation, LetterPreset, Project, RangeShape,
+    Rgba, SelectorKind, TextAnimator, Track, TransitionKind,
 };
 use crate::surface::{self, ResolvedShapeFrame, ResolvedSurface, ShapeState};
 
@@ -155,11 +156,46 @@ pub struct LetterTransform {
     pub scale: f32,
     pub opacity: f32,
     pub rotation: f32,
+    /// Skew (shear) in degrees, and the axis the skew is measured along (degrees).
+    #[serde(default)]
+    pub skew: f32,
+    #[serde(default)]
+    pub skew_axis: f32,
+    /// Extra letter-spacing added for this glyph (px, cumulative along the run).
+    #[serde(default)]
+    pub tracking: f32,
+    /// Per-glyph Gaussian blur radius (px).
+    #[serde(default)]
+    pub blur: f32,
+    /// Per-glyph fill override (from a colour animator); `None` = the layer fill.
+    #[serde(default)]
+    pub fill: Option<crate::model::Rgba>,
+    /// Per-character 3D (only when the layer enables it): X/Y rotation (degrees)
+    /// and Z position (px).
+    #[serde(default)]
+    pub rx: f32,
+    #[serde(default)]
+    pub ry: f32,
+    #[serde(default)]
+    pub dz: f32,
 }
 
 impl LetterTransform {
-    pub const IDENTITY: LetterTransform =
-        LetterTransform { dx: 0.0, dy: 0.0, scale: 1.0, opacity: 1.0, rotation: 0.0 };
+    pub const IDENTITY: LetterTransform = LetterTransform {
+        dx: 0.0,
+        dy: 0.0,
+        scale: 1.0,
+        opacity: 1.0,
+        rotation: 0.0,
+        skew: 0.0,
+        skew_axis: 0.0,
+        tracking: 0.0,
+        blur: 0.0,
+        fill: None,
+        rx: 0.0,
+        ry: 0.0,
+        dz: 0.0,
+    };
 }
 
 /// Map an eased parameter `u` in [0, 1].
@@ -280,12 +316,24 @@ pub fn evaluate(
                 !layer.hidden && t_ms >= layer.start_ms && t_ms <= layer.end_ms && opacity > 0.0;
 
             let letters = match &layer.kind {
-                LayerKind::Text { anim, size, parts, decompose, .. } => {
+                LayerKind::Text {
+                    anim,
+                    size,
+                    parts,
+                    decompose,
+                    animators,
+                    color,
+                    per_char_3d,
+                    per_char_rx,
+                    per_char_ry,
+                    per_char_spread,
+                    ..
+                } => {
                     let count = letter_counts.get(&layer.id).copied().unwrap_or(0);
                     // Base per-letter transforms from the preset (or identity).
                     let mut base = match anim {
                         Some(a) => eval_letters(a, count, *size, t_ms),
-                        None if parts.is_empty() => Vec::new(),
+                        None if parts.is_empty() && animators.is_empty() => Vec::new(),
                         None => vec![LetterTransform::IDENTITY; count],
                     };
                     // Blend the manual decompose pose in by the animated amount:
@@ -299,6 +347,23 @@ pub fn evaluate(
                                 lt.rotation += p.rotation * amount;
                                 lt.scale *= 1.0 + (p.scale - 1.0) * amount;
                             }
+                        }
+                    }
+                    // After Effects-style animators, applied on top of the base.
+                    if !animators.is_empty() {
+                        if base.len() != count {
+                            base = vec![LetterTransform::IDENTITY; count];
+                        }
+                        apply_animators(&mut base, animators, count, t_ms, *color, *per_char_3d);
+                    }
+                    // Base per-character 3D pose (each glyph about its own centre).
+                    if *per_char_3d && (*per_char_rx != 0.0 || *per_char_ry != 0.0 || *per_char_spread != 0.0) {
+                        if base.len() != count {
+                            base = vec![LetterTransform::IDENTITY; count];
+                        }
+                        for (i, lt) in base.iter_mut().enumerate() {
+                            lt.rx += *per_char_rx;
+                            lt.ry += *per_char_ry + i as f32 * *per_char_spread;
                         }
                     }
                     base
@@ -376,7 +441,7 @@ fn letter_at(anim: &LetterAnimation, i: usize, size: f32, t_ms: u32) -> LetterTr
     let local = ((t_ms as f32 - start) / dur).clamp(0.0, 1.0);
     let e = 1.0 - (1.0 - local) * (1.0 - local); // ease-out
 
-    let mut lt = LetterTransform { dx: 0.0, dy: 0.0, scale: 1.0, opacity: 1.0, rotation: 0.0 };
+    let mut lt = LetterTransform::IDENTITY;
     match anim.preset {
         LetterPreset::FadeIn => lt.opacity = e,
         LetterPreset::ScalePop => {
@@ -406,6 +471,137 @@ fn ease_out_back(x: f32) -> f32 {
     let c1 = 1.70158;
     let c3 = c1 + 1.0;
     1.0 + c3 * (x - 1.0).powi(3) + c1 * (x - 1.0).powi(2)
+}
+
+// --- Text animators (After Effects-style) ---------------------------------
+
+fn hashf(mut h: u32) -> f32 {
+    h = h.wrapping_mul(747796405).wrapping_add(2891336453);
+    h = ((h >> ((h >> 28).wrapping_add(4))) ^ h).wrapping_mul(277803737);
+    (((h >> 22) ^ h) as f32) / (u32::MAX as f32)
+}
+
+/// Smooth value noise in [0,1] over a spatial coord `x` and time `t`.
+fn noise01(x: f32, t: f32, seed: u32) -> f32 {
+    let (xi, xf) = (x.floor(), x - x.floor());
+    let (ti, tf) = (t.floor(), t - t.floor());
+    let u = xf * xf * (3.0 - 2.0 * xf);
+    let v = tf * tf * (3.0 - 2.0 * tf);
+    let h = |a: f32, b: f32| {
+        hashf(
+            (a as i32 as u32)
+                .wrapping_mul(374761393)
+                ^ (b as i32 as u32).wrapping_mul(668265263)
+                ^ seed.wrapping_mul(2246822519),
+        )
+    };
+    let (a, b) = (h(xi, ti), h(xi + 1.0, ti));
+    let (c, d) = (h(xi, ti + 1.0), h(xi + 1.0, ti + 1.0));
+    a * (1.0 - u) * (1.0 - v) + b * u * (1.0 - v) + c * (1.0 - u) * v + d * u * v
+}
+
+fn blend_rgba(a: Rgba, b: Rgba, t: f32) -> Rgba {
+    let t = t.clamp(0.0, 1.0);
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
+    Rgba { r: m(a.r, b.r), g: m(a.g, b.g), b: m(a.b, b.b), a: m(a.a, b.a) }
+}
+
+/// Blend a linear selection toward smoothstep by the average of the ease knobs.
+fn apply_ease(s: f32, ease_high: f32, ease_low: f32) -> f32 {
+    let ease = ((ease_high + ease_low) / 200.0).clamp(0.0, 1.0);
+    let smooth = s * s * (3.0 - 2.0 * s);
+    (s * (1.0 - ease) + smooth * ease).clamp(0.0, 1.0)
+}
+
+/// The 0..1 selection amount a selector assigns to character `i` of `count` at time `t` (seconds).
+fn selector_amount(sel: &AnimSelector, i: usize, count: usize, t: f32) -> f32 {
+    let c = if count <= 1 { 0.5 } else { (i as f32 + 0.5) / count as f32 };
+    match sel.kind {
+        SelectorKind::Expression => 1.0,
+        SelectorKind::Wiggly => {
+            let cor = (sel.correlation / 100.0).clamp(0.0, 1.0);
+            let sx = i as f32 * (1.0 - cor) * 1.3 + sel.spatial_phase / 57.2958;
+            let tt = t * sel.wiggles_per_sec + sel.temporal_phase / 57.2958;
+            (sel.amount / 100.0).clamp(0.0, 1.0) * noise01(sx, tt, sel.seed.max(1))
+        }
+        SelectorKind::Range => {
+            let a = (sel.start + sel.offset) / 100.0;
+            let b = (sel.end + sel.offset) / 100.0;
+            let (ws, we) = (a.min(b), a.max(b));
+            let w = (we - ws).max(1e-4);
+            let inside = c >= ws && c <= we;
+            let mut s = match sel.shape {
+                RangeShape::Square => {
+                    if inside {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                RangeShape::RampUp => ((c - ws) / w).clamp(0.0, 1.0),
+                RangeShape::RampDown => ((we - c) / w).clamp(0.0, 1.0),
+                RangeShape::Triangle => {
+                    (1.0 - ((c - (ws + we) * 0.5) / (w * 0.5)).abs()).clamp(0.0, 1.0)
+                }
+                RangeShape::Round | RangeShape::Smooth => {
+                    let x = ((c - ws) / w).clamp(0.0, 1.0);
+                    x * x * (3.0 - 2.0 * x)
+                }
+            };
+            // Feather the hard square edges by `smoothness`.
+            if matches!(sel.shape, RangeShape::Square) {
+                let feather = (sel.smoothness / 100.0) * w * 0.5;
+                if feather > 1e-4 {
+                    let up = ((c - (ws - feather)) / (2.0 * feather)).clamp(0.0, 1.0);
+                    let down = (((we + feather) - c) / (2.0 * feather)).clamp(0.0, 1.0);
+                    s = up.min(down);
+                }
+            }
+            apply_ease(s, sel.ease_high, sel.ease_low)
+        }
+    }
+}
+
+/// Apply every animator to the base per-letter transforms (each property scaled
+/// by that character's selector amount, summed across animators).
+fn apply_animators(base: &mut [LetterTransform], animators: &[TextAnimator], count: usize, t_ms: u32, color: Rgba, per_char_3d: bool) {
+    if count == 0 {
+        return;
+    }
+    let t = t_ms as f32 / 1000.0;
+    for anim in animators {
+        let p = &anim.props;
+        for i in 0..count.min(base.len()) {
+            let a = selector_amount(&anim.selector, i, count, t);
+            if a <= 0.0 {
+                continue;
+            }
+            let lt = &mut base[i];
+            lt.dx += p.position[0] * a;
+            lt.dy += p.position[1] * a;
+            lt.rotation += p.rotation * a;
+            lt.skew += p.skew * a;
+            if p.skew_axis != 0.0 {
+                lt.skew_axis = p.skew_axis;
+            }
+            lt.scale *= 1.0 + (p.scale / 100.0 - 1.0) * a;
+            lt.opacity *= 1.0 + (p.opacity / 100.0 - 1.0) * a;
+            lt.tracking += p.tracking * a;
+            lt.blur += p.blur * a;
+            if let Some(fc) = p.fill {
+                let from = lt.fill.unwrap_or(color);
+                lt.fill = Some(blend_rgba(from, fc, a));
+            }
+            if per_char_3d {
+                lt.rx += p.rotation_x * a;
+                lt.ry += p.rotation_y * a;
+                lt.dz += p.position_z * a;
+            }
+        }
+    }
+    for lt in base.iter_mut() {
+        lt.opacity = lt.opacity.clamp(0.0, 1.0);
+    }
 }
 
 /// Deterministic per-letter scatter offsets (no RNG, so it's reproducible and

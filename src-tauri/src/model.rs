@@ -141,6 +141,30 @@ pub enum LayerKind {
         /// 1 = fully decomposed. Keyframe it to animate the decompose effect.
         #[serde(default)]
         decompose: Track,
+        /// Optional typographic + fill/stroke style (After Effects-style). `None`
+        /// = the plain single-colour fill from `color` (back-compatible).
+        #[serde(default)]
+        style: Option<TextStyle>,
+        /// After Effects-style per-character animators (Range/Wiggly selectors
+        /// driving position/scale/rotation/opacity/tracking/skew/blur/colour).
+        #[serde(default)]
+        animators: Vec<TextAnimator>,
+        /// Whole-layer non-destructive layer styles (shadow/glow/bevel/gradient).
+        #[serde(default, rename = "layerStyles")]
+        layer_styles: Option<TextLayerStyles>,
+        /// Enable per-character 3D (animator rotationX/Y + positionZ apply, and
+        /// the base per-character rotation below).
+        #[serde(default, rename = "perChar3d")]
+        per_char_3d: bool,
+        /// Base per-character 3D rotation applied to EVERY glyph about its own
+        /// centre (degrees). `per_char_spread` adds `index * spread` to the Y
+        /// rotation so the characters fan out in a 3D wave.
+        #[serde(default, rename = "perCharRx")]
+        per_char_rx: f32,
+        #[serde(default, rename = "perCharRy")]
+        per_char_ry: f32,
+        #[serde(default, rename = "perCharSpread")]
+        per_char_spread: f32,
     },
     /// A flat coloured rectangle, optionally composited with a blend mode.
     ColorPatch {
@@ -251,6 +275,246 @@ impl Default for LetterOverride {
     fn default() -> Self {
         Self { dx: 0.0, dy: 0.0, rotation: 0.0, scale: 1.0 }
     }
+}
+
+/// Where a text stroke sits relative to the glyph outline.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum StrokePosition {
+    Inside,
+    Center,
+    Outside,
+}
+
+/// One fill layer in a text style (stacked bottom→top).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TextFill {
+    pub color: Rgba,
+    /// Fill opacity, 0..100 (percent).
+    pub opacity: f32,
+}
+
+/// One stroke layer in a text style (stacked bottom→top).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TextStroke {
+    pub color: Rgba,
+    /// Stroke opacity, 0..100 (percent).
+    pub opacity: f32,
+    /// Stroke width in px.
+    pub width: f32,
+    pub position: StrokePosition,
+}
+
+/// After Effects-style typographic + paint style for a text layer. All fields
+/// default to "no change", so an empty style renders like the plain `color` fill.
+///
+/// Wired to the renderer today: `fills`, `strokes`, `fill_over_stroke`,
+/// `tracking`, `baseline_shift`. Persisted but not yet applied (need font /
+/// multi-line infrastructure — a later stage): `font_family`, `fallback_stack`,
+/// `font_style`, `variable_axes`, `leading`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TextStyle {
+    #[serde(default)]
+    pub fills: Vec<TextFill>,
+    #[serde(default)]
+    pub strokes: Vec<TextStroke>,
+    /// true = fill drawn over stroke; false (default) = stroke over fill.
+    #[serde(default)]
+    pub fill_over_stroke: bool,
+    /// Letter-spacing added between glyphs, px (negative = tighter).
+    #[serde(default)]
+    pub tracking: f32,
+    /// Line spacing, px. 0 = auto (single-line today). Reserved for multi-line.
+    #[serde(default)]
+    pub leading: f32,
+    /// Baseline offset for the whole block, px (positive = up).
+    #[serde(default)]
+    pub baseline_shift: f32,
+    // --- persisted, not yet applied to rendering ---
+    #[serde(default)]
+    pub font_family: Option<String>,
+    #[serde(default)]
+    pub fallback_stack: Vec<String>,
+    #[serde(default)]
+    pub font_style: Option<String>,
+    #[serde(default)]
+    pub variable_axes: std::collections::HashMap<String, f32>,
+}
+
+/// Selector type for a text animator.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum SelectorKind {
+    Range,
+    Wiggly,
+    /// Accepted + persisted; evaluated as a full (100%) selection for now.
+    Expression,
+}
+
+/// Range-selector falloff shape.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum RangeShape {
+    Square,
+    RampUp,
+    RampDown,
+    Triangle,
+    Round,
+    Smooth,
+}
+
+/// A text-animator selector. Range fields are percentages (0..100). Wiggly
+/// randomises the per-character selection over time.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct AnimSelector {
+    pub kind: SelectorKind,
+    // --- Range ---
+    pub start: f32,
+    pub end: f32,
+    pub offset: f32,
+    pub smoothness: f32,
+    pub ease_high: f32,
+    pub ease_low: f32,
+    pub shape: RangeShape,
+    // --- Wiggly ---
+    pub wiggles_per_sec: f32,
+    pub amount: f32,
+    pub correlation: f32,
+    pub temporal_phase: f32,
+    pub spatial_phase: f32,
+    pub seed: u32,
+}
+
+/// The per-character property offsets a text animator applies (scaled by the
+/// selector amount). Units: position px, rotation/skew degrees, scale/opacity
+/// percent (100 = no change), tracking/blur px, fill overrides the glyph colour.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct AnimProps {
+    pub position: [f32; 2],
+    pub scale: f32,
+    pub rotation: f32,
+    pub skew: f32,
+    pub skew_axis: f32,
+    pub opacity: f32,
+    pub tracking: f32,
+    pub blur: f32,
+    pub fill: Option<Rgba>,
+    /// Unicode code-point shift; persisted, not yet applied (needs reshape).
+    pub char_offset: i32,
+    /// Per-character 3D (only applied when the layer's `per_char_3d` is on):
+    /// X/Y rotation in degrees and Z position in px.
+    #[serde(default)]
+    pub rotation_x: f32,
+    #[serde(default)]
+    pub rotation_y: f32,
+    #[serde(default)]
+    pub position_z: f32,
+}
+
+/// One After Effects-style text animator: a selector + the properties it drives.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TextAnimator {
+    pub selector: AnimSelector,
+    pub props: AnimProps,
+}
+
+// --- Layer styles (whole-layer post-processing on the text) ---------------
+
+/// Drop shadow layer style.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct DropShadow {
+    pub color: Rgba,
+    pub opacity: f32,  // 0..100 %
+    pub angle: f32,    // degrees (light direction)
+    pub distance: f32, // px
+    pub size: f32,     // blur radius px
+}
+
+/// Inner or outer glow layer style.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TextGlow {
+    pub color: Rgba,
+    pub opacity: f32, // 0..100 %
+    pub size: f32,    // px
+    pub range: f32,   // 0..100 % edge falloff
+    pub mode: BlendMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum BevelStyle {
+    InnerBevel,
+    OuterBevel,
+    Emboss,
+    PillowEmboss,
+}
+
+/// Bevel / emboss layer style (stylised: offset highlight + shadow copies).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct BevelEmboss {
+    pub style: BevelStyle,
+    pub depth: f32,   // %
+    pub size: f32,    // px
+    pub soften: f32,  // px
+    pub angle: f32,   // degrees (light azimuth)
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct GradientStop {
+    pub position: f32, // 0..100 %
+    pub color: Rgba,
+}
+
+/// Gradient overlay layer style.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct GradientOverlay {
+    pub opacity: f32, // 0..100 %
+    pub angle: f32,   // degrees
+    pub blend: BlendMode,
+    pub stops: Vec<GradientStop>,
+}
+
+/// The full set of non-destructive layer styles for a text layer.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TextLayerStyles {
+    #[serde(default)]
+    pub drop_shadow: Option<DropShadow>,
+    #[serde(default)]
+    pub outer_glow: Option<TextGlow>,
+    #[serde(default)]
+    pub inner_glow: Option<TextGlow>,
+    #[serde(default)]
+    pub bevel: Option<BevelEmboss>,
+    #[serde(default)]
+    pub gradient: Option<GradientOverlay>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
@@ -492,6 +756,13 @@ impl Project {
                 }),
                 parts: vec![],
                 decompose: Track::constant(0.0),
+                style: None,
+                animators: vec![],
+                layer_styles: None,
+                per_char_3d: false,
+                per_char_rx: 0.0,
+                per_char_ry: 0.0,
+                per_char_spread: 0.0,
             },
             transform: Transform::at(cx, cy + 70.0),
             hidden: false,

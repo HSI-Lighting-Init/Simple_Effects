@@ -6,6 +6,22 @@ import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { LetterPreset } from "../bindings/LetterPreset";
 import type { Font } from "../bindings/Font";
 import type { Rgba } from "../bindings/Rgba";
+import type { TextStyle } from "../bindings/TextStyle";
+import type { TextFill } from "../bindings/TextFill";
+import type { TextStroke } from "../bindings/TextStroke";
+import type { StrokePosition } from "../bindings/StrokePosition";
+import type { TextAnimator } from "../bindings/TextAnimator";
+import type { AnimSelector } from "../bindings/AnimSelector";
+import type { AnimProps } from "../bindings/AnimProps";
+import type { SelectorKind } from "../bindings/SelectorKind";
+import type { RangeShape } from "../bindings/RangeShape";
+import type { TextLayerStyles } from "../bindings/TextLayerStyles";
+import type { DropShadow } from "../bindings/DropShadow";
+import type { TextGlow } from "../bindings/TextGlow";
+import type { BevelEmboss } from "../bindings/BevelEmboss";
+import type { BevelStyle } from "../bindings/BevelStyle";
+import type { GradientOverlay } from "../bindings/GradientOverlay";
+import type { BlendMode } from "../bindings/BlendMode";
 import type { SurfaceShape } from "../bindings/SurfaceShape";
 import type { Decal } from "../bindings/Decal";
 import type { ResolvedEffect } from "../bindings/ResolvedEffect";
@@ -62,6 +78,408 @@ function hexToRgb(hex: string): Rgba {
   return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16), a: 255 };
 }
 
+const DEFAULT_TEXT_STYLE: TextStyle = {
+  fills: [],
+  strokes: [],
+  fillOverStroke: false,
+  tracking: 0,
+  leading: 0,
+  baselineShift: 0,
+  fontFamily: null,
+  fallbackStack: [],
+  fontStyle: null,
+  variableAxes: {},
+};
+
+// After Effects-style typography + stacked fills/strokes for a text layer.
+function TextStyleSection({
+  layerId,
+  style,
+  color,
+  onSet,
+}: {
+  layerId: number;
+  style: TextStyle | null;
+  color: Rgba;
+  onSet: (layerId: number, style: TextStyle | null) => void;
+}) {
+  const s = style ?? DEFAULT_TEXT_STYLE;
+  const patch = (p: Partial<TextStyle>) => onSet(layerId, { ...s, ...p });
+  const setFill = (i: number, f: Partial<TextFill>) => patch({ fills: s.fills.map((x, j) => (j === i ? { ...x, ...f } : x)) });
+  const setStroke = (i: number, st: Partial<TextStroke>) => patch({ strokes: s.strokes.map((x, j) => (j === i ? { ...x, ...st } : x)) });
+  return (
+    <div className="insp-body">
+      <div className="insp-sep">Fill &amp; Stroke</div>
+      <div className="ts-head">
+        <span>Fills</span>
+        <button className="insp-btn" onClick={() => patch({ fills: [...s.fills, { color: { ...color, a: 255 }, opacity: 100 }] })}>＋ Fill</button>
+      </div>
+      {s.fills.map((f, i) => (
+        <div key={i} className="ts-row">
+          <input type="color" value={rgbaToHex(f.color)} onChange={(e) => setFill(i, { color: { ...hexToRgba(e.target.value), a: 255 } })} />
+          <input type="number" min={0} max={100} value={f.opacity} title="Opacity %" onChange={(e) => setFill(i, { opacity: Number(e.target.value) })} />
+          <button className="insp-btn" title="Remove" onClick={() => patch({ fills: s.fills.filter((_, j) => j !== i) })}>✕</button>
+        </div>
+      ))}
+      <div className="ts-head">
+        <span>Strokes</span>
+        <button className="insp-btn" onClick={() => patch({ strokes: [...s.strokes, { color: { r: 0, g: 0, b: 0, a: 255 }, opacity: 100, width: 2, position: "outside" }] })}>＋ Stroke</button>
+      </div>
+      {s.strokes.map((st, i) => (
+        <div key={i} className="ts-row">
+          <input type="color" value={rgbaToHex(st.color)} onChange={(e) => setStroke(i, { color: { ...hexToRgba(e.target.value), a: 255 } })} />
+          <input type="number" min={0} max={100} value={st.opacity} title="Opacity %" onChange={(e) => setStroke(i, { opacity: Number(e.target.value) })} />
+          <input type="number" min={0} step={0.5} value={st.width} title="Width px" onChange={(e) => setStroke(i, { width: Number(e.target.value) })} />
+          <select value={st.position} title="Position" onChange={(e) => setStroke(i, { position: e.target.value as StrokePosition })}>
+            <option value="outside">Outside</option>
+            <option value="center">Center</option>
+            <option value="inside">Inside</option>
+          </select>
+          <button className="insp-btn" title="Remove" onClick={() => patch({ strokes: s.strokes.filter((_, j) => j !== i) })}>✕</button>
+        </div>
+      ))}
+      <label className="insp-field ts-check">
+        <input type="checkbox" checked={s.fillOverStroke} onChange={(e) => patch({ fillOverStroke: e.target.checked })} />
+        Fill over stroke
+      </label>
+
+      <div className="insp-sep">Typography</div>
+      <div className="row2">
+        <label className="insp-field">
+          Tracking (px)
+          <input type="number" step={0.5} value={s.tracking} onChange={(e) => patch({ tracking: Number(e.target.value) })} />
+        </label>
+        <label className="insp-field">
+          Baseline (px)
+          <input type="number" step={0.5} value={s.baselineShift} onChange={(e) => patch({ baselineShift: Number(e.target.value) })} />
+        </label>
+      </div>
+      {style && (
+        <button className="insp-btn" onClick={() => onSet(layerId, null)}>
+          Reset to plain
+        </button>
+      )}
+      <p className="insp-hint">
+        Stack multiple fills/strokes; strokes honour Inside/Center/Outside. Leading, font
+        family &amp; variable axes are accepted &amp; saved for a later build.
+      </p>
+    </div>
+  );
+}
+
+const DEFAULT_SELECTOR: AnimSelector = {
+  kind: "range",
+  start: 0,
+  end: 100,
+  offset: 0,
+  smoothness: 100,
+  easeHigh: 0,
+  easeLow: 0,
+  shape: "square",
+  wigglesPerSec: 2,
+  amount: 100,
+  correlation: 50,
+  temporalPhase: 0,
+  spatialPhase: 0,
+  seed: 1,
+};
+const DEFAULT_PROPS: AnimProps = {
+  position: [0, 0],
+  scale: 100,
+  rotation: 0,
+  skew: 0,
+  skewAxis: 0,
+  opacity: 100,
+  tracking: 0,
+  blur: 0,
+  fill: null,
+  charOffset: 0,
+  rotationX: 0,
+  rotationY: 0,
+  positionZ: 0,
+};
+
+// Compact labelled number input.
+function NumField({ label, value, step = 1, min, max, onChange }: { label: string; value: number; step?: number; min?: number; max?: number; onChange: (v: number) => void }) {
+  return (
+    <label className="an-num">
+      <span>{label}</span>
+      <input type="number" value={value} step={step} min={min} max={max} onChange={(e) => onChange(Number(e.target.value))} />
+    </label>
+  );
+}
+
+// After Effects-style per-character animators: a stack of selector + properties.
+function TextAnimatorsSection({
+  layerId,
+  animators,
+  onSet,
+}: {
+  layerId: number;
+  animators: TextAnimator[];
+  onSet: (layerId: number, animators: TextAnimator[]) => void;
+}) {
+  const setAnim = (i: number, a: TextAnimator) => onSet(layerId, animators.map((x, j) => (j === i ? a : x)));
+  const setSel = (i: number, s: Partial<AnimSelector>) => setAnim(i, { ...animators[i], selector: { ...animators[i].selector, ...s } });
+  const setProps = (i: number, p: Partial<AnimProps>) => setAnim(i, { ...animators[i], props: { ...animators[i].props, ...p } });
+  return (
+    <div className="insp-body">
+      <div className="ts-head">
+        <span>Animators</span>
+        <button className="insp-btn" onClick={() => onSet(layerId, [...animators, { selector: DEFAULT_SELECTOR, props: DEFAULT_PROPS }])}>＋ Animator</button>
+      </div>
+      {animators.map((an, i) => {
+        const sel = an.selector;
+        const p = an.props;
+        return (
+          <div key={i} className="an-box">
+            <div className="an-head">
+              <span>#{i + 1}</span>
+              <button className="insp-btn" title="Remove" onClick={() => onSet(layerId, animators.filter((_, j) => j !== i))}>✕</button>
+            </div>
+            <label className="insp-field">
+              Selector
+              <select value={sel.kind} onChange={(e) => setSel(i, { kind: e.target.value as SelectorKind })}>
+                <option value="range">Range</option>
+                <option value="wiggly">Wiggly</option>
+                <option value="expression">Expression (full)</option>
+              </select>
+            </label>
+            {sel.kind === "range" && (
+              <>
+                <div className="an-grid">
+                  <NumField label="Start %" value={sel.start} onChange={(v) => setSel(i, { start: v })} />
+                  <NumField label="End %" value={sel.end} onChange={(v) => setSel(i, { end: v })} />
+                  <NumField label="Offset %" value={sel.offset} onChange={(v) => setSel(i, { offset: v })} />
+                  <NumField label="Smooth %" value={sel.smoothness} min={0} max={100} onChange={(v) => setSel(i, { smoothness: v })} />
+                  <NumField label="Ease Hi" value={sel.easeHigh} min={-100} max={100} onChange={(v) => setSel(i, { easeHigh: v })} />
+                  <NumField label="Ease Lo" value={sel.easeLow} min={-100} max={100} onChange={(v) => setSel(i, { easeLow: v })} />
+                </div>
+                <label className="insp-field">
+                  Shape
+                  <select value={sel.shape} onChange={(e) => setSel(i, { shape: e.target.value as RangeShape })}>
+                    <option value="square">Square</option>
+                    <option value="rampUp">Ramp Up</option>
+                    <option value="rampDown">Ramp Down</option>
+                    <option value="triangle">Triangle</option>
+                    <option value="round">Round</option>
+                    <option value="smooth">Smooth</option>
+                  </select>
+                </label>
+              </>
+            )}
+            {sel.kind === "wiggly" && (
+              <div className="an-grid">
+                <NumField label="Wiggles/s" value={sel.wigglesPerSec} step={0.5} min={0} onChange={(v) => setSel(i, { wigglesPerSec: v })} />
+                <NumField label="Amount %" value={sel.amount} min={0} max={100} onChange={(v) => setSel(i, { amount: v })} />
+                <NumField label="Correl %" value={sel.correlation} min={0} max={100} onChange={(v) => setSel(i, { correlation: v })} />
+                <NumField label="Seed" value={sel.seed} min={1} onChange={(v) => setSel(i, { seed: Math.max(1, Math.round(v)) })} />
+              </div>
+            )}
+            <div className="an-sep">Animate</div>
+            <div className="an-grid">
+              <NumField label="Pos X" value={p.position[0]} onChange={(v) => setProps(i, { position: [v, p.position[1]] })} />
+              <NumField label="Pos Y" value={p.position[1]} onChange={(v) => setProps(i, { position: [p.position[0], v] })} />
+              <NumField label="Scale %" value={p.scale} onChange={(v) => setProps(i, { scale: v })} />
+              <NumField label="Rotate°" value={p.rotation} onChange={(v) => setProps(i, { rotation: v })} />
+              <NumField label="Opacity %" value={p.opacity} min={0} max={100} onChange={(v) => setProps(i, { opacity: v })} />
+              <NumField label="Tracking" value={p.tracking} step={0.5} onChange={(v) => setProps(i, { tracking: v })} />
+              <NumField label="Skew°" value={p.skew} onChange={(v) => setProps(i, { skew: v })} />
+              <NumField label="Skew Axis°" value={p.skewAxis} onChange={(v) => setProps(i, { skewAxis: v })} />
+              <NumField label="Blur px" value={p.blur} step={0.5} min={0} onChange={(v) => setProps(i, { blur: v })} />
+              <NumField label="Rot X° (3D)" value={p.rotationX} onChange={(v) => setProps(i, { rotationX: v })} />
+              <NumField label="Rot Y° (3D)" value={p.rotationY} onChange={(v) => setProps(i, { rotationY: v })} />
+              <NumField label="Pos Z (3D)" value={p.positionZ} onChange={(v) => setProps(i, { positionZ: v })} />
+            </div>
+            <label className="ts-check">
+              <input
+                type="checkbox"
+                checked={!!p.fill}
+                onChange={(e) => setProps(i, { fill: e.target.checked ? { r: 255, g: 80, b: 80, a: 255 } : null })}
+              />
+              Colour
+              {p.fill && (
+                <input type="color" value={rgbaToHex(p.fill)} onChange={(e) => setProps(i, { fill: { ...hexToRgba(e.target.value), a: 255 } })} />
+              )}
+            </label>
+          </div>
+        );
+      })}
+      {animators.length > 0 && (
+        <p className="insp-hint">
+          Each animator's selector picks characters; its values are the offset at full selection. Scrub/Play to see it move (Wiggly animates on its own; Range animates when you keyframe nothing — drive it via Offset over time in a later build).
+        </p>
+      )}
+    </div>
+  );
+}
+
+const DEF_SHADOW: DropShadow = { color: { r: 0, g: 0, b: 0, a: 255 }, opacity: 75, angle: 120, distance: 6, size: 6 };
+const DEF_OGLOW: TextGlow = { color: { r: 255, g: 240, b: 150, a: 255 }, opacity: 75, size: 10, range: 50, mode: "screen" };
+const DEF_IGLOW: TextGlow = { color: { r: 255, g: 255, b: 255, a: 255 }, opacity: 60, size: 6, range: 50, mode: "screen" };
+const DEF_BEVEL: BevelEmboss = { style: "innerBevel", depth: 100, size: 5, soften: 2, angle: 120 };
+const DEF_GRADIENT: GradientOverlay = {
+  opacity: 100,
+  angle: 90,
+  blend: "normal",
+  stops: [
+    { position: 0, color: { r: 255, g: 60, b: 120, a: 255 } },
+    { position: 100, color: { r: 80, g: 60, b: 255, a: 255 } },
+  ],
+};
+const DEF_STYLES: TextLayerStyles = { dropShadow: null, outerGlow: null, innerGlow: null, bevel: null, gradient: null };
+
+const BLENDS: BlendMode[] = ["normal", "screen", "multiply", "overlay"];
+
+// Whole-layer text styles (drop shadow / glow / bevel / gradient) + per-char 3D.
+function TextLayerStylesSection({
+  layerId,
+  styles,
+  perChar3d,
+  perCharRx,
+  perCharRy,
+  perCharSpread,
+  onSet,
+  onSet3d,
+}: {
+  layerId: number;
+  styles: TextLayerStyles | null;
+  perChar3d: boolean;
+  perCharRx: number;
+  perCharRy: number;
+  perCharSpread: number;
+  onSet: (layerId: number, styles: TextLayerStyles | null) => void;
+  onSet3d: (layerId: number, enabled: boolean, rx: number, ry: number, spread: number) => void;
+}) {
+  const s = styles ?? DEF_STYLES;
+  const patch = (p: Partial<TextLayerStyles>) => onSet(layerId, { ...s, ...p });
+  const anyOn = !!(s.dropShadow || s.outerGlow || s.innerGlow || s.bevel || s.gradient);
+  const hex = rgbaToHex;
+  const rgb = (h: string) => ({ ...hexToRgba(h), a: 255 });
+  return (
+    <div className="insp-body">
+      <label className="ts-check">
+        <input type="checkbox" checked={perChar3d} onChange={(e) => onSet3d(layerId, e.target.checked, perCharRx, perCharRy, perCharSpread)} />
+        Per-character 3D
+      </label>
+      {perChar3d && (
+        <>
+          <div className="an-grid">
+            <NumField label="Rot X°" value={perCharRx} onChange={(v) => onSet3d(layerId, true, v, perCharRy, perCharSpread)} />
+            <NumField label="Rot Y°" value={perCharRy} onChange={(v) => onSet3d(layerId, true, perCharRx, v, perCharSpread)} />
+            <NumField label="Spread°/char" value={perCharSpread} onChange={(v) => onSet3d(layerId, true, perCharRx, perCharRy, v)} />
+          </div>
+          <p className="insp-hint">Base 3D tilts every glyph about its own centre; Spread fans the rotation across characters. Animate it further with an animator's Rot X/Y + Pos Z.</p>
+        </>
+      )}
+
+      {/* Drop shadow */}
+      <label className="ts-check">
+        <input type="checkbox" checked={!!s.dropShadow} onChange={(e) => patch({ dropShadow: e.target.checked ? DEF_SHADOW : null })} />
+        Drop shadow
+        {s.dropShadow && <input type="color" value={hex(s.dropShadow.color)} onChange={(e) => patch({ dropShadow: { ...s.dropShadow!, color: rgb(e.target.value) } })} />}
+      </label>
+      {s.dropShadow && (
+        <div className="an-grid">
+          <NumField label="Opacity %" value={s.dropShadow.opacity} min={0} max={100} onChange={(v) => patch({ dropShadow: { ...s.dropShadow!, opacity: v } })} />
+          <NumField label="Angle°" value={s.dropShadow.angle} onChange={(v) => patch({ dropShadow: { ...s.dropShadow!, angle: v } })} />
+          <NumField label="Distance" value={s.dropShadow.distance} onChange={(v) => patch({ dropShadow: { ...s.dropShadow!, distance: v } })} />
+          <NumField label="Size" value={s.dropShadow.size} min={0} onChange={(v) => patch({ dropShadow: { ...s.dropShadow!, size: v } })} />
+        </div>
+      )}
+
+      {/* Outer glow */}
+      <label className="ts-check">
+        <input type="checkbox" checked={!!s.outerGlow} onChange={(e) => patch({ outerGlow: e.target.checked ? DEF_OGLOW : null })} />
+        Outer glow
+        {s.outerGlow && <input type="color" value={hex(s.outerGlow.color)} onChange={(e) => patch({ outerGlow: { ...s.outerGlow!, color: rgb(e.target.value) } })} />}
+      </label>
+      {s.outerGlow && (
+        <div className="an-grid">
+          <NumField label="Opacity %" value={s.outerGlow.opacity} min={0} max={100} onChange={(v) => patch({ outerGlow: { ...s.outerGlow!, opacity: v } })} />
+          <NumField label="Size" value={s.outerGlow.size} min={0} onChange={(v) => patch({ outerGlow: { ...s.outerGlow!, size: v } })} />
+          <NumField label="Range %" value={s.outerGlow.range} min={0} max={100} onChange={(v) => patch({ outerGlow: { ...s.outerGlow!, range: v } })} />
+        </div>
+      )}
+
+      {/* Inner glow */}
+      <label className="ts-check">
+        <input type="checkbox" checked={!!s.innerGlow} onChange={(e) => patch({ innerGlow: e.target.checked ? DEF_IGLOW : null })} />
+        Inner glow
+        {s.innerGlow && <input type="color" value={hex(s.innerGlow.color)} onChange={(e) => patch({ innerGlow: { ...s.innerGlow!, color: rgb(e.target.value) } })} />}
+      </label>
+      {s.innerGlow && (
+        <div className="an-grid">
+          <NumField label="Opacity %" value={s.innerGlow.opacity} min={0} max={100} onChange={(v) => patch({ innerGlow: { ...s.innerGlow!, opacity: v } })} />
+          <NumField label="Size" value={s.innerGlow.size} min={0} onChange={(v) => patch({ innerGlow: { ...s.innerGlow!, size: v } })} />
+        </div>
+      )}
+
+      {/* Bevel / emboss */}
+      <label className="ts-check">
+        <input type="checkbox" checked={!!s.bevel} onChange={(e) => patch({ bevel: e.target.checked ? DEF_BEVEL : null })} />
+        Bevel / emboss
+      </label>
+      {s.bevel && (
+        <>
+          <label className="insp-field">
+            Style
+            <select value={s.bevel.style} onChange={(e) => patch({ bevel: { ...s.bevel!, style: e.target.value as BevelStyle } })}>
+              <option value="innerBevel">Inner bevel</option>
+              <option value="outerBevel">Outer bevel</option>
+              <option value="emboss">Emboss</option>
+              <option value="pillowEmboss">Pillow emboss</option>
+            </select>
+          </label>
+          <div className="an-grid">
+            <NumField label="Depth %" value={s.bevel.depth} onChange={(v) => patch({ bevel: { ...s.bevel!, depth: v } })} />
+            <NumField label="Size" value={s.bevel.size} min={0} onChange={(v) => patch({ bevel: { ...s.bevel!, size: v } })} />
+            <NumField label="Soften" value={s.bevel.soften} min={0} onChange={(v) => patch({ bevel: { ...s.bevel!, soften: v } })} />
+            <NumField label="Angle°" value={s.bevel.angle} onChange={(v) => patch({ bevel: { ...s.bevel!, angle: v } })} />
+          </div>
+        </>
+      )}
+
+      {/* Gradient overlay */}
+      <label className="ts-check">
+        <input type="checkbox" checked={!!s.gradient} onChange={(e) => patch({ gradient: e.target.checked ? DEF_GRADIENT : null })} />
+        Gradient overlay
+      </label>
+      {s.gradient && (
+        <>
+          <div className="an-grid">
+            <NumField label="Opacity %" value={s.gradient.opacity} min={0} max={100} onChange={(v) => patch({ gradient: { ...s.gradient!, opacity: v } })} />
+            <NumField label="Angle°" value={s.gradient.angle} onChange={(v) => patch({ gradient: { ...s.gradient!, angle: v } })} />
+          </div>
+          <label className="insp-field">
+            Blend
+            <select value={s.gradient.blend} onChange={(e) => patch({ gradient: { ...s.gradient!, blend: e.target.value as BlendMode } })}>
+              {BLENDS.map((b) => (
+                <option key={b} value={b}>{b}</option>
+              ))}
+            </select>
+          </label>
+          {s.gradient.stops.map((st, i) => (
+            <div key={i} className="ts-row">
+              <input type="color" value={hex(st.color)} onChange={(e) => patch({ gradient: { ...s.gradient!, stops: s.gradient!.stops.map((x, j) => (j === i ? { ...x, color: rgb(e.target.value) } : x)) } })} />
+              <input type="number" min={0} max={100} value={st.position} title="Position %" onChange={(e) => patch({ gradient: { ...s.gradient!, stops: s.gradient!.stops.map((x, j) => (j === i ? { ...x, position: Number(e.target.value) } : x)) } })} />
+              {s.gradient!.stops.length > 2 && (
+                <button className="insp-btn" title="Remove" onClick={() => patch({ gradient: { ...s.gradient!, stops: s.gradient!.stops.filter((_, j) => j !== i) } })}>✕</button>
+              )}
+            </div>
+          ))}
+          <button className="insp-btn" onClick={() => patch({ gradient: { ...s.gradient!, stops: [...s.gradient!.stops, { position: 50, color: { r: 255, g: 255, b: 255, a: 255 } }] } })}>＋ Stop</button>
+        </>
+      )}
+
+      {anyOn && (
+        <button className="insp-btn" onClick={() => onSet(layerId, null)}>Clear layer styles</button>
+      )}
+      <p className="insp-hint">Layer styles &amp; per-char 3D are canvas-2D approximations (bevel = offset highlight/shadow; 3D = 2.5D foreshorten).</p>
+    </div>
+  );
+}
+
 function TextInspector({
   layerId,
   content: content0,
@@ -69,11 +487,22 @@ function TextInspector({
   color,
   font,
   anim,
+  style,
+  animators,
+  layerStyles,
+  perChar3d,
+  perCharRx,
+  perCharRy,
+  perCharSpread,
   decomposed,
   onContent,
   onColor,
   onFont,
   onAnim,
+  onSetTextStyle,
+  onSetTextAnimators,
+  onSetTextLayerStyles,
+  onSetTextPerChar3d,
   onToggleDecompose,
   onClearParts,
   onDecomposeKey,
@@ -84,11 +513,22 @@ function TextInspector({
   color: Rgba;
   font: Font;
   anim: LetterAnimation | null;
+  style: TextStyle | null;
+  animators: TextAnimator[];
+  layerStyles: TextLayerStyles | null;
+  perChar3d: boolean;
+  perCharRx: number;
+  perCharRy: number;
+  perCharSpread: number;
   decomposed: boolean;
   onContent: (layerId: number, content: string, size: number) => void;
   onColor: (layerId: number, color: Rgba) => void;
   onFont: (layerId: number, font: Font) => void;
   onAnim: (layerId: number, anim: LetterAnimation | null) => void;
+  onSetTextStyle: (layerId: number, style: TextStyle | null) => void;
+  onSetTextAnimators: (layerId: number, animators: TextAnimator[]) => void;
+  onSetTextLayerStyles: (layerId: number, styles: TextLayerStyles | null) => void;
+  onSetTextPerChar3d: (layerId: number, enabled: boolean, rx: number, ry: number, spread: number) => void;
   onToggleDecompose: (layerId: number) => void;
   onClearParts: (layerId: number) => void;
   onDecomposeKey: (layerId: number, value: number) => void;
@@ -168,6 +608,23 @@ function TextInspector({
           />
         </label>
       </div>
+
+      <TextStyleSection layerId={layerId} style={style} color={color} onSet={onSetTextStyle} />
+
+      <div className="insp-sep">Text animators</div>
+      <TextAnimatorsSection layerId={layerId} animators={animators} onSet={onSetTextAnimators} />
+
+      <div className="insp-sep">Layer styles &amp; 3D</div>
+      <TextLayerStylesSection
+        layerId={layerId}
+        styles={layerStyles}
+        perChar3d={perChar3d}
+        perCharRx={perCharRx}
+        perCharRy={perCharRy}
+        perCharSpread={perCharSpread}
+        onSet={onSetTextLayerStyles}
+        onSet3d={onSetTextPerChar3d}
+      />
 
       <div className="insp-sep">Per-letter effect</div>
       <label className="insp-field">
@@ -976,6 +1433,10 @@ interface Props {
   onColor: (layerId: number, color: Rgba) => void;
   onFont: (layerId: number, font: Font) => void;
   onAnim: (layerId: number, anim: LetterAnimation | null) => void;
+  onSetTextStyle: (layerId: number, style: TextStyle | null) => void;
+  onSetTextAnimators: (layerId: number, animators: TextAnimator[]) => void;
+  onSetTextLayerStyles: (layerId: number, styles: TextLayerStyles | null) => void;
+  onSetTextPerChar3d: (layerId: number, enabled: boolean, rx: number, ry: number, spread: number) => void;
   onToggleDecompose: (layerId: number) => void;
   onClearParts: (layerId: number) => void;
   onDecomposeKey: (layerId: number, value: number) => void;
@@ -1005,6 +1466,10 @@ export default function Inspector({
   onColor,
   onFont,
   onAnim,
+  onSetTextStyle,
+  onSetTextAnimators,
+  onSetTextLayerStyles,
+  onSetTextPerChar3d,
   onToggleDecompose,
   onClearParts,
   onDecomposeKey,
@@ -1036,11 +1501,22 @@ export default function Inspector({
           color={layer.kind.color}
           font={layer.kind.font}
           anim={layer.kind.anim}
+          style={layer.kind.style}
+          animators={layer.kind.animators}
+          layerStyles={layer.kind.layerStyles}
+          perChar3d={layer.kind.perChar3d}
+          perCharRx={layer.kind.perCharRx}
+          perCharRy={layer.kind.perCharRy}
+          perCharSpread={layer.kind.perCharSpread}
           decomposed={decomposed}
           onContent={onContent}
           onColor={onColor}
           onFont={onFont}
           onAnim={onAnim}
+          onSetTextStyle={onSetTextStyle}
+          onSetTextAnimators={onSetTextAnimators}
+          onSetTextLayerStyles={onSetTextLayerStyles}
+          onSetTextPerChar3d={onSetTextPerChar3d}
           onToggleDecompose={onToggleDecompose}
           onClearParts={onClearParts}
           onDecomposeKey={onDecomposeKey}
