@@ -24,6 +24,18 @@ import { Spin2D, Swivel, FlipVertical, RotateAndScale } from "./rotate";
 import { PatternTransition, Mosaic, Vortex, type PatternKind } from "./tiles";
 import { CubeRotation, CardFlip3D, Tumble, Doors3D, Curtains3D, FlyThroughFlip } from "./rotate3d";
 import { Fold, AccordionFold, Unfold, PageTurn, PageRoll, PageCurl, PeelOff, StickyPeel } from "./fold";
+import {
+  Glitch, PixelSort, BadTV, DigitalBlockWipe, DataMosh, WaveWarp, Ripple, Swirl,
+  Liquify, Melt, Stretch, MotionTile, RetroVHS, Flicker, LightLeakTransition, Prism,
+} from "./glitch";
+import {
+  ParticleDissolve, Shatter, Explosion, Sandstorm, Confetti, Crumble, LowPolyExplode,
+  MorphingParticles, SmokeBurst, Bubbles, MagicDust, Fire, WaterWash, Constellation,
+} from "./disintegrate";
+import {
+  WhipPan, TiltWhip, DollyIn, DollyOut, Truck, ZoomShake, ParallaxCamera, KenBurns,
+  DollyZoom, RackFocus, AerialFlyover, FlyThrough, Orbital, Room3D, Spin360, PerspectiveSlide,
+} from "./camera";
 
 export interface ParamSpec {
   name: string;
@@ -251,6 +263,15 @@ const SEGMENTS: ParamSpec = { name: "segments", label: "Segments", type: "number
 const RADIUS: ParamSpec = { name: "radius", label: "Curl radius", type: "number", min: 0.02, max: 0.4, step: 0.01, default: 0.12, description: "Page-curl cylinder radius (fraction of width)." };
 const THICKNESS: ParamSpec = { name: "thickness", label: "Thickness", type: "number", min: 0, max: 0.1, step: 0.005, default: 0.03, description: "Card/page thickness (fraction of width)." };
 const TWIST: ParamSpec = { name: "twist", label: "Twist", type: "number", min: 0, max: 12, step: 0.5, default: 6, description: "Vortex swirl amount." };
+
+// --- Stage 4 parameter specs ---
+const AMOUNT: ParamSpec = { name: "amount", label: "Amount", type: "number", min: 0, max: 1, step: 0.05, default: 1, description: "Overall effect strength (glitch/shake intensity)." };
+const AMPLITUDE: ParamSpec = { name: "amplitude", label: "Amplitude", type: "number", min: 0, max: 120, step: 2, default: 40, description: "Distortion amplitude in pixels (waves/ripple/prism split)." };
+const FREQUENCY: ParamSpec = { name: "frequency", label: "Frequency", type: "number", min: 1, max: 12, step: 0.5, default: 3, description: "Number of wave cycles / repeats / strobe steps." };
+const HUE: ParamSpec = { name: "hue", label: "Hue", type: "number", min: 0, max: 360, step: 5, default: 30, description: "Light-leak colour hue." };
+const DENSITY: ParamSpec = { name: "density", label: "Density", type: "number", min: 0, max: 40, step: 1, default: 0, description: "Particle / cell resolution (0 = the preset default)." };
+const BLUR: ParamSpec = { name: "blur", label: "Blur", type: "number", min: 0, max: 2, step: 0.1, default: 1, description: "Motion / defocus blur strength." };
+const DEPTH: ParamSpec = { name: "depth", label: "Depth", type: "number", min: 0, max: 2, step: 0.1, default: 1, description: "Dolly / parallax depth intensity." };
 
 export const REGISTRY: TransitionMeta[] = [
   {
@@ -694,6 +715,58 @@ export const REGISTRY: TransitionMeta[] = [
     create: (f, t, p) => new StickyPeel(f, t, p),
     params: [CORNER, EASING, FIT],
   },
+
+  // --- Category 8: Distortion, Glitch & Digital ---
+  { id: "glitch", label: "Glitch", category: "Distortion, Glitch & Digital", description: "RGB split, block displacement and digital noise crossing into B.", create: (f, t, p) => new Glitch("glitch", f, t, p), params: [SEED, AMOUNT, EASING, FIT] },
+  { id: "pixelSort", label: "Pixel Sorting", category: "Distortion, Glitch & Digital", description: "Bright bands stretch and smear along the sort axis (stylised).", create: (f, t, p) => new PixelSort("pixelSort", f, t, p), params: [SEED, AMOUNT, EASING, FIT] },
+  { id: "badTV", label: "Bad TV / Signal", category: "Distortion, Glitch & Digital", description: "Rolling scanlines, noise and signal-loss interference.", create: (f, t, p) => new BadTV("badTV", f, t, p), params: [SEED, AMOUNT, EASING, FIT] },
+  { id: "digitalBlockWipe", label: "Digital Block Wipe", category: "Distortion, Glitch & Digital", description: "Blocky compression-artifact reveal of B over A.", create: (f, t, p) => new DigitalBlockWipe("digitalBlockWipe", f, t, p), params: [SEED, AMOUNT, EASING, FIT] },
+  { id: "dataMosh", label: "Data Moshing", category: "Distortion, Glitch & Digital", description: "Motion-smeared block displacement bleeding A into B (stylised).", create: (f, t, p) => new DataMosh("dataMosh", f, t, p), params: [SEED, AMOUNT, EASING, FIT] },
+  { id: "waveWarp", label: "Wave Warp", category: "Distortion, Glitch & Digital", description: "A travelling sine distortion sweeps across as A crossfades to B.", create: (f, t, p) => new WaveWarp("waveWarp", f, t, p), params: [AMPLITUDE, FREQUENCY, EASING, FIT] },
+  { id: "ripple", label: "Ripple", category: "Distortion, Glitch & Digital", description: "Concentric water-droplet ripples radiate as B resolves in.", create: (f, t, p) => new Ripple("ripple", f, t, p), params: [AMPLITUDE, FREQUENCY, EASING, FIT] },
+  { id: "swirl", label: "Swirl / Twirl", category: "Distortion, Glitch & Digital", description: "The frame twists into a vortex mid-transition.", create: (f, t, p) => new Swirl("swirl", f, t, p), params: [AMPLITUDE, EASING, FIT] },
+  { id: "liquify", label: "Liquify", category: "Distortion, Glitch & Digital", description: "Fluid noise-driven distortion that settles as B resolves.", create: (f, t, p) => new Liquify("liquify", f, t, p), params: [AMPLITUDE, SEED, EASING, FIT] },
+  { id: "melt", label: "Melt", category: "Distortion, Glitch & Digital", description: "The clip drips downward in columns, revealing B beneath.", create: (f, t, p) => new Melt("melt", f, t, p), params: [SEED, EASING, FIT] },
+  { id: "stretch", label: "Stretch", category: "Distortion, Glitch & Digital", description: "The frame whips by stretching along an axis into the next clip.", create: (f, t, p) => new Stretch("stretch", f, t, p), params: [FREQUENCY, EASING, FIT] },
+  { id: "motionTile", label: "Motion Tile", category: "Distortion, Glitch & Digital", description: "The clip repeats as tiles and slides like a scrolling pattern.", create: (f, t, p) => new MotionTile("motionTile", f, t, p), params: [FREQUENCY, EASING, FIT] },
+  { id: "retroVHS", label: "Retro VHS", category: "Distortion, Glitch & Digital", description: "Tracking lines, colour bleed and temporal wobble.", create: (f, t, p) => new RetroVHS("retroVHS", f, t, p), params: [SEED, EASING, FIT] },
+  { id: "flicker", label: "Flicker", category: "Distortion, Glitch & Digital", description: "Rapid strobe/flicker between the two clips, with white flashes.", create: (f, t, p) => new Flicker("flicker", f, t, p), params: [SEED, FREQUENCY, EASING, FIT] },
+  { id: "lightLeak", label: "Light Leak", category: "Distortion, Glitch & Digital", description: "An organic warm light-leak overlay blends A into B.", create: (f, t, p) => new LightLeakTransition("lightLeak", f, t, p), params: [HUE, EASING, FIT] },
+  { id: "prism", label: "Prism / Chromatic", category: "Distortion, Glitch & Digital", description: "Colour-fringing chromatic-aberration crossfade.", create: (f, t, p) => new Prism("prism", f, t, p), params: [AMPLITUDE, EASING, FIT] },
+
+  // --- Category 9: Particles & Disintegration ---
+  { id: "particleDissolve", label: "Particle Dissolve", category: "Particles & Disintegration", description: "A breaks into fine particles that drift and blow away.", create: (f, t, p) => new ParticleDissolve("particleDissolve", f, t, p), params: [DENSITY, SEED, EASING, FIT] },
+  { id: "shatter", label: "Shatter / Glass", category: "Particles & Disintegration", description: "A cracks into shards that spin outward (stylised fracture).", create: (f, t, p) => new Shatter("shatter", f, t, p), params: [DENSITY, SEED, EASING, FIT] },
+  { id: "explosion", label: "Explosion", category: "Particles & Disintegration", description: "A blasts outward from the centre with a flash, revealing B.", create: (f, t, p) => new Explosion("explosion", f, t, p), params: [DENSITY, SEED, EASING, FIT] },
+  { id: "smokeBurst", label: "Smoke / Fog Burst", category: "Particles & Disintegration", description: "A rises and diffuses into a soft cloud, revealing B.", create: (f, t, p) => new SmokeBurst("smokeBurst", f, t, p), params: [DENSITY, SEED, EASING, FIT] },
+  { id: "sandstorm", label: "Sandstorm", category: "Particles & Disintegration", description: "A disintegrates and streaks off in a wind direction.", create: (f, t, p) => new Sandstorm("sandstorm", f, t, p), params: [DIRECTION, DENSITY, SEED, EASING, FIT] },
+  { id: "bubbles", label: "Bubbles", category: "Particles & Disintegration", description: "A breaks into rising translucent bubbles with highlights.", create: (f, t, p) => new Bubbles("bubbles", f, t, p), params: [DENSITY, SEED, EASING, FIT] },
+  { id: "confetti", label: "Leaves / Confetti", category: "Particles & Disintegration", description: "A scatters as tumbling coloured flakes falling under gravity.", create: (f, t, p) => new Confetti("confetti", f, t, p), params: [DENSITY, SEED, EASING, FIT] },
+  { id: "fire", label: "Fire", category: "Particles & Disintegration", description: "A burns away along a rising flame edge, revealing B.", create: (f, t, p) => new Fire("fire", f, t, p), params: [SEED, EASING, FIT] },
+  { id: "waterWash", label: "Water / Wave Wash", category: "Particles & Disintegration", description: "A water wave sweeps across with foam and refraction, revealing B.", create: (f, t, p) => new WaterWash("waterWash", f, t, p), params: [SEED, EASING, FIT] },
+  { id: "magicDust", label: "Magic Dust", category: "Particles & Disintegration", description: "A gentle dissolve trailed by sparkling magic particles.", create: (f, t, p) => new MagicDust("magicDust", f, t, p), params: [DENSITY, SEED, EASING, FIT] },
+  { id: "morphingParticles", label: "Morphing Particles", category: "Particles & Disintegration", description: "Particles scatter from A, then converge into B.", create: (f, t, p) => new MorphingParticles("morphingParticles", f, t, p), params: [DENSITY, SEED, EASING, FIT] },
+  { id: "constellation", label: "Constellation", category: "Particles & Disintegration", description: "Dots connect and rearrange like stars from A into B.", create: (f, t, p) => new Constellation("constellation", f, t, p), params: [DENSITY, SEED, EASING, FIT] },
+  { id: "lowPolyExplode", label: "Low Poly Explode", category: "Particles & Disintegration", description: "A bursts into coarse angular shards.", create: (f, t, p) => new LowPolyExplode("lowPolyExplode", f, t, p), params: [DENSITY, SEED, EASING, FIT] },
+  { id: "crumble", label: "Crumble", category: "Particles & Disintegration", description: "A cracks and falls away from the top down under gravity.", create: (f, t, p) => new Crumble("crumble", f, t, p), params: [DENSITY, SEED, EASING, FIT] },
+
+  // --- Category 10: Camera Movement & Depth ---
+  { id: "whipPan", label: "Whip Pan", category: "Camera Movement & Depth", description: "Fast horizontal pan with heavy motion blur masking the cut.", create: (f, t, p) => new WhipPan("whipPan", f, t, p), params: [BLUR, EASING, FIT] },
+  { id: "tiltWhip", label: "Tilt Whip", category: "Camera Movement & Depth", description: "Fast vertical pan with heavy vertical motion blur.", create: (f, t, p) => new TiltWhip("tiltWhip", f, t, p), params: [BLUR, EASING, FIT] },
+  { id: "dollyIn", label: "Dolly In", category: "Camera Movement & Depth", description: "The camera trucks forward into A, arriving on B.", create: (f, t, p) => new DollyIn("dollyIn", f, t, p), params: [DEPTH, BLUR, EASING, FIT] },
+  { id: "dollyOut", label: "Dolly Out", category: "Camera Movement & Depth", description: "The camera pulls back off A, revealing B behind.", create: (f, t, p) => new DollyOut("dollyOut", f, t, p), params: [DEPTH, EASING, FIT] },
+  { id: "truck", label: "Truck / Crab", category: "Camera Movement & Depth", description: "The camera slides laterally from A to B.", create: (f, t, p) => new Truck("truck", f, t, p), params: [BLUR, EASING, FIT] },
+  { id: "zoomShake", label: "Zoom with Camera Shake", category: "Camera Movement & Depth", description: "Rough zoom-in with seeded handheld camera shake.", create: (f, t, p) => new ZoomShake("zoomShake", f, t, p), params: [AMOUNT, SEED, EASING, FIT] },
+  { id: "parallaxCamera", label: "Parallax Camera", category: "Camera Movement & Depth", description: "Foreground and background move at different rates for depth.", create: (f, t, p) => new ParallaxCamera("parallaxCamera", f, t, p), params: [DEPTH, EASING, FIT] },
+  { id: "kenBurns", label: "Ken Burns", category: "Camera Movement & Depth", description: "Slow pan-and-zoom across A, crossfading into a pan on B.", create: (f, t, p) => new KenBurns("kenBurns", f, t, p), params: [EASING, FIT] },
+  { id: "dollyZoom", label: "Dolly Zoom (Vertigo)", category: "Camera Movement & Depth", description: "Opposing zoom/dolly for a disorienting vertigo warp.", create: (f, t, p) => new DollyZoom("dollyZoom", f, t, p), params: [DEPTH, EASING, FIT] },
+  { id: "rackFocus", label: "Rack Focus", category: "Camera Movement & Depth", description: "Defocus A then pull focus onto B (depth-of-field shift).", create: (f, t, p) => new RackFocus("rackFocus", f, t, p), params: [BLUR, EASING, FIT] },
+  { id: "aerialFlyover", label: "Aerial Flyover", category: "Camera Movement & Depth", description: "A drone-like diagonal sweep across both clips.", create: (f, t, p) => new AerialFlyover("aerialFlyover", f, t, p), params: [EASING, FIT] },
+  { id: "flyThrough", label: "Fly Through", category: "Camera Movement & Depth", description: "The camera flies past A into B waiting in depth behind it (3D).", create: (f, t, p) => new FlyThrough("flyThrough", f, t, p), params: [EASING, FIT] },
+  { id: "orbital", label: "Orbital / Arc", category: "Camera Movement & Depth", description: "The frames turn on a turntable as the view arcs across (3D).", create: (f, t, p) => new Orbital("orbital", f, t, p), params: [EASING, FIT] },
+  { id: "room3d", label: "3D Room", category: "Camera Movement & Depth", description: "A and B are walls of a room; the camera yaws from one to the other (3D).", create: (f, t, p) => new Room3D("room3d", f, t, p), params: [EASING, FIT] },
+  { id: "spin360", label: "360 Spin", category: "Camera Movement & Depth", description: "A full turn swaps the front (A) for the back (B) (3D).", create: (f, t, p) => new Spin360("spin360", f, t, p), params: [EASING, FIT] },
+  { id: "perspectiveSlide", label: "Perspective Slide", category: "Camera Movement & Depth", description: "Tilted-in-perspective frames slide across (3D).", create: (f, t, p) => new PerspectiveSlide("perspectiveSlide", f, t, p), params: [EASING, FIT] },
 ];
 
 const BY_ID = new Map(REGISTRY.map((m) => [m.id, m]));

@@ -230,6 +230,125 @@ Grid-based reveals: `grid` (tiles/axis), `spread` (per-tile stagger), plus
 | **Mosaic / Pixelate** (`mosaic`) | Both frames pixelate + crossfade. | `grid` |
 | **Vortex / Swirl** (`vortex`) | Twist into a spiral + dissolve (stylised). | `twist` |
 
+# Stage 4 — Glitch/Digital, Particles & Cinematic Camera
+
+Stage 4 adds three new categories on top of two reusable frameworks and a
+post-processing stack.
+
+## New frameworks
+
+- **Seeded RNG & noise** ([`rng.ts`](../../src/lib/transitions/rng.ts)):
+  `mulberry32` PRNG, stable `hash2`, and smooth `valueNoise2D` — every glitch and
+  particle effect is deterministic from its `seed`.
+- **Particle system** ([`particles.ts`](../../src/lib/transitions/particles.ts)):
+  a structure-of-arrays pool (`Float32Array`/`Uint8Array`) with a configurable
+  force field — `gravity`, `wind`, `turbulence`, `drag` — integrated with
+  semi-implicit Euler. `stepBody` is the shared single-body integrator.
+- **Post-processing stack** ([`postfx.ts`](../../src/lib/transitions/postfx.ts)):
+  `chromaticAberration` (RGB split), `glow`/bloom, `motionBlur`, `scanlines`,
+  `noiseOverlay`, `vignette`, `lightLeak`.
+- **Camera path** ([`camera.ts`](../../src/lib/transitions/camera.ts)):
+  `CameraPath` interpolates position/rotation/fov keyframes; the 3D camera
+  transitions place A/B as quads in the Stage-3 pipeline and drive this camera.
+
+## Category 8 — Distortion, Glitch & Digital
+
+Seeded, band-based warps (no per-pixel loops) plus the post-processing stack.
+
+| Transition (`id`) | Description | Params |
+|---|---|---|
+| **Glitch** (`glitch`) | RGB split, block displacement, digital noise. | `seed`, `amount` |
+| **Pixel Sorting** (`pixelSort`) | Bright bands stretch/smear (stylised). | `seed`, `amount` |
+| **Bad TV** (`badTV`) | Rolling scanlines, noise, signal loss. | `seed`, `amount` |
+| **Digital Block Wipe** (`digitalBlockWipe`) | Blocky compression-artifact reveal. | `seed`, `amount` |
+| **Data Moshing** (`dataMosh`) | Motion-smeared block displacement (stylised). | `seed`, `amount` |
+| **Wave Warp** (`waveWarp`) | Travelling sine distortion. | `amplitude`, `frequency` |
+| **Ripple** (`ripple`) | Concentric water-droplet ripples. | `amplitude`, `frequency` |
+| **Swirl / Twirl** (`swirl`) | Frame twists into a vortex. | `amplitude` |
+| **Liquify** (`liquify`) | Fluid noise distortion that settles. | `amplitude`, `seed` |
+| **Melt** (`melt`) | Columns drip downward to reveal B. | `seed` |
+| **Stretch** (`stretch`) | Whip stretch along an axis. | `frequency` |
+| **Motion Tile** (`motionTile`) | Clip repeats + slides as tiles. | `frequency` |
+| **Retro VHS** (`retroVHS`) | Tracking lines, colour bleed, wobble. | `seed` |
+| **Flicker** (`flicker`) | Rapid strobe between clips. | `seed`, `frequency` |
+| **Light Leak** (`lightLeak`) | Organic warm light-leak overlay. | `hue` |
+| **Prism / Chromatic** (`prism`) | Colour-fringing crossfade. | `amplitude` |
+
+## Category 9 — Particles & Disintegration
+
+`CellFly` divides A into a grid of textured cells and flies each on a closed-form
+ballistic path (`pos = v·t + ½·a·t²`) — frame-independent and seed-deterministic.
+Element looks (bubbles, dust, smoke, constellation) use the point particle system.
+
+| Transition (`id`) | Description | Params |
+|---|---|---|
+| **Particle Dissolve** (`particleDissolve`) | Fine particles drift/blow away. | `density`, `seed` |
+| **Shatter / Glass** (`shatter`) | Shards spin outward (stylised fracture). | `density`, `seed` |
+| **Explosion** (`explosion`) | Blast outward from centre + flash. | `density`, `seed` |
+| **Smoke / Fog Burst** (`smokeBurst`) | Rises + diffuses into a cloud. | `density`, `seed` |
+| **Sandstorm** (`sandstorm`) | Directional wind-driven disintegration. | `direction`, `density`, `seed` |
+| **Bubbles** (`bubbles`) | Rising translucent bubbles with highlights. | `density`, `seed` |
+| **Leaves / Confetti** (`confetti`) | Tumbling coloured flakes under gravity. | `density`, `seed` |
+| **Fire** (`fire`) | Rising flame edge burns A away. | `seed` |
+| **Water / Wave Wash** (`waterWash`) | Wave sweeps with foam + refraction. | `seed` |
+| **Magic Dust** (`magicDust`) | Gentle dissolve + sparkles. | `density`, `seed` |
+| **Morphing Particles** (`morphingParticles`) | Scatter from A, converge into B. | `density`, `seed` |
+| **Constellation** (`constellation`) | Dots connect + rearrange like stars. | `density`, `seed` |
+| **Low Poly Explode** (`lowPolyExplode`) | Bursts into coarse angular shards. | `density`, `seed` |
+| **Crumble** (`crumble`) | Cracks + falls from the top down. | `density`, `seed` |
+
+## Category 10 — Camera Movement & Depth
+
+Planar moves are 2D transforms + post-processing; the five 3D moves use the
+Stage-3 pipeline and `CameraPath`.
+
+| Transition (`id`) | Description | Params |
+|---|---|---|
+| **Whip Pan** (`whipPan`) | Fast horizontal pan, heavy motion blur. | `blur` |
+| **Tilt Whip** (`tiltWhip`) | Fast vertical pan, heavy motion blur. | `blur` |
+| **Dolly In** (`dollyIn`) | Truck forward into A onto B. | `depth`, `blur` |
+| **Dolly Out** (`dollyOut`) | Pull back off A to reveal B. | `depth` |
+| **Truck / Crab** (`truck`) | Lateral camera slide. | `blur` |
+| **Zoom + Camera Shake** (`zoomShake`) | Rough zoom with handheld shake. | `amount`, `seed` |
+| **Parallax Camera** (`parallaxCamera`) | Fg/bg move at different rates. | `depth` |
+| **Ken Burns** (`kenBurns`) | Slow pan-and-zoom across stills. | — |
+| **Dolly Zoom (Vertigo)** (`dollyZoom`) | Opposing zoom/dolly warp. | `depth` |
+| **Rack Focus** (`rackFocus`) | Depth-of-field shift A→B. | `blur` |
+| **Aerial Flyover** (`aerialFlyover`) | Drone-like diagonal sweep. | — |
+| **Fly Through** (`flyThrough`) | Camera flies past A into B (3D). | — |
+| **Orbital / Arc** (`orbital`) | Turntable arc between frames (3D). | — |
+| **3D Room** (`room3d`) | A/B as walls; camera yaws (3D). | — |
+| **360 Spin** (`spin360`) | Full turn swaps front/back (3D). | — |
+| **Perspective Slide** (`perspectiveSlide`) | Tilted frames slide across (3D). | — |
+
+## Thumbnails, benchmarks & tests
+
+- **Thumbnails** ([`thumbnails.ts`](../../src/lib/transitions/thumbnails.ts)):
+  `renderThumbnail(id, canvas)` draws a filmstrip; `thumbnailDataUrl(id)` returns
+  a PNG data URL; `generateAllThumbnails()` bakes the whole gallery (synthesises
+  placeholder clips when none are supplied).
+- **Benchmarks** ([`bench.ts`](../../src/lib/transitions/bench.ts)):
+  `benchmarkAll(RESOLUTIONS.fhd)` reports mean/p95 ms and estimated FPS per
+  transition; `RESOLUTIONS` covers 720p, 1080p and 4K.
+- **Tests** (`test/transitions.test.ts`, `npm test`): 230+ cases. The headline
+  test constructs **and renders every registered transition** at seven progress
+  points (and again with empty clips) through a headless canvas mock, plus direct
+  tests of the RNG, particle physics, camera path and easing math.
+
+## Stage-4 approximation notes
+
+These are canvas-2D stylisations, not physically-accurate simulations:
+
+- **Pixel sorting / data moshing** use band smears + block displacement (no true
+  per-pixel sort or optical-flow).
+- **Shatter** uses grid shards, not a Voronoi fracture; **fire/smoke** are
+  gradient/particle stylisations; **low-poly** uses coarse rectangular shards.
+- **10k+ GPU particles**: the pool is designed for the count, but canvas-2D fill
+  is the ceiling at 1080p — a WebGL point-sprite renderer is the intended path for
+  a true 10k/60fps budget.
+- The 3D camera moves reuse the Stage-3 software rasteriser (affine triangles),
+  so extreme fovs / among-plane occlusion are approximate.
+
 ## Performance (complex 3D)
 
 - Quads are depth-sorted and drawn with clipped affine triangles — no per-pixel

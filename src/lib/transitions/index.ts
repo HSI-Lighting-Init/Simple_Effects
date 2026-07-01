@@ -21,7 +21,21 @@ export * from "./rotate";
 export * from "./tiles";
 export * from "./rotate3d";
 export * from "./fold";
+export * from "./glitch";
+export * from "./disintegrate";
+export * from "./camera";
 export * as mesh3d from "./mesh3d";
+export * as postfx from "./postfx";
+export * as rng from "./rng";
+export { ParticleSystem, stepBody, type Forces, type SpawnSpec } from "./particles";
+export {
+  renderThumbnail,
+  thumbnailDataUrl,
+  generateAllThumbnails,
+  placeholderClip,
+  type ThumbnailOptions,
+} from "./thumbnails";
+export { benchmark, benchmarkAll, RESOLUTIONS, type BenchRow, type Resolution } from "./bench";
 export {
   REGISTRY,
   getTransitionMeta,
