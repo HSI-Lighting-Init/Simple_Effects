@@ -63,9 +63,28 @@ export interface OutputStats {
   perSecond: number[];
 }
 
+/** A layer's active effects/transitions, so the dump self-documents what it tests. */
+export interface LayerSubject {
+  layerId: number;
+  name: string;
+  transitionIn: { engine: string | null; kind: string; durMs: number; direction: number; params: string | null } | null;
+  transitionOut: { engine: string | null; kind: string; durMs: number; direction: number; params: string | null } | null;
+  effects: string[];
+}
+export interface ProbeSubject {
+  /** Distinct transition-engine ids in play (e.g. ["parallaxCamera"]). */
+  transitions: string[];
+  /** Distinct effect kinds in play (e.g. ["blur","wipe"]). */
+  effectKinds: string[];
+  /** Per-layer detail. */
+  layers: LayerSubject[];
+}
+
 export interface ProbeReport {
   startedAt: string;
   comp: { width: number; height: number; fps: number; durationMs: number };
+  /** What's being tested: the active transitions/effects by name. */
+  subject: ProbeSubject | null;
   expected: { blackLineX: number; whiteLineX: number };
   preview: ProbeFrame[];
   output: ProbeFrame[];
@@ -88,8 +107,8 @@ export function lastReport(): ProbeReport | null {
   return report;
 }
 
-export function beginProbeRun(comp: ProbeReport["comp"], startedAt: string): void {
-  report = { startedAt, comp, expected: { ...EXPECTED }, preview: [], output: [] };
+export function beginProbeRun(comp: ProbeReport["comp"], startedAt: string, subject: ProbeSubject | null = null): void {
+  report = { startedAt, comp, subject, expected: { ...EXPECTED }, preview: [], output: [] };
   prevPreviewGrid = null;
   prevOutputGrid = null;
   if (!tiny) {
@@ -363,7 +382,12 @@ export function probeSummary(): string {
   if (!report) return "No render probe captured yet.";
   const { preview, output, comp } = report;
   if (preview.length === 0 && output.length === 0) return "Probe ran but captured no frames.";
-  const head = `Render probe — ${comp.width}×${comp.height} @${comp.fps}fps, ${(comp.durationMs / 1000).toFixed(2)}s\n`;
+  let head = `Render probe — ${comp.width}×${comp.height} @${comp.fps}fps, ${(comp.durationMs / 1000).toFixed(2)}s\n`;
+  const subj = report.subject;
+  if (subj && (subj.transitions.length || subj.effectKinds.length)) {
+    if (subj.transitions.length) head += `  transitions: ${subj.transitions.join(", ")}\n`;
+    if (subj.effectKinds.length) head += `  effects: ${subj.effectKinds.join(", ")}\n`;
+  }
 
   if (output.length === 0) {
     return head + `Preview samples: ${preview.length}\n\n(No output frames decoded — re-export with the probe on.)`;

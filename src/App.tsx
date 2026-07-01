@@ -943,9 +943,29 @@ export default function App() {
         if (!canvas) throw new Error("preview canvas not found");
         const probing = isProbeEnabled();
         if (probing) {
+          // Record what's being tested so the dump self-documents the effect(s).
+          const trInfo = (t: (typeof p.layers)[number]["transitionIn"]) =>
+            t ? { engine: t.engine, kind: t.kind, durMs: t.durMs, direction: t.direction, params: t.params } : null;
+          const subjectLayers = p.layers.map((l) => ({
+            layerId: l.id,
+            name: l.name,
+            transitionIn: trInfo(l.transitionIn),
+            transitionOut: trInfo(l.transitionOut),
+            effects: l.effects.map((e) => e.kind),
+          }));
+          const transitions = [
+            ...new Set(
+              subjectLayers
+                .flatMap((s) => [s.transitionIn, s.transitionOut])
+                .filter((t): t is NonNullable<typeof t> => !!t)
+                .map((t) => t.engine ?? t.kind)
+            ),
+          ];
+          const effectKinds = [...new Set(subjectLayers.flatMap((s) => s.effects))];
           beginProbeRun(
             { width: p.width, height: p.height, fps: p.fps, durationMs: p.durationMs },
-            new Date().toISOString()
+            new Date().toISOString(),
+            { transitions, effectKinds, layers: subjectLayers }
           );
         }
         const duration = p.durationMs;

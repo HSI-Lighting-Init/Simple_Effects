@@ -245,13 +245,18 @@ export class ZoomShake extends Camera2DTransition {
   }
 }
 
-/** Parallax Camera: foreground (A) and background move at different rates. */
+/** Parallax Camera: foreground (A) and background move at different rates. The
+ *  `depth` variable scales the separation (0 = flat/together, higher = stronger
+ *  parallax: the foreground slides faster and further and the background scales
+ *  more). B lands at identity (tx→0, scale→1) at p=1 for a clean seam. */
 export class ParallaxCamera extends Camera2DTransition {
   composeCpu(ctx: CanvasRenderingContext2D, a: HTMLCanvasElement, b: HTMLCanvasElement, p: number) {
     const w = this.outW;
-    // Background B slides slowly and scales gently; foreground A slides fast + fades.
-    this.place(ctx, b, { tx: (1 - p) * w * 0.5, scale: 1.1 - 0.1 * p, alpha: 1 });
-    this.place(ctx, a, { tx: -p * w * 1.2, scale: 1.15, alpha: clamp01(1 - p * 1.2) });
+    const d = Math.max(0, (this.params.depth as number) ?? 1);
+    // Background B: slides in from a depth-scaled offset and eases its scale to 1.
+    this.place(ctx, b, { tx: (1 - p) * w * 0.35 * d, scale: 1 + 0.12 * d * (1 - p), alpha: 1 });
+    // Foreground A: a depth-scaled fast slide + zoom, fading out.
+    this.place(ctx, a, { tx: -p * w * (0.6 + 0.8 * d), scale: 1 + 0.18 * d, alpha: clamp01(1 - p * 1.2) });
   }
 }
 
