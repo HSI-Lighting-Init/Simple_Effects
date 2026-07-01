@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
@@ -156,6 +156,10 @@ export default function App() {
   const [fonts, setFonts] = useState<string[]>([]);
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
+  // Resizable panels: inspector width + timeline height (px), dragged via the
+  // splitters between the preview / inspector / timeline.
+  const [inspectorW, setInspectorW] = useState(300);
+  const [timelineH, setTimelineH] = useState(224);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [recording, setRecording] = useState(false);
   const [recCount, setRecCount] = useState(0);
@@ -337,6 +341,49 @@ export default function App() {
       .catch(() => {});
     return () => unlisten?.();
   }, []);
+
+  // Drag the vertical splitter to resize the inspector (right panel). Dragging
+  // left widens it (it's anchored to the right edge).
+  const startInspectorResize = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = inspectorW;
+    const move = (ev: MouseEvent) => {
+      setInspectorW(Math.max(200, Math.min(760, startW - (ev.clientX - startX))));
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+
+  // Drag the horizontal splitter to resize the timeline (bottom panel). Dragging
+  // up makes it taller (it's anchored to the bottom edge).
+  const startTimelineResize = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = timelineH;
+    const move = (ev: MouseEvent) => {
+      const max = window.innerHeight - 220;
+      setTimelineH(Math.max(120, Math.min(max, startH - (ev.clientY - startY))));
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+  };
 
   const seek = useCallback(
     (t: number) => {
@@ -1811,7 +1858,10 @@ export default function App() {
   ];
 
   return (
-    <div className="app">
+    <div
+      className="app"
+      style={{ gridTemplateRows: `30px 48px 1fr 6px ${timelineH}px` }}
+    >
       <MenuBar menus={menus} />
       <header className="toolbar">
         <span className="brand">simple · effects</span>
@@ -1872,7 +1922,7 @@ export default function App() {
         </span>
       </header>
 
-      <div className="mid">
+      <div className="mid" style={{ gridTemplateColumns: `1fr 6px ${inspectorW}px` }}>
         <main className="stage-area">
           <Preview
             project={project}
@@ -1904,6 +1954,11 @@ export default function App() {
             </div>
           )}
         </main>
+        <div
+          className="v-resizer"
+          onMouseDown={startInspectorResize}
+          title="Drag to resize the inspector"
+        />
         <Inspector
           layer={selectedLayer}
           fonts={fonts}
@@ -1945,6 +2000,12 @@ export default function App() {
           onSetLayerTransition={onSetLayerTransition}
         />
       </div>
+
+      <div
+        className="h-resizer"
+        onMouseDown={startTimelineResize}
+        title="Drag to resize the timeline"
+      />
 
       <Timeline
         project={project}

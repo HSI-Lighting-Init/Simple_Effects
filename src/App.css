@@ -28,8 +28,23 @@ body {
 
 .app {
   display: grid;
-  grid-template-rows: 30px 48px 1fr 224px;
+  grid-template-rows: 30px 48px 1fr 6px 224px;
   height: 100vh;
+}
+
+/* Draggable splitters between the preview / inspector / timeline panels. */
+.v-resizer {
+  grid-column: 2;
+  cursor: col-resize;
+  background: var(--line);
+}
+.h-resizer {
+  cursor: row-resize;
+  background: var(--line);
+}
+.v-resizer:hover,
+.h-resizer:hover {
+  background: var(--accent);
 }
 
 /* Application menu bar (File, Edit, …). */
@@ -484,7 +499,7 @@ body {
 /* Middle row: stage + inspector */
 .mid {
   display: grid;
-  grid-template-columns: 1fr 300px;
+  grid-template-columns: 1fr 6px 300px;
   min-height: 0;
 }
 
