@@ -505,6 +505,8 @@ fn set_layer_transition(
     kind: String,
     dur_ms: u32,
     direction: u8,
+    engine: Option<String>,
+    params: Option<String>,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
@@ -513,12 +515,18 @@ fn set_layer_transition(
         .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
-    let transition = match kind.as_str() {
-        "none" => None,
-        "dissolve" => Some(Transition { kind: TransitionKind::Dissolve, dur_ms, direction }),
-        "slide" => Some(Transition { kind: TransitionKind::Slide, dur_ms, direction }),
-        "wipe" => Some(Transition { kind: TransitionKind::Wipe, dur_ms, direction }),
-        _ => return Err("unknown transition kind".into()),
+    let transition = if kind == "none" {
+        None
+    } else if let Some(id) = engine.filter(|s| !s.is_empty()) {
+        // Any transition-engine effect; `kind` is kept only as a legacy fallback.
+        Some(Transition { kind: TransitionKind::Dissolve, dur_ms, direction, engine: Some(id), params })
+    } else {
+        match kind.as_str() {
+            "dissolve" => Some(Transition { kind: TransitionKind::Dissolve, dur_ms, direction, engine: None, params: None }),
+            "slide" => Some(Transition { kind: TransitionKind::Slide, dur_ms, direction, engine: None, params: None }),
+            "wipe" => Some(Transition { kind: TransitionKind::Wipe, dur_ms, direction, engine: None, params: None }),
+            _ => return Err("unknown transition kind".into()),
+        }
     };
     match slot.as_str() {
         "in" => layer.transition_in = transition,

@@ -25,6 +25,8 @@ import { getShaped } from "../lib/api";
 import { drawSurface } from "../lib/surface3d";
 import type { Texture } from "../lib/surface3d";
 import { applyEffects } from "../lib/effects";
+import { createTransition } from "../lib/transitions";
+import type { Clip } from "../lib/transitions";
 import type { Project } from "../bindings/Project";
 import type { Layer } from "../bindings/Layer";
 import type { ResolvedLayer } from "../bindings/ResolvedLayer";
@@ -192,6 +194,106 @@ function EffectImageNode({
         const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
         const tex = applyEffects(off, img, w, h, r.effects);
         (ctx as unknown as CanvasRenderingContext2D).drawImage(tex, 0, 0);
+      }}
+      hitFunc={(ctx, shape) => {
+        ctx.beginPath();
+        ctx.rect(0, 0, w, h);
+        ctx.closePath();
+        ctx.fillStrokeShape(shape);
+      }}
+      {...interaction}
+    />
+  );
+}
+
+// A flat image whose in/out window uses a transition-engine effect (fade, cube,
+// shatter, glitch…). Renders the transition between an empty A (so lower layers
+// show through) and B = this clip (with its effect stack applied) at the
+// resolved progress `factor`, into an offscreen canvas. Same transform contract
+// as ImageNode/EffectImageNode, so it selects/drags/keyframes identically. The
+// instance is rebuilt per frame so keyframed effects on B stay current.
+const DIRS: ("left" | "right" | "up" | "down")[] = ["left", "right", "up", "down"];
+function TransitionImageNode({
+  src,
+  r,
+  transition,
+  interaction,
+  registerRef,
+}: {
+  src?: string;
+  r: ResolvedLayer;
+  transition: ResolvedTransition;
+  interaction: Interaction;
+  registerRef: NodeRef;
+}) {
+  const img = useImage(src);
+  const bRef = useRef<HTMLCanvasElement | null>(null);
+  const offRef = useRef<HTMLCanvasElement | null>(null);
+  if (!img) return null;
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  return (
+    <Shape
+      ref={registerRef}
+      x={r.x}
+      y={r.y}
+      width={w}
+      height={h}
+      offsetX={w / 2}
+      offsetY={h / 2}
+      scaleX={r.scaleX}
+      scaleY={r.scaleY}
+      rotation={r.rotation}
+      opacity={r.opacity}
+      sceneFunc={(ctx) => {
+        // B = the clip (its effect stack baked in); A = empty (reveals beneath).
+        const bcv = bRef.current ?? (bRef.current = document.createElement("canvas"));
+        const texB: CanvasImageSource = r.effects.length > 0 ? applyEffects(bcv, img, w, h, r.effects) : img;
+        const B: Clip = { source: texB, width: w, height: h };
+        const A: Clip = { source: null, width: 0, height: 0 };
+        const dir = DIRS[transition.direction] ?? "left";
+        const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
+        // Per-clip variables (the math knobs), stored as a JSON object.
+        let userParams: Record<string, unknown> = {};
+        if (transition.params) {
+          try {
+            userParams = JSON.parse(transition.params) as Record<string, unknown>;
+          } catch {
+            userParams = {};
+          }
+        }
+        const c = ctx as unknown as CanvasRenderingContext2D;
+        const f = transition.factor;
+        // Smooth the seams: many transitions (esp. the 3D camera moves) don't
+        // land on an identity framing at f=1, so a hard hand-off to the plain
+        // image node pops. Over the last EDGE of the window we crossfade the
+        // engine output → the plain clip (so f=1 == the normal render), and over
+        // the first EDGE we ramp up from fully transparent (so f=0 reveals what's
+        // beneath). Both ends therefore match their neighbours exactly.
+        const EDGE = 0.12;
+        const fromEmpty = f <= EDGE ? f / EDGE : 1; // 0 at f=0 → 1 after the edge
+        const toPlain = f >= 1 - EDGE ? (f - (1 - EDGE)) / EDGE : 0; // →1 as f→1
+        try {
+          const tr = createTransition(transition.engine ?? "fade", A, B, {
+            outWidth: w,
+            outHeight: h,
+            direction: dir,
+            ...userParams,
+          });
+          tr.render(off, f);
+          c.globalAlpha = fromEmpty;
+          c.drawImage(off, 0, 0);
+          if (toPlain > 0) {
+            c.globalAlpha = toPlain; // converge onto the exact resting frame
+            c.drawImage(texB, 0, 0);
+          }
+          c.globalAlpha = 1;
+        } catch {
+          // Unknown/failed transition → fall back to a plain opacity fade.
+          c.globalAlpha = f;
+          c.drawImage(texB, 0, 0);
+          c.globalAlpha = 1;
+        }
       }}
       hitFunc={(ctx, shape) => {
         ctx.beginPath();
@@ -922,10 +1024,19 @@ export default function Preview({
                 );
               } else {
                 // A flat image (not pinned) — draggable onto a shape to pin it.
-                // With effects it goes through the effect renderer.
+                // With effects it goes through the effect renderer. An in/out
+                // transition-engine effect renders through TransitionImageNode.
                 const src = k.kind === "image" ? images[k.src] : undefined;
                 node =
-                  r.effects.length > 0 ? (
+                  r.transition?.engine && src ? (
+                    <TransitionImageNode
+                      src={src}
+                      r={r}
+                      transition={r.transition}
+                      interaction={flatImageInteraction(layer.id)}
+                      registerRef={register(layer.id)}
+                    />
+                  ) : r.effects.length > 0 ? (
                     <EffectImageNode
                       src={src}
                       r={r}
@@ -941,8 +1052,14 @@ export default function Preview({
                     />
                   );
               }
-              // Wrap in a transition group (dissolve/slide/wipe) when active.
-              const tp = transitionGroupProps(r.transition, project.width, project.height);
+              // Wrap in a transition group for the legacy (non-engine) kinds.
+              // Engine transitions on a flat image are already baked into the
+              // node above, so skip the group wrap for those.
+              const engineHandled =
+                !!r.transition?.engine && !r.surface && k.kind === "image";
+              const tp = engineHandled
+                ? null
+                : transitionGroupProps(r.transition, project.width, project.height);
               return tp ? (
                 <Group key={layer.id} {...tp}>
                   {node}

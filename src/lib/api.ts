@@ -42,8 +42,19 @@ export const setLayerTransition = (
   slot: "in" | "out",
   kind: "none" | "dissolve" | "slide" | "wipe",
   durMs: number,
-  direction: number
-) => invoke<Project>("set_layer_transition", { layerId, slot, kind, durMs, direction });
+  direction: number,
+  engine?: string | null,
+  params?: string | null
+) =>
+  invoke<Project>("set_layer_transition", {
+    layerId,
+    slot,
+    kind,
+    durMs,
+    direction,
+    engine: engine ?? null,
+    params: params ?? null,
+  });
 
 /** Reorder the layer stack. `order` lists every layer id bottom-first (last on top). */
 export const reorderLayers = (order: number[]) =>

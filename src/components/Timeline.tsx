@@ -418,8 +418,14 @@ export default function Timeline({
                 <div
                   className="tl-block"
                   style={{ left: `${left}%`, width: `${width}%`, background: kindColor(l) }}
-                  title={`${(sMs / 1000).toFixed(2)}s – ${(eMs / 1000).toFixed(2)}s · drag to move, edges to trim`}
+                  title={`${(sMs / 1000).toFixed(2)}s – ${(eMs / 1000).toFixed(2)}s · drag to move, edges to trim · right-click for effects`}
                   onMouseDown={(e) => startBlockDrag(e, l, "move")}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.nativeEvent.stopPropagation();
+                    onSelect(l.id);
+                    onLayerContextMenu(l.id, e.clientX, e.clientY);
+                  }}
                 >
                   <span
                     className="tl-trim tl-trim-l"

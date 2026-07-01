@@ -61,13 +61,25 @@ pub struct Layer {
 /// layer transitioning in over an overlap with the layer beneath reads as a
 /// cross-transition. `direction` (0=left,1=right,2=up,3=down) is used by Slide
 /// and Wipe; ignored by Dissolve.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+///
+/// `engine` optionally names a transition from the frontend transition engine
+/// (e.g. "cube", "shatter", "glitch"); when set, the frontend renders that
+/// instead of the built-in `kind`. `kind` stays as a legacy fallback so older
+/// projects keep working.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct Transition {
     pub kind: TransitionKind,
     pub dur_ms: u32,
     pub direction: u8,
+    #[serde(default)]
+    pub engine: Option<String>,
+    /// Engine transition variables as a JSON object string (e.g.
+    /// `{"amplitude":40,"seed":3}`). Opaque to Rust — the frontend owns the
+    /// schema and passes these to the math engine at render time.
+    #[serde(default)]
+    pub params: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]

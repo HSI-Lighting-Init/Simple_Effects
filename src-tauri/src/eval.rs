@@ -48,7 +48,7 @@ pub struct ResolvedLayer {
 }
 
 /// A layer's in/out transition resolved at a point in time.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct ResolvedTransition {
@@ -56,6 +56,10 @@ pub struct ResolvedTransition {
     /// 0 = fully transitioned-out, 1 = fully present (eased).
     pub factor: f32,
     pub direction: u8,
+    /// Frontend transition-engine id to render, if the transition uses one.
+    pub engine: Option<String>,
+    /// Engine transition variables (JSON object string), passed to the renderer.
+    pub params: Option<String>,
 }
 
 /// Resolve a layer's active transition (in or out) at `t_ms`, if any. When both
@@ -64,6 +68,8 @@ fn resolve_transition(layer: &crate::model::Layer, t_ms: u32) -> Option<Resolved
     let mut factor = 2.0f32; // sentinel above any real factor
     let mut kind = None;
     let mut direction = 0u8;
+    let mut engine: Option<String> = None;
+    let mut params: Option<String> = None;
     if let Some(ti) = &layer.transition_in {
         if ti.dur_ms > 0 && t_ms < layer.start_ms + ti.dur_ms {
             let u = t_ms.saturating_sub(layer.start_ms) as f32 / ti.dur_ms as f32;
@@ -72,6 +78,8 @@ fn resolve_transition(layer: &crate::model::Layer, t_ms: u32) -> Option<Resolved
                 factor = f;
                 kind = Some(ti.kind);
                 direction = ti.direction;
+                engine = ti.engine.clone();
+                params = ti.params.clone();
             }
         }
     }
@@ -84,10 +92,12 @@ fn resolve_transition(layer: &crate::model::Layer, t_ms: u32) -> Option<Resolved
                 factor = f;
                 kind = Some(to.kind);
                 direction = to.direction;
+                engine = to.engine.clone();
+                params = to.params.clone();
             }
         }
     }
-    kind.map(|kind| ResolvedTransition { kind, factor: factor.clamp(0.0, 1.0), direction })
+    kind.map(|kind| ResolvedTransition { kind, factor: factor.clamp(0.0, 1.0), direction, engine, params })
 }
 
 /// One effect with its parameters resolved at a point in time (camelCase field

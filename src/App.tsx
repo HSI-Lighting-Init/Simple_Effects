@@ -769,12 +769,14 @@ export default function App() {
       slot: "in" | "out",
       kind: "none" | "dissolve" | "slide" | "wipe",
       durMs: number,
-      direction: number
+      direction: number,
+      engine?: string | null,
+      params?: string | null
     ) => {
-      const p = await setLayerTransition(layerId, slot, kind, durMs, direction);
+      const p = await setLayerTransition(layerId, slot, kind, durMs, direction, engine, params);
       setProject(p);
       await applyTime(timeRef.current);
-      recordAction("layer_transition", { layerId, slot, kind, durMs, direction });
+      recordAction("layer_transition", { layerId, slot, kind, durMs, direction, engine });
     },
     [applyTime, recordAction]
   );
@@ -1397,6 +1399,28 @@ export default function App() {
     ["invert", "Invert"],
     ["wipe", "Wipe / Fade"],
   ];
+  // A curated shortcut list of transition-engine effects for the clip right-click
+  // menu (the full library lives in the Inspector's Transitions section).
+  const transitionShortlist: [string, string][] = [
+    ["fade", "Fade"],
+    ["crossDissolve", "Cross Dissolve"],
+    ["slide", "Slide"],
+    ["horizontalWipe", "Wipe"],
+    ["cube", "Cube"],
+    ["cardFlip3d", "Card Flip"],
+    ["zoomIn", "Zoom In"],
+    ["glitch", "Glitch"],
+    ["shatter", "Shatter"],
+    ["whipPan", "Whip Pan"],
+    ["pageTurn", "Page Turn"],
+  ];
+  const transitionSubmenu = (lid: number, slot: "in" | "out") => [
+    { label: "None", onClick: () => onSetLayerTransition(lid, slot, "none", 800, 0, null) },
+    ...transitionShortlist.map(([id, label]) => ({
+      label,
+      onClick: () => onSetLayerTransition(lid, slot, "dissolve", 800, 0, id),
+    })),
+  ];
 
   const menus: MenuDef[] = [
     {
@@ -1716,6 +1740,37 @@ export default function App() {
                   ]
               : ctxMenu.layerId != null
                 ? [
+                    ...(project.layers.find((l) => l.id === ctxMenu.layerId)?.kind.kind === "image"
+                      ? [
+                          {
+                            label: "＋ Add effect",
+                            submenu: [
+                              ...effectKinds.map(([kind, label]) => ({
+                                label,
+                                onClick: () => onAddEffect(ctxMenu.layerId!, kind),
+                              })),
+                              // The transition-engine effects (from the demo),
+                              // applied as this clip's IN transition.
+                              ...transitionShortlist.map(([id, label]) => ({
+                                label: `⇋ ${label} (in)`,
+                                onClick: () => onSetLayerTransition(ctxMenu.layerId!, "in", "dissolve", 800, 0, id),
+                              })),
+                            ],
+                          },
+                          {
+                            label: "✎ Open effect editor…",
+                            onClick: () => setFxEditorId(ctxMenu.layerId!),
+                          },
+                          {
+                            label: "⇋ Transition in",
+                            submenu: transitionSubmenu(ctxMenu.layerId!, "in"),
+                          },
+                          {
+                            label: "⇋ Transition out",
+                            submenu: transitionSubmenu(ctxMenu.layerId!, "out"),
+                          },
+                        ]
+                      : [{ label: "Effects — image layers only" }]),
                     {
                       label: "⊘ Clear all keyframes",
                       onClick: () => onClearKeyframes(ctxMenu.layerId!),

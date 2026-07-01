@@ -6,5 +6,16 @@ import type { TransitionKind } from "./TransitionKind";
  * layer transitioning in over an overlap with the layer beneath reads as a
  * cross-transition. `direction` (0=left,1=right,2=up,3=down) is used by Slide
  * and Wipe; ignored by Dissolve.
+ *
+ * `engine` optionally names a transition from the frontend transition engine
+ * (e.g. "cube", "shatter", "glitch"); when set, the frontend renders that
+ * instead of the built-in `kind`. `kind` stays as a legacy fallback so older
+ * projects keep working.
  */
-export type Transition = { kind: TransitionKind, durMs: number, direction: number, };
+export type Transition = { kind: TransitionKind, durMs: number, direction: number, engine: string | null, 
+/**
+ * Engine transition variables as a JSON object string (e.g.
+ * `{"amplitude":40,"seed":3}`). Opaque to Rust — the frontend owns the
+ * schema and passes these to the math engine at render time.
+ */
+params: string | null, };

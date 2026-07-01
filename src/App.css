@@ -567,6 +567,44 @@ body {
   line-height: 1.4;
 }
 
+/* Per-transition variable controls (the math knobs). */
+.tr-vars {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 2px;
+  padding: 6px;
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+}
+.tr-var {
+  display: grid;
+  grid-template-columns: 84px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.tr-var-name {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tr-var input[type="range"] {
+  width: 100%;
+}
+.tr-var-val {
+  min-width: 32px;
+  text-align: right;
+  font-style: normal;
+  color: var(--muted);
+}
+.tr-var-reset {
+  align-self: flex-end;
+  font-size: 10px;
+  padding: 2px 6px;
+}
+
 .row2 {
   display: grid;
   grid-template-columns: 1fr 1fr;

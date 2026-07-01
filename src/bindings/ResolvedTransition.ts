@@ -8,4 +8,12 @@ export type ResolvedTransition = { kind: TransitionKind,
 /**
  * 0 = fully transitioned-out, 1 = fully present (eased).
  */
-factor: number, direction: number, };
+factor: number, direction: number, 
+/**
+ * Frontend transition-engine id to render, if the transition uses one.
+ */
+engine: string | null, 
+/**
+ * Engine transition variables (JSON object string), passed to the renderer.
+ */
+params: string | null, };

@@ -9,6 +9,7 @@ import type { Rgba } from "../bindings/Rgba";
 import type { SurfaceShape } from "../bindings/SurfaceShape";
 import type { Decal } from "../bindings/Decal";
 import type { ResolvedEffect } from "../bindings/ResolvedEffect";
+import { REGISTRY, getTransitionMeta, type ParamSpec } from "../lib/transitions";
 
 type TransitionSlot = "in" | "out";
 type TransitionKindOpt = "none" | "dissolve" | "slide" | "wipe";
@@ -17,8 +18,23 @@ type SetLayerTransition = (
   slot: TransitionSlot,
   kind: TransitionKindOpt,
   durMs: number,
-  direction: number
+  direction: number,
+  engine?: string | null,
+  paramsJson?: string | null
 ) => void;
+
+// The full transition-engine library grouped by category, for the picker.
+// Legacy dissolve/slide/wipe map onto engine ids so everything is one list.
+const LEGACY_TO_ENGINE: Record<string, string> = { dissolve: "fade", slide: "slide", wipe: "horizontalWipe" };
+const TRANSITION_GROUPS: { category: string; items: { id: string; label: string }[] }[] = (() => {
+  const groups: { category: string; items: { id: string; label: string }[] }[] = [];
+  for (const m of REGISTRY) {
+    let g = groups.find((x) => x.category === m.category);
+    if (!g) groups.push((g = { category: m.category, items: [] }));
+    g.items.push({ id: m.id, label: m.label });
+  }
+  return groups;
+})();
 
 const PRESETS: { value: LetterPreset | "none"; label: string }[] = [
   { value: "none", label: "None (static)" },
@@ -752,8 +768,93 @@ export function EffectsSection({
   );
 }
 
-// In/out transition controls for the selected layer. Each slot is a kind
-// (none/dissolve/slide/wipe) + duration; slide/wipe also pick a direction.
+function rgbaToHex(v: unknown): string {
+  const c = (v ?? {}) as { r?: number; g?: number; b?: number };
+  const h = (n?: number) => Math.max(0, Math.min(255, Math.round(n ?? 0))).toString(16).padStart(2, "0");
+  return `#${h(c.r)}${h(c.g)}${h(c.b)}`;
+}
+function hexToRgba(hex: string): { r: number; g: number; b: number } {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return { r: 0, g: 0, b: 0 };
+  return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) };
+}
+
+// Per-transition variable controls (the math knobs), generated from the engine's
+// parameter schema. `direction`/`easing`/`fit`/`preferGpu` are handled elsewhere
+// (or fixed), so they're excluded here. Values are stored as a JSON object.
+function TransitionVars({
+  id,
+  paramsJson,
+  onChange,
+}: {
+  id: string;
+  paramsJson?: string | null;
+  onChange: (json: string) => void;
+}) {
+  const meta = getTransitionMeta(id);
+  if (!meta) return null;
+  const specs = meta.params.filter(
+    (p: ParamSpec) => !["easing", "fit", "preferGpu", "direction"].includes(p.name)
+  );
+  if (specs.length === 0) return null;
+  let cur: Record<string, unknown> = {};
+  try {
+    cur = paramsJson ? (JSON.parse(paramsJson) as Record<string, unknown>) : {};
+  } catch {
+    cur = {};
+  }
+  const set = (name: string, val: unknown) => onChange(JSON.stringify({ ...cur, [name]: val }));
+  return (
+    <div className="tr-vars">
+      {specs.map((s) => {
+        const v = cur[s.name] ?? s.default;
+        return (
+          <label key={s.name} className="tr-var" title={s.description}>
+            <span className="tr-var-name">{s.label}</span>
+            {s.type === "number" && (
+              <>
+                <input
+                  type="range"
+                  min={s.min ?? 0}
+                  max={s.max ?? 1}
+                  step={s.step ?? 0.01}
+                  value={Number(v)}
+                  onChange={(e) => set(s.name, Number(e.target.value))}
+                />
+                <em className="tr-var-val">{Number(v)}</em>
+              </>
+            )}
+            {s.type === "bool" && (
+              <input type="checkbox" checked={!!v} onChange={(e) => set(s.name, e.target.checked)} />
+            )}
+            {s.type === "enum" && (
+              <select value={String(v)} onChange={(e) => set(s.name, e.target.value)}>
+                {(s.options ?? []).map((o) => (
+                  <option key={o} value={o}>
+                    {o}
+                  </option>
+                ))}
+              </select>
+            )}
+            {s.type === "color" && (
+              <input
+                type="color"
+                value={rgbaToHex(v)}
+                onChange={(e) => set(s.name, hexToRgba(e.target.value))}
+              />
+            )}
+          </label>
+        );
+      })}
+      <button className="tr-var-reset" onClick={() => onChange("{}")} title="Reset to defaults">
+        Reset variables
+      </button>
+    </div>
+  );
+}
+
+// In/out transition controls for the selected layer: pick a transition from the
+// library for the In/Out slot, then tune its duration, direction and variables.
 function TransitionsSection({
   layer,
   onSet,
@@ -769,53 +870,73 @@ function TransitionsSection({
     <div className="insp-body">
       <div className="insp-sep">Transitions</div>
       {slots.map(({ slot, tr }) => {
-        const kind = (tr?.kind ?? "none") as TransitionKindOpt;
         const durMs = tr?.durMs ?? 800;
         const direction = tr?.direction ?? 0;
+        const paramsJson = tr?.params ?? null;
+        // The picker value is the engine id; legacy kinds map onto one.
+        const value = !tr
+          ? "none"
+          : tr.engine ?? LEGACY_TO_ENGINE[tr.kind] ?? "none";
+        const onPick = (id: string) => {
+          // Picking a (different) transition resets its variables to defaults.
+          if (id === "none") onSet(layer.id, slot, "none", durMs, direction, null, null);
+          else onSet(layer.id, slot, "dissolve", durMs, direction, id, id === value ? paramsJson : null);
+        };
         return (
           <div key={slot} className="insp-field">
             <span style={{ textTransform: "capitalize" }}>{slot}</span>
-            <select
-              value={kind}
-              onChange={(e) =>
-                onSet(layer.id, slot, e.target.value as TransitionKindOpt, durMs, direction)
-              }
-            >
+            <select value={value} onChange={(e) => onPick(e.target.value)}>
               <option value="none">None</option>
-              <option value="dissolve">Dissolve (cross-fade)</option>
-              <option value="slide">Slide</option>
-              <option value="wipe">Wipe</option>
+              {TRANSITION_GROUPS.map((g) => (
+                <optgroup key={g.category} label={g.category}>
+                  {g.items.map((it) => (
+                    <option key={it.id} value={it.id}>
+                      {it.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
             </select>
-            {kind !== "none" && (
-              <div className="row2">
-                <input
-                  type="number"
-                  min={0}
-                  max={10000}
-                  step={50}
-                  value={durMs}
-                  title="Duration (ms)"
-                  onChange={(e) => onSet(layer.id, slot, kind, Number(e.target.value), direction)}
-                />
-                {(kind === "slide" || kind === "wipe") && (
+            {value !== "none" && (
+              <>
+                <div className="row2">
+                  <input
+                    type="number"
+                    min={0}
+                    max={10000}
+                    step={50}
+                    value={durMs}
+                    title="Duration (ms)"
+                    onChange={(e) =>
+                      onSet(layer.id, slot, "dissolve", Number(e.target.value), direction, value, paramsJson)
+                    }
+                  />
                   <select
                     value={direction}
-                    title="Direction"
-                    onChange={(e) => onSet(layer.id, slot, kind, durMs, Number(e.target.value))}
+                    title="Direction (used by directional transitions)"
+                    onChange={(e) =>
+                      onSet(layer.id, slot, "dissolve", durMs, Number(e.target.value), value, paramsJson)
+                    }
                   >
                     <option value={0}>From left</option>
                     <option value={1}>From right</option>
                     <option value={2}>From top</option>
                     <option value={3}>From bottom</option>
                   </select>
-                )}
-              </div>
+                </div>
+                <TransitionVars
+                  id={value}
+                  paramsJson={paramsJson}
+                  onChange={(json) => onSet(layer.id, slot, "dissolve", durMs, direction, value, json)}
+                />
+              </>
             )}
           </div>
         );
       })}
       <p className="insp-hint">
-        In plays over the layer's start, Out over its end. Overlap a layer beneath to
+        In plays over the layer's start, Out over its end. Pick any effect from the
+        transition library — it reveals the layers beneath. Overlap a layer beneath to
         cross-blend.
       </p>
     </div>
