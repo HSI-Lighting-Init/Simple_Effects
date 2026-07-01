@@ -19,6 +19,7 @@ export interface GlitchParams extends BaseParams {
   amplitude?: number; // px-ish, for warps
   frequency?: number; // cycles, for warps
   hue?: number; // for light leak
+  orientation?: "horizontal" | "vertical"; // stretch axis
 }
 
 /** Draw `src` as horizontal bands, each shifted in X by off(normalizedY). */
@@ -287,13 +288,15 @@ export class Melt extends GlitchBase {
   }
 }
 
-/** Stretch: the frame whips by stretching along an axis into the next clip. */
+/** Stretch: the frame whips by stretching along an axis into the next clip.
+ *  `orientation` picks the axis; `amount` (0..1) sets how extreme the whip is. */
 export class Stretch extends GlitchBase {
   composeCpu(ctx: CanvasRenderingContext2D, a: HTMLCanvasElement, b: HTMLCanvasElement, p: number) {
     const w = this.outW, h = this.outH;
-    const horizontal = ((this.params.frequency as number) ?? 1) >= 0;
-    const stretchA = 1 + this.bump(p) * 6 * (p < 0.5 ? 1 : 0);
-    const stretchB = 1 + this.bump(p) * 6 * (p >= 0.5 ? 1 : 0);
+    const horizontal = ((this.params.orientation as string) ?? "horizontal") !== "vertical";
+    const k = this.amount() * 10; // 0 = a hard cut, 1 = a strong 11× whip
+    const stretchA = 1 + this.bump(p) * k * (p < 0.5 ? 1 : 0);
+    const stretchB = 1 + this.bump(p) * k * (p >= 0.5 ? 1 : 0);
     const draw = (img: CanvasImageSource, s: number, alpha: number) => {
       ctx.save();
       ctx.globalAlpha = alpha;
