@@ -910,6 +910,20 @@ body {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
 
+/* Transitions demo */
+.tr-demo {
+  max-height: 88vh;
+  overflow-y: auto;
+}
+
+.tr-demo-canvas {
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background:
+    repeating-conic-gradient(#2a2a35 0% 25%, #22222b 0% 50%) 0 / 20px 20px;
+}
+
 /* Timeline */
 .timeline {
   background: var(--panel);

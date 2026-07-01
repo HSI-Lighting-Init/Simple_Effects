@@ -10,6 +10,7 @@ import MenuBar, { type MenuDef } from "./components/MenuBar";
 import CompSettings from "./components/CompSettings";
 import EffectEditor from "./components/EffectEditor";
 import ExportDialog from "./components/ExportDialog";
+import TransitionsDemo from "./components/TransitionsDemo";
 import {
   addEffect,
   addImageLayer,
@@ -170,6 +171,7 @@ export default function App() {
   const copiedLayerRef = useRef<number | null>(null);
   // Razor (cut) tool: when on, clicking a timeline block splits it there.
   const [razor, setRazor] = useState(false);
+  const [showTransitions, setShowTransitions] = useState(false);
 
   // Refs the rAF loop reads without re-subscribing.
   const timeRef = useRef(0);
@@ -1512,6 +1514,10 @@ export default function App() {
           label: (showRecorder ? "Hide" : "Show") + " Session Recorder",
           onClick: () => setShowRecorder((s) => !s),
         },
+        {
+          label: "Transitions Demo…",
+          onClick: () => setShowTransitions(true),
+        },
       ],
     },
     {
@@ -1741,6 +1747,8 @@ export default function App() {
           onClose={() => setShowExportDialog(false)}
         />
       )}
+
+      {showTransitions && <TransitionsDemo onClose={() => setShowTransitions(false)} />}
 
       {fxLayer && fxLayer.kind.kind === "image" && (
         <EffectEditor
