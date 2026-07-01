@@ -61,13 +61,6 @@ const PRESETS: { value: LetterPreset | "none"; label: string }[] = [
   { value: "typewriter", label: "Typewriter" },
 ];
 
-const FONTS: { value: Font; label: string }[] = [
-  { value: "vazirmatn", label: "Vazirmatn" },
-  { value: "sahel", label: "Sahel" },
-  { value: "shabnam", label: "Shabnam" },
-  { value: "gandom", label: "Gandom (bold)" },
-];
-
 function rgbToHex(c: Rgba): string {
   const h = (n: number) => Math.max(0, Math.min(255, n | 0)).toString(16).padStart(2, "0");
   return `#${h(c.r)}${h(c.g)}${h(c.b)}`;
@@ -486,6 +479,7 @@ function TextInspector({
   size: size0,
   color,
   font,
+  fonts,
   anim,
   style,
   animators,
@@ -512,6 +506,7 @@ function TextInspector({
   size: number;
   color: Rgba;
   font: Font;
+  fonts: string[];
   anim: LetterAnimation | null;
   style: TextStyle | null;
   animators: TextAnimator[];
@@ -578,9 +573,9 @@ function TextInspector({
       <label className="insp-field">
         Font
         <select value={font} onChange={(e) => onFont(layerId, e.target.value as Font)}>
-          {FONTS.map((f) => (
-            <option key={f.value} value={f.value}>
-              {f.label}
+          {(fonts.includes(font) ? fonts : [font, ...fonts]).map((f) => (
+            <option key={f} value={f}>
+              {f}
             </option>
           ))}
         </select>
@@ -1402,6 +1397,7 @@ function TransitionsSection({
 
 interface Props {
   layer: Layer | null;
+  fonts: string[];
   decomposed: boolean;
   shapes: ShapeRef[];
   shapeAngles: { x: number; y: number; z: number } | null;
@@ -1445,6 +1441,7 @@ interface Props {
 
 export default function Inspector({
   layer,
+  fonts,
   decomposed,
   shapes,
   shapeAngles,
@@ -1500,6 +1497,7 @@ export default function Inspector({
           size={layer.kind.size}
           color={layer.kind.color}
           font={layer.kind.font}
+          fonts={fonts}
           anim={layer.kind.anim}
           style={layer.kind.style}
           animators={layer.kind.animators}

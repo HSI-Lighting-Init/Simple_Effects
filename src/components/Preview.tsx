@@ -947,6 +947,7 @@ function TextGlyphs({
   layerId,
   content,
   size,
+  font,
   fill,
   color,
   style,
@@ -965,6 +966,7 @@ function TextGlyphs({
   layerId: number;
   content: string;
   size: number;
+  font: string;
   fill: string;
   color: Rgba;
   style: TextStyle | null;
@@ -993,7 +995,7 @@ function TextGlyphs({
     return () => {
       alive = false;
     };
-  }, [layerId, content, size]);
+  }, [layerId, content, size, font]);
 
   // Attach the per-glyph Transformer to the selected glyph (decompose only).
   useEffect(() => {
@@ -1336,6 +1338,7 @@ export default function Preview({
                     layerId={layer.id}
                     content={k.content}
                     size={k.size}
+                    font={k.font}
                     fill={rgbaCss(k.color)}
                     color={k.color}
                     style={k.style}

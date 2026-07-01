@@ -54,6 +54,7 @@ import {
   setTextColor,
   setTextContent,
   setTextFont,
+  listFonts,
   setTextStyle,
   setTextAnimators,
   setTextLayerStyles,
@@ -147,6 +148,7 @@ export default function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [resolved, setResolved] = useState<Record<number, ResolvedLayer>>({});
   const [images, setImages] = useState<Record<string, string>>({});
+  const [fonts, setFonts] = useState<string[]>([]);
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -283,6 +285,8 @@ export default function App() {
       await resolveImages(p);
       await applyTime(0);
     })();
+    // Load installed font families for the picker (built-ins first).
+    listFonts().then(setFonts).catch(() => setFonts(["Vazirmatn", "Sahel", "Shabnam", "Gandom"]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1717,6 +1721,7 @@ export default function App() {
         </main>
         <Inspector
           layer={selectedLayer}
+          fonts={fonts}
           decomposed={selectedLayer != null && decomposeId === selectedLayer.id}
           shapes={shapes}
           shapeAngles={shapeAngles}

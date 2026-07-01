@@ -61,7 +61,7 @@ impl AppState {
 /// (Re)shape a single layer into the cache if it's a text layer.
 fn reshape_layer(shaped: &mut HashMap<u32, ShapedText>, layer: &Layer) {
     if let LayerKind::Text { content, size, font, .. } = &layer.kind {
-        shaped.insert(layer.id, text::shape(content, *size, *font));
+        shaped.insert(layer.id, text::shape(content, *size, font));
     }
 }
 
@@ -154,8 +154,8 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
     let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
     let end_ms = project.duration_ms;
-    let font = Font::Vazirmatn;
-    let shaped = text::shape(&content, size, font);
+    let font = Font("Vazirmatn".into());
+    let shaped = text::shape(&content, size, &font);
     project.layers.push(Layer {
         id: next_id,
         name: "Text".into(),
@@ -207,7 +207,7 @@ fn set_text_content(
         LayerKind::Text { content: c, size: s, font, .. } => {
             *c = content.clone();
             *s = size;
-            *font
+            font.clone()
         }
         _ => return Err("not a text layer".into()),
     };
@@ -215,7 +215,7 @@ fn set_text_content(
         .shaped
         .lock()
         .unwrap()
-        .insert(layer_id, text::shape(&content, size, font));
+        .insert(layer_id, text::shape(&content, size, &font));
     Ok(project.clone())
 }
 
@@ -249,7 +249,7 @@ fn set_text_font(state: State<AppState>, layer_id: u32, font: Font) -> Result<Pr
             .ok_or("layer not found")?;
         match &mut layer.kind {
             LayerKind::Text { content, size, font: f, .. } => {
-                *f = font;
+                *f = font.clone();
                 (content.clone(), *size)
             }
             _ => return Err("not a text layer".into()),
@@ -259,8 +259,14 @@ fn set_text_font(state: State<AppState>, layer_id: u32, font: Font) -> Result<Pr
         .shaped
         .lock()
         .unwrap()
-        .insert(layer_id, text::shape(&content, size, font));
+        .insert(layer_id, text::shape(&content, size, &font));
     Ok(project.clone())
+}
+
+/// List every selectable font family (built-ins first, then system fonts).
+#[tauri::command]
+fn list_fonts() -> Vec<String> {
+    text::list_font_families()
 }
 
 /// Set (or clear) the per-letter animation preset on a text layer.
@@ -1525,6 +1531,7 @@ pub fn run() {
             set_text_color,
             set_text_font,
             set_text_anim,
+            list_fonts,
             set_text_style,
             set_text_animators,
             set_text_layer_styles,

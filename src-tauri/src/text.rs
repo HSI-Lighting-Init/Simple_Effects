@@ -10,33 +10,74 @@
 //! The same shaped outlines feed both the preview and (later) the tiny-skia
 //! export, so what you see matches what you render.
 
+use std::collections::BTreeSet;
+use std::sync::OnceLock;
+
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// The embedded fonts the user can pick from (all SIL OFL, Persian/Arabic with
-/// Latin coverage). Rendering as outlines means any of them explode into shapes.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+/// A font choice: a family NAME. The four built-ins below are always available
+/// (embedded, SIL OFL, Persian/Arabic + Latin); any other name is resolved from
+/// the system font database. Rendering as outlines means any font explodes into
+/// shapes, so no runtime font is needed once shaped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(transparent)]
 #[ts(export, export_to = "../../src/bindings/")]
-pub enum Font {
-    Vazirmatn,
-    Sahel,
-    Shabnam,
-    Gandom,
-}
+pub struct Font(pub String);
 
 const VAZIRMATN: &[u8] = include_bytes!("../fonts/Vazirmatn-Regular.ttf");
 const SAHEL: &[u8] = include_bytes!("../fonts/Sahel.ttf");
 const SHABNAM: &[u8] = include_bytes!("../fonts/Shabnam.ttf");
 const GANDOM: &[u8] = include_bytes!("../fonts/Gandom.ttf");
+const BUILTINS: [&str; 4] = ["Vazirmatn", "Sahel", "Shabnam", "Gandom"];
 
-fn font_bytes(font: Font) -> &'static [u8] {
-    match font {
-        Font::Vazirmatn => VAZIRMATN,
-        Font::Sahel => SAHEL,
-        Font::Shabnam => SHABNAM,
-        Font::Gandom => GANDOM,
+/// The lazily-loaded system font database (scans the OS font dirs once).
+fn db() -> &'static fontdb::Database {
+    static DB: OnceLock<fontdb::Database> = OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        db
+    })
+}
+
+/// Resolve a family name to font bytes + face index. Built-ins are embedded;
+/// everything else comes from the system db, falling back to Vazirmatn.
+fn font_data(family: &str) -> (Vec<u8>, u32) {
+    match family {
+        "Vazirmatn" => return (VAZIRMATN.to_vec(), 0),
+        "Sahel" => return (SAHEL.to_vec(), 0),
+        "Shabnam" => return (SHABNAM.to_vec(), 0),
+        "Gandom" => return (GANDOM.to_vec(), 0),
+        _ => {}
     }
+    let query = fontdb::Query {
+        families: &[fontdb::Family::Name(family)],
+        ..Default::default()
+    };
+    if let Some(id) = db().query(&query) {
+        if let Some(data) = db().with_face_data(id, |data, index| (data.to_vec(), index)) {
+            return data;
+        }
+    }
+    (VAZIRMATN.to_vec(), 0)
+}
+
+/// All selectable font families: the built-ins first, then every system family
+/// (sorted, de-duplicated).
+pub fn list_font_families() -> Vec<String> {
+    let mut system: BTreeSet<String> = BTreeSet::new();
+    for face in db().faces() {
+        for (name, _lang) in &face.families {
+            system.insert(name.clone());
+        }
+    }
+    for b in BUILTINS {
+        system.remove(b);
+    }
+    let mut out: Vec<String> = BUILTINS.iter().map(|s| s.to_string()).collect();
+    out.extend(system);
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -99,10 +140,15 @@ impl ttf_parser::OutlineBuilder for PathBuilder {
 }
 
 /// Shape `content` at `size` px with `font` into positioned glyph outlines.
-pub fn shape(content: &str, size: f32, font: Font) -> ShapedText {
-    let bytes = font_bytes(font);
-    let rb_face = rustybuzz::Face::from_slice(bytes, 0).expect("embedded font is valid");
-    let ttf = ttf_parser::Face::parse(bytes, 0).expect("embedded font is valid");
+pub fn shape(content: &str, size: f32, font: &Font) -> ShapedText {
+    let (mut bytes, mut index) = font_data(&font.0);
+    // Guard against an unparseable system font — fall back to a built-in.
+    if ttf_parser::Face::parse(&bytes, index).is_err() || rustybuzz::Face::from_slice(&bytes, index).is_none() {
+        bytes = VAZIRMATN.to_vec();
+        index = 0;
+    }
+    let rb_face = rustybuzz::Face::from_slice(&bytes, index).expect("font is valid");
+    let ttf = ttf_parser::Face::parse(&bytes, index).expect("font is valid");
     let upem = ttf.units_per_em() as f32;
     let s = size / upem;
 
@@ -156,20 +202,27 @@ mod tests {
 
     #[test]
     fn shapes_persian_into_joined_glyphs() {
-        // The example string the client cares about — across every font.
-        for font in [Font::Vazirmatn, Font::Sahel, Font::Shabnam, Font::Gandom] {
-            let st = shape("آموزش اتوکد پی‌دی‌اف رایگان", 88.0, font);
-            assert!(st.width > 0.0, "run should have width for {font:?}");
-            assert!(st.glyphs.len() > 5, "should produce many glyphs for {font:?}");
+        // The example string the client cares about — across every built-in font.
+        for name in ["Vazirmatn", "Sahel", "Shabnam", "Gandom"] {
+            let font = Font(name.to_string());
+            let st = shape("آموزش اتوکد پی‌دی‌اف رایگان", 88.0, &font);
+            assert!(st.width > 0.0, "run should have width for {name}");
+            assert!(st.glyphs.len() > 5, "should produce many glyphs for {name}");
             let with_outline = st.glyphs.iter().filter(|g| !g.d.is_empty()).count();
-            assert!(with_outline > 5, "most glyphs should have outlines for {font:?}");
+            assert!(with_outline > 5, "most glyphs should have outlines for {name}");
         }
     }
 
     #[test]
     fn latin_advances_left_to_right() {
-        let st = shape("AV", 100.0, Font::Vazirmatn);
+        let st = shape("AV", 100.0, &Font("Vazirmatn".to_string()));
         assert_eq!(st.glyphs.len(), 2);
         assert!(st.glyphs[1].x > st.glyphs[0].x);
+    }
+
+    #[test]
+    fn unknown_font_falls_back() {
+        let st = shape("AV", 100.0, &Font("Totally Not A Real Font 123".to_string()));
+        assert_eq!(st.glyphs.len(), 2);
     }
 }

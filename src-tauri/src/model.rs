@@ -746,7 +746,7 @@ impl Project {
                 content: "آموزش اتوکد پی‌دی‌اف رایگان".into(),
                 size: 92.0,
                 color: Rgba { r: 240, g: 240, b: 245, a: 255 },
-                font: Font::Vazirmatn,
+                font: Font("Vazirmatn".into()),
                 anim: Some(LetterAnimation {
                     preset: LetterPreset::RiseUp,
                     start_ms: 300,

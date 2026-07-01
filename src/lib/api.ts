@@ -94,6 +94,9 @@ export const setTextColor = (layerId: number, color: Rgba) =>
 export const setTextFont = (layerId: number, font: Font) =>
   invoke<Project>("set_text_font", { layerId, font });
 
+/** Every selectable font family (built-ins first, then installed system fonts). */
+export const listFonts = () => invoke<string[]>("list_fonts");
+
 /** Set (or clear with null) the typographic + fill/stroke style on a text layer. */
 export const setTextStyle = (layerId: number, style: TextStyle | null) =>
   invoke<Project>("set_text_style", { layerId, style });
