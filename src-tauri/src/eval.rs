@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::model::{
-    AnimSelector, ColorKey, Easing, Effect, FitMode, GridVertex, LayerKind, LetterAnimation,
+    AnimSelector, ColorKey, Easing, Effect, FitMode, GridVertex, Layer, LayerKind, LetterAnimation,
     LetterPreset, LinkedEffectGroup, Project, RangeShape, Rgba, SelectorKind, TextAnimator, Track,
     TransitionKind,
 };
@@ -53,6 +53,18 @@ pub struct ResolvedLayer {
     /// Resolved multi-frame grid (cells + warped lattice) when this is a
     /// `FrameGrid` layer. `None` for everything else.
     pub frame_grid: Option<ResolvedFrameGrid>,
+    /// Resolved child layers when this is a `Group` (precomp) — the frontend
+    /// renders them nested under this layer's transform. `None` otherwise.
+    pub group: Option<ResolvedGroup>,
+}
+
+/// A nested composition resolved at one instant: its child layers, each already
+/// resolved (recursively) at the same comp time.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ResolvedGroup {
+    pub children: Vec<ResolvedLayer>,
 }
 
 /// A `FrameGrid` resolved at one instant: the (possibly warped) vertex lattice
@@ -587,18 +599,29 @@ pub fn evaluate(
     letter_counts: &HashMap<u32, usize>,
     text_dims: &HashMap<u32, (f32, f32)>,
 ) -> Vec<ResolvedLayer> {
+    resolve_layers(&project.layers, t_ms, letter_counts, text_dims)
+}
+
+/// Resolve one layer list (recurses into `Group` children). Shapes are resolved
+/// per list so a `Shape3D` and the images pinned to it composite within the same
+/// scope (root or a group's contents).
+fn resolve_layers(
+    layers: &[Layer],
+    t_ms: u32,
+    letter_counts: &HashMap<u32, usize>,
+    text_dims: &HashMap<u32, (f32, f32)>,
+) -> Vec<ResolvedLayer> {
     // Pass 1: resolve every Shape3D into a ShapeState so the images pinned to it
     // (which may appear before or after it in the list) can be projected.
     let mut shapes: HashMap<u32, ShapeState> = HashMap::new();
-    for layer in &project.layers {
+    for layer in layers {
         if let Some(st) = shape_state_for(layer, t_ms) {
             shapes.insert(layer.id, st);
         }
     }
 
     // Pass 2: build the resolved layers.
-    project
-        .layers
+    layers
         .iter()
         .map(|layer| {
             let tf = &layer.transform;
@@ -745,6 +768,14 @@ pub fn evaluate(
                 _ => None,
             };
 
+            // Group → recursively resolve its children (nested precomp).
+            let group = match &layer.kind {
+                LayerKind::Group { children } => Some(ResolvedGroup {
+                    children: resolve_layers(children, t_ms, letter_counts, text_dims),
+                }),
+                _ => None,
+            };
+
             // A decal is baked into comp space, so its image-layer transform is
             // identity (only opacity still applies). Everything else uses its own
             // resolved transform.
@@ -765,6 +796,7 @@ pub fn evaluate(
                 effects,
                 transition: resolve_transition(layer, t_ms),
                 frame_grid,
+                group,
             }
         })
         .collect()

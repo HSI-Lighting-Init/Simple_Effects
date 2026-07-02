@@ -90,6 +90,29 @@ export const addVideoLayer = (path: string, width: number, height: number, durat
 export const addAudioLayer = (path: string, durationMs: number) =>
   invoke<Project>("add_audio_layer", { path, durationMs });
 
+/** Re-time a just-added layer to start at `startMs` and slot it above `aboveId`
+ *  (null = top). Folds into the preceding add's undo step. */
+export const placeLayer = (layerId: number, startMs: number, aboveId: number | null) =>
+  invoke<Project>("place_layer", { layerId, startMs, aboveId });
+
+/** Combine layers (current scope) into one nested Group (precomp). */
+export const combineLayers = (ids: number[]) =>
+  invoke<Project>("combine_layers", { ids });
+
+/** Explode (ungroup) a Group back into the current scope. */
+export const explodeLayer = (groupId: number) =>
+  invoke<Project>("explode_layer", { groupId });
+
+/** Enter a group to edit its children (swaps the editing scope). */
+export const enterGroup = (groupId: number) =>
+  invoke<Project>("enter_group", { groupId });
+
+/** Leave the current group, re-nesting the edits. */
+export const exitGroup = () => invoke<Project>("exit_group");
+
+/** How many groups deep the editing scope is (0 = root comp). */
+export const navDepth = () => invoke<number>("nav_depth");
+
 /** Show/hide a layer (the layer-list on/off toggle). */
 export const setLayerHidden = (layerId: number, hidden: boolean) =>
   invoke<Project>("set_layer_hidden", { layerId, hidden });
@@ -215,6 +238,16 @@ export const setCellTransition = (
   engine: string | null,
   params: string | null
 ) => invoke<Project>("set_cell_transition", { layerId, cell, slot, durMs, direction, engine, params });
+
+/** Set (or clear, engine=null) the SAME in/out transition on every grid cell. */
+export const setAllCellsTransition = (
+  layerId: number,
+  slot: "in" | "out",
+  durMs: number,
+  direction: number,
+  engine: string | null,
+  params: string | null
+) => invoke<Project>("set_all_cells_transition", { layerId, slot, durMs, direction, engine, params });
 
 /** Keyframe a grid cell's image zoom at the playhead (1 = fit, >1 = zoomed in). */
 export const setCellZoom = (

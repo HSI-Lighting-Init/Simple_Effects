@@ -41,13 +41,23 @@ struct History {
     redo: Vec<Project>,
 }
 
+/// One level of "inside a group" navigation: the parent scope's layers (with the
+/// group still in place, its children emptied while they're live in `project`)
+/// and which group we descended into, so `exit_group` can re-nest the edits.
+struct NavFrame {
+    parent_layers: Vec<Layer>,
+    group_id: u32,
+}
+
 /// App-wide mutable state. `shaped` caches the shaped glyphs per text layer so we
 /// don't re-shape every frame; it's rebuilt whenever a layer's text changes.
+/// `nav` is the group-editing stack (empty = editing the root comp).
 /// Lock order is always project → history → shaped to avoid deadlock.
 struct AppState {
     project: Mutex<Project>,
     shaped: Mutex<HashMap<u32, ShapedText>>,
     history: Mutex<History>,
+    nav: Mutex<Vec<NavFrame>>,
 }
 
 impl AppState {
@@ -72,11 +82,21 @@ fn reshape_layer(shaped: &mut HashMap<u32, ShapedText>, layer: &Layer) {
     }
 }
 
+/// Shape a layer and (recursively) any layers nested inside a group.
+fn reshape_recursive(shaped: &mut HashMap<u32, ShapedText>, layer: &Layer) {
+    reshape_layer(shaped, layer);
+    if let LayerKind::Group { children } = &layer.kind {
+        for c in children {
+            reshape_recursive(shaped, c);
+        }
+    }
+}
+
 /// Rebuild the whole shaping cache from a project (after undo/redo/load).
 fn reshape_all(project: &Project, shaped: &mut HashMap<u32, ShapedText>) {
     shaped.clear();
     for l in &project.layers {
-        reshape_layer(shaped, l);
+        reshape_recursive(shaped, l);
     }
 }
 
@@ -158,7 +178,7 @@ fn get_shaped(state: State<AppState>, layer_id: u32) -> Option<ShapedText> {
 fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let next_id = max_layer_id(&project.layers) + 1;
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
     let end_ms = default_new_layer_end(project.duration_ms);
     let font = Font("Vazirmatn".into());
@@ -469,7 +489,7 @@ fn set_text_per_char_3d(
 fn add_image_layer(state: State<AppState>, path: String) -> Project {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let next_id = max_layer_id(&project.layers) + 1;
     let name = std::path::Path::new(&path)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -516,7 +536,7 @@ fn add_video_layer(
 ) -> Project {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let next_id = max_layer_id(&project.layers) + 1;
     let name = std::path::Path::new(&path)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -554,7 +574,7 @@ fn add_video_layer(
 fn add_audio_layer(state: State<AppState>, path: String, duration_ms: u32) -> Project {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let next_id = max_layer_id(&project.layers) + 1;
     let name = std::path::Path::new(&path)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -848,6 +868,184 @@ fn reorder_layers(state: State<AppState>, order: Vec<u32>) -> Result<Project, St
     Ok(project.clone())
 }
 
+/// Place a just-added layer: move its play range to start at `start_ms` (keeping
+/// its span, clamped to the comp) and slot it directly ABOVE `above_id` in the
+/// stack (last = top). `above_id` = None leaves it on top. One undo step — the
+/// caller runs this right after an add so the two read as a single action.
+#[tauri::command]
+fn place_layer(
+    state: State<AppState>,
+    layer_id: u32,
+    start_ms: u32,
+    above_id: Option<u32>,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    let dur = project.duration_ms.max(MIN_SPAN_MS);
+    // Re-time: start at the playhead, keep the span, clamp to the comp end.
+    {
+        let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+        let span = layer.end_ms.saturating_sub(layer.start_ms).max(MIN_SPAN_MS);
+        let s = start_ms.min(dur.saturating_sub(MIN_SPAN_MS));
+        let e = (s + span).min(dur);
+        layer.start_ms = s.min(e.saturating_sub(MIN_SPAN_MS));
+        layer.end_ms = e;
+    }
+    // Re-stack: pull the layer out and reinsert just above `above_id`.
+    if let Some(from) = project.layers.iter().position(|l| l.id == layer_id) {
+        let layer = project.layers.remove(from);
+        let insert_at = match above_id.and_then(|aid| project.layers.iter().position(|l| l.id == aid)) {
+            Some(ai) => ai + 1, // directly above the reference layer
+            None => project.layers.len(), // top
+        };
+        project.layers.insert(insert_at, layer);
+    }
+    Ok(project.clone())
+}
+
+/// Combine the given layers (current scope) into one `Group` (precomp). Members
+/// are removed from the scope and nested into a new group placed where the
+/// top-most member was; the group spans the union of their play ranges. The
+/// group's own transform is identity, so children keep their on-screen positions.
+/// Returns the new group's id via the top layer. Undoable.
+#[tauri::command]
+fn combine_layers(state: State<AppState>, ids: Vec<u32>) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    // Keep members in their current stacking order (bottom-first).
+    let members: Vec<usize> = project
+        .layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| ids.contains(&l.id))
+        .map(|(i, _)| i)
+        .collect();
+    if members.len() < 2 {
+        return Err("select at least two layers to combine".into());
+    }
+    state.snapshot(&project);
+    let top_pos = *members.last().unwrap();
+    let (mut start_ms, mut end_ms) = (u32::MAX, 0u32);
+    // Remove from the top down so earlier indices stay valid; collect in order.
+    let mut taken: Vec<Layer> = Vec::with_capacity(members.len());
+    for &i in members.iter().rev() {
+        let l = project.layers.remove(i);
+        start_ms = start_ms.min(l.start_ms);
+        end_ms = end_ms.max(l.end_ms);
+        taken.push(l);
+    }
+    taken.reverse(); // back to bottom-first
+    // How many removed layers sat below the top member → the insert index.
+    let below = members.iter().filter(|&&i| i < top_pos).count();
+    let insert_at = top_pos - below;
+    let next_id = max_layer_id(&project.layers).max(taken.iter().map(|l| l.id).max().unwrap_or(0)) + 1;
+    let group = Layer {
+        id: next_id,
+        name: "Group".into(),
+        start_ms: start_ms.min(end_ms.saturating_sub(MIN_SPAN_MS)),
+        end_ms,
+        kind: LayerKind::Group { children: taken },
+        transform: Transform::at(0.0, 0.0),
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    };
+    project.layers.insert(insert_at, group);
+    Ok(project.clone())
+}
+
+/// Explode (ungroup) a `Group`, lifting its children back into the current scope
+/// where the group sat (preserving their order). Undoable.
+#[tauri::command]
+fn explode_layer(state: State<AppState>, group_id: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    let idx = project.layers.iter().position(|l| l.id == group_id).ok_or("group not found")?;
+    let children = match &project.layers[idx].kind {
+        LayerKind::Group { children } => children.clone(),
+        _ => return Err("not a group".into()),
+    };
+    state.snapshot(&project);
+    project.layers.remove(idx);
+    for (k, child) in children.into_iter().enumerate() {
+        project.layers.insert(idx + k, child);
+    }
+    Ok(project.clone())
+}
+
+/// Enter a group to edit its children on their own timeline. Swaps the current
+/// scope to the group's children (so every editing command operates on them
+/// unchanged); `exit_group` re-nests the edits. Clears undo (scopes don't share
+/// history). Returns the child scope.
+#[tauri::command]
+fn enter_group(state: State<AppState>, group_id: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    let idx = project.layers.iter().position(|l| l.id == group_id).ok_or("group not found")?;
+    let children = match &mut project.layers[idx].kind {
+        LayerKind::Group { children } => std::mem::take(children),
+        _ => return Err("not a group".into()),
+    };
+    let parent = std::mem::replace(&mut project.layers, children);
+    state.nav.lock().unwrap().push(NavFrame { parent_layers: parent, group_id });
+    let mut h = state.history.lock().unwrap();
+    h.undo.clear();
+    h.redo.clear();
+    Ok(project.clone())
+}
+
+/// Leave the current group, re-nesting the edited children back into it and
+/// restoring the parent scope. Clears undo. Returns the parent scope. No-op error
+/// if not inside a group.
+#[tauri::command]
+fn exit_group(state: State<AppState>) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    let frame = state.nav.lock().unwrap().pop().ok_or("not inside a group")?;
+    let edited = std::mem::replace(&mut project.layers, frame.parent_layers);
+    if let Some(l) = project.layers.iter_mut().find(|l| l.id == frame.group_id) {
+        if let LayerKind::Group { children } = &mut l.kind {
+            *children = edited;
+        }
+    }
+    let mut h = state.history.lock().unwrap();
+    h.undo.clear();
+    h.redo.clear();
+    Ok(project.clone())
+}
+
+/// How many groups deep the editing scope currently is (0 = root comp).
+#[tauri::command]
+fn nav_depth(state: State<AppState>) -> usize {
+    state.nav.lock().unwrap().len()
+}
+
+/// Give `layer` (and any nested group children) fresh unique ids from `next` —
+/// used when cloning so a duplicated group's children don't collide with the
+/// originals.
+fn reassign_ids(layer: &mut Layer, next: &mut u32) {
+    layer.id = *next;
+    *next += 1;
+    if let LayerKind::Group { children } = &mut layer.kind {
+        for c in children.iter_mut() {
+            reassign_ids(c, next);
+        }
+    }
+}
+
+/// Highest layer id anywhere in a layer list (recursing into groups) — so new ids
+/// stay unique across the whole tree.
+fn max_layer_id(layers: &[Layer]) -> u32 {
+    layers
+        .iter()
+        .map(|l| {
+            let child_max = match &l.kind {
+                LayerKind::Group { children } => max_layer_id(children),
+                _ => 0,
+            };
+            l.id.max(child_max)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// Save the current project to `path` as a Simple Effects (.sefx) file — pretty
 /// JSON of the whole project, reloadable with `open_project_file`.
 #[tauri::command]
@@ -1041,7 +1239,7 @@ fn set_decompose_key(
 fn add_shape_layer(state: State<AppState>, shape: SurfaceShape) -> Project {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let next_id = max_layer_id(&project.layers) + 1;
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
     let end_ms = default_new_layer_end(project.duration_ms);
     // A comfortable default size relative to the comp.
@@ -1087,7 +1285,7 @@ fn add_frame_grid(state: State<AppState>, rows: u32, cols: u32) -> Project {
     state.snapshot(&project);
     let rows = rows.clamp(1, 32);
     let cols = cols.clamp(1, 32);
-    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let next_id = max_layer_id(&project.layers) + 1;
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
     let end_ms = default_new_layer_end(project.duration_ms);
     // Fill ~70% of the comp, keeping cells as square as the aspect allows.
@@ -1376,6 +1574,44 @@ fn set_cell_transition(
         "in" => c.transition_in = transition,
         "out" => c.transition_out = transition,
         _ => return Err("slot must be \"in\" or \"out\"".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Set (or clear) the SAME in/out transition on every cell of a grid at once —
+/// the "apply a transition to all the grid's images" action. `engine` empty/None
+/// clears the slot on all cells. One undo step. Undoable.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn set_all_cells_transition(
+    state: State<AppState>,
+    layer_id: u32,
+    slot: String,
+    dur_ms: u32,
+    direction: u8,
+    engine: Option<String>,
+    params: Option<String>,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    let id = engine.filter(|s| !s.is_empty());
+    for c in cells.iter_mut() {
+        let transition = id.clone().map(|id| Transition {
+            kind: TransitionKind::Dissolve,
+            dur_ms,
+            direction,
+            engine: Some(id),
+            params: params.clone(),
+        });
+        match slot.as_str() {
+            "in" => c.transition_in = transition,
+            "out" => c.transition_out = transition,
+            _ => return Err("slot must be \"in\" or \"out\"".into()),
+        }
     }
     Ok(project.clone())
 }
@@ -2176,12 +2412,12 @@ fn duplicate_layer(state: State<AppState>, layer_id: u32) -> Result<Project, Str
         .iter()
         .position(|l| l.id == layer_id)
         .ok_or("layer not found")?;
-    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let mut next = max_layer_id(&project.layers) + 1;
     let mut clone = project.layers[idx].clone();
-    clone.id = next_id;
+    reassign_ids(&mut clone, &mut next); // fresh ids for it + any nested children
     clone.name = format!("{} copy", clone.name);
     project.layers.insert(idx + 1, clone);
-    reshape_layer(&mut state.shaped.lock().unwrap(), &project.layers[idx + 1]);
+    reshape_recursive(&mut state.shaped.lock().unwrap(), &project.layers[idx + 1]);
     Ok(project.clone())
 }
 
@@ -2204,15 +2440,15 @@ fn split_layer(state: State<AppState>, layer_id: u32, t_ms: u32) -> Result<Proje
         }
     }
     state.snapshot(&project);
-    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let mut next = max_layer_id(&project.layers) + 1;
     let mut second = project.layers[idx].clone();
-    second.id = next_id;
+    reassign_ids(&mut second, &mut next); // fresh ids for it + any nested children
     second.start_ms = t_ms;
     second.transition_in = None; // it now starts mid-clip
     project.layers[idx].end_ms = t_ms;
     project.layers[idx].transition_out = None; // it now ends at the cut
     project.layers.insert(idx + 1, second);
-    reshape_layer(&mut state.shaped.lock().unwrap(), &project.layers[idx + 1]);
+    reshape_recursive(&mut state.shaped.lock().unwrap(), &project.layers[idx + 1]);
     Ok(project.clone())
 }
 
@@ -2330,6 +2566,7 @@ pub fn run() {
                 project: Mutex::new(project),
                 shaped: Mutex::new(shaped),
                 history: Mutex::new(History::default()),
+                nav: Mutex::new(Vec::new()),
             });
             Ok(())
         })
@@ -2340,6 +2577,12 @@ pub fn run() {
             add_image_layer,
             add_video_layer,
             add_audio_layer,
+            place_layer,
+            combine_layers,
+            explode_layer,
+            enter_group,
+            exit_group,
+            nav_depth,
             edit_keyframes,
             set_layer_hidden,
             set_letter_override,
@@ -2361,6 +2604,7 @@ pub fn run() {
             merge_cell,
             split_cell,
             set_cell_transition,
+            set_all_cells_transition,
             add_cell_effect,
             remove_cell_effect,
             key_cell_effect,

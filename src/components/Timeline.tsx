@@ -41,6 +41,7 @@ function kindColor(l: Layer): string {
   if (k.kind === "shape3d") return "#b06cff";
   if (k.kind === "video") return "#e08a3c";
   if (k.kind === "audio") return "#3ca0e0";
+  if (k.kind === "group") return "#c9a227";
   return "#3bb6a6"; // image
 }
 
@@ -86,6 +87,8 @@ interface Props {
   razor: boolean;
   /** Split a layer at a time (used by the cut tool). */
   onSplitLayer: (id: number, tMs: number) => void;
+  /** Double-click a group layer to enter it and edit its children. */
+  onEnterGroup: (id: number) => void;
 }
 
 export default function Timeline({
@@ -104,6 +107,7 @@ export default function Timeline({
   onReorder,
   razor,
   onSplitLayer,
+  onEnterGroup,
 }: Props) {
   const tracksRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -410,6 +414,9 @@ export default function Timeline({
   };
 
   const onMouseDown = (e: React.MouseEvent) => {
+    // Prevent the browser from starting a text selection on the ruler's tick
+    // labels — dragging a selection also auto-scrolls the timeline.
+    e.preventDefault();
     seekFromX(e.clientX);
     const move = (ev: MouseEvent) => seekFromX(ev.clientX);
     const up = () => {
@@ -494,8 +501,13 @@ export default function Timeline({
                   ? " row-over"
                   : "")
               }
-              title="Click to select · Ctrl/Shift-click to multi-select · drag onto another layer to reorder"
+              title={
+                l.kind.kind === "group"
+                  ? "Group · double-click to enter · click to select · drag to reorder"
+                  : "Click to select · Ctrl/Shift-click to multi-select · drag onto another layer to reorder"
+              }
               onMouseDown={(e) => startRowDrag(e, l)}
+              onDoubleClick={() => l.kind.kind === "group" && onEnterGroup(l.id)}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.nativeEvent.stopPropagation();
@@ -567,6 +579,7 @@ export default function Timeline({
                   style={{ left: `${left}%`, width: `${width}%`, background: kindColor(l) }}
                   title={`${(sMs / 1000).toFixed(2)}s – ${(eMs / 1000).toFixed(2)}s · drag to move, edges to trim · right-click for effects`}
                   onMouseDown={(e) => startBlockDrag(e, l, "move")}
+                  onDoubleClick={() => l.kind.kind === "group" && onEnterGroup(l.id)}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     e.nativeEvent.stopPropagation();

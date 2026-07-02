@@ -233,6 +233,11 @@ pub enum LayerKind {
         #[serde(default, rename = "durationMs")]
         duration_ms: u32,
     },
+    /// A nested composition ("precomp"): a set of child layers composited as one
+    /// unit under this layer's own transform / opacity / effects / transition.
+    /// Children share the comp's time base. You "enter" the group to edit its
+    /// children on their own timeline, and can "explode" it to lift them back out.
+    Group { children: Vec<Layer> },
 }
 
 fn default_line_width() -> f32 {

@@ -30,10 +30,16 @@ import {
   addImageLayer,
   addVideoLayer,
   addAudioLayer,
+  placeLayer,
+  combineLayers,
+  explodeLayer,
+  enterGroup,
+  exitGroup,
   addShapeLayer,
   setCellImage,
   clearCellImage,
   setCellTransition,
+  setAllCellsTransition,
   setCellZoom,
   setGridVertices,
   setGridConstrain,
@@ -208,6 +214,9 @@ export default function App() {
   // Multi-selection of layers (timeline area): every selected id, with
   // `selectedId` as the primary (drives the inspector / preview transformer).
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  // Group-editing breadcrumb: each entry is a group we've descended into (root =
+  // empty). The Rust side swaps the editing scope; this is the UI trail.
+  const [groupPath, setGroupPath] = useState<{ id: number; name: string }[]>([]);
   // The media bin (imported image/video/audio paths, not necessarily placed yet).
   const [media, setMedia] = useState<string[]>([]);
   // Thumbnails for non-image media (video poster frames), path → data URL.
@@ -271,6 +280,8 @@ export default function App() {
   useEffect(() => { resolvedRef.current = resolved; }, [resolved]);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
   useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
+  const groupPathRef = useRef<{ id: number; name: string }[]>([]);
+  useEffect(() => { groupPathRef.current = groupPath; }, [groupPath]);
 
   // A compact snapshot of the scene (every layer's resolved transform + the
   // kind-specific bits) for the recorder.
@@ -546,11 +557,15 @@ export default function App() {
       filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
     });
     if (typeof selected !== "string") return;
-    const p = await addImageLayer(selected);
-    setProject(p);
+    const above = selectedIdRef.current;
+    let p = await addImageLayer(selected);
     // Select the layer we just added so it's ready to move/scale.
     const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
-    if (newId != null) setSelectedId(newId);
+    if (newId != null) {
+      p = await placeLayer(newId, Math.round(timeRef.current), above);
+      setSelectedId(newId);
+    }
+    setProject(p);
     await resolveImages(p);
     await applyTime(timeRef.current);
     recordAction("add_image", { layerId: newId, path: selected });
@@ -593,6 +608,8 @@ export default function App() {
 
   const onAddMediaToTimeline = useCallback(async (path: string) => {
     const kind = mediaKind(path);
+    // Capture the layer selected at add-time — the new one slots just above it.
+    const above = selectedIdRef.current;
     let p: Project;
     if (kind === "video") {
       const meta = await getVideoMeta(path).catch(() => ({ width: 1280, height: 720, durationMs: 0 }));
@@ -604,10 +621,14 @@ export default function App() {
       p = await addImageLayer(path);
       await resolveImages(p);
     }
+    const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
+    // Drop it at the playhead and directly above the previously selected layer.
+    if (newId != null) {
+      p = await placeLayer(newId, Math.round(timeRef.current), above);
+      setSelectedId(newId);
+    }
     setProject(p);
     durationRef.current = p.durationMs;
-    const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
-    if (newId != null) setSelectedId(newId);
     await applyTime(timeRef.current);
     recordAction("add_media", { layerId: newId, path, kind });
   }, [resolveImages, applyTime, recordAction]);
@@ -879,6 +900,24 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("set_cell_transition", { layerId, cell, slot, engine });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Apply (or clear) the same transition on EVERY cell of a grid at once.
+  const onSetAllCellsTransition = useCallback(
+    async (
+      layerId: number,
+      slot: "in" | "out",
+      durMs: number,
+      direction: number,
+      engine: string | null,
+      params: string | null
+    ) => {
+      const p = await setAllCellsTransition(layerId, slot, durMs, direction, engine, params);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("set_all_cells_transition", { layerId, slot, engine });
     },
     [applyTime, recordAction]
   );
@@ -1436,6 +1475,7 @@ export default function App() {
     });
     if (!path) return false;
     try {
+      await ensureRootScope(); // save the whole tree, not a group's inner scope
       await saveProjectFile(path);
       filePathRef.current = path;
       setFileName(baseName(path));
@@ -1454,6 +1494,7 @@ export default function App() {
       return doSaveAs();
     }
     try {
+      await ensureRootScope(); // save the whole tree, not a group's inner scope
       await saveProjectFile(filePathRef.current);
       setDirty(false);
       recordAction("save", { path: filePathRef.current });
@@ -1511,8 +1552,11 @@ export default function App() {
   // WebM transcoded by Rust/ffmpeg. `level` 1..5 = compression/bitrate.
   const onExport = useCallback(
     async (format: "mp4" | "webm", level: number, fps: number, burnFps: boolean) => {
-      let p = projectRef.current;
-      if (!p || exportingRef.current) return;
+      if (exportingRef.current) return;
+      // Render the whole comp, not a group's inner scope.
+      const rootP = await ensureRootScope();
+      let p = rootP ?? projectRef.current;
+      if (!p) return;
       // Persist the chosen frame rate as the comp's fps (keeps toolbar/preview in
       // sync and is what the capture runs at).
       if (fps !== p.fps) {
@@ -1922,6 +1966,85 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
+  // --- Groups (precomp) ---------------------------------------------------
+  // Combine the current multi-selection into a nested group and select it.
+  const onCombineLayers = useCallback(async () => {
+    const ids = selectedIdsRef.current;
+    if (ids.length < 2) return;
+    const p = await combineLayers(ids);
+    setProject(p);
+    durationRef.current = p.durationMs;
+    // The new group is the layer whose id is the max (freshly minted).
+    const newId = p.layers.reduce((m, l) => Math.max(m, l.id), 0);
+    setSelectedId(newId);
+    await resolveImages(p);
+    await applyTime(timeRef.current);
+    recordAction("combine_layers", { count: ids.length, groupId: newId });
+  }, [resolveImages, applyTime, recordAction]);
+
+  // Explode (ungroup) a group back into the current scope.
+  const onExplodeLayer = useCallback(async (groupId: number) => {
+    const p = await explodeLayer(groupId);
+    setProject(p);
+    durationRef.current = p.durationMs;
+    setSelectedId(null);
+    await resolveImages(p);
+    await applyTime(timeRef.current);
+    recordAction("explode_layer", { groupId });
+  }, [resolveImages, applyTime, recordAction]);
+
+  // Enter a group to edit its children (swaps the editing scope).
+  const onEnterGroup = useCallback(async (groupId: number) => {
+    const name = projectRef.current?.layers.find((l) => l.id === groupId)?.name ?? "Group";
+    const p = await enterGroup(groupId);
+    setProject(p);
+    durationRef.current = p.durationMs;
+    setGroupPath((cur) => [...cur, { id: groupId, name }]);
+    setSelectedId(null);
+    setSelectedIds([]);
+    await resolveImages(p);
+    await applyTime(timeRef.current);
+    recordAction("enter_group", { groupId });
+  }, [resolveImages, applyTime, recordAction]);
+
+  // Leave the current group (re-nesting the edits). `toDepth` exits repeatedly
+  // until the breadcrumb is that deep (used to pop to any crumb / to the root).
+  const onExitGroup = useCallback(async (toDepth = 0) => {
+    let p: Project | null = null;
+    let depth = groupPath.length;
+    while (depth > toDepth) {
+      p = await exitGroup();
+      depth -= 1;
+    }
+    if (!p) return;
+    setProject(p);
+    durationRef.current = p.durationMs;
+    setGroupPath((cur) => cur.slice(0, toDepth));
+    setSelectedId(null);
+    setSelectedIds([]);
+    await resolveImages(p);
+    await applyTime(timeRef.current);
+    recordAction("exit_group", { toDepth });
+  }, [groupPath, resolveImages, applyTime, recordAction]);
+
+  // Pop out of every group back to the root comp (re-nesting all edits). Call
+  // before save/export so the full tree is what's persisted/rendered.
+  const ensureRootScope = useCallback(async (): Promise<Project | null> => {
+    if (groupPathRef.current.length === 0) return null;
+    let p: Project | null = null;
+    for (let i = groupPathRef.current.length; i > 0; i--) p = await exitGroup();
+    setGroupPath([]);
+    setSelectedId(null);
+    setSelectedIds([]);
+    if (p) {
+      setProject(p);
+      durationRef.current = p.durationMs;
+      await resolveImages(p);
+      await applyTime(timeRef.current);
+    }
+    return p;
+  }, [resolveImages, applyTime]);
+
   const doUndo = useCallback(async () => {
     const p = await undo();
     if (!p) return;
@@ -2235,6 +2358,9 @@ export default function App() {
     selectedLayer?.kind.kind === "framegrid" && selectedCell != null && selectedCell.layerId === selectedId
       ? selectedLayer.kind.cells[selectedCell.cell] ?? null
       : null;
+  // Representative transitions for the "apply to all cells" control (cell 0).
+  const gridFirstCell =
+    selectedLayer?.kind.kind === "framegrid" ? selectedLayer.kind.cells[0] ?? null : null;
   // The image layer open in the isolated Effect Editor (if any).
   const fxLayer = fxEditorId != null ? project.layers.find((l) => l.id === fxEditorId) ?? null : null;
 
@@ -2448,6 +2574,32 @@ export default function App() {
         <button onClick={setKeyHere} disabled={!selectedLayer} title="Add keyframe at playhead">
           ◆ Key
         </button>
+        <button
+          onClick={onCombineLayers}
+          disabled={selectedIds.length < 2}
+          title="Combine the selected layers into a group (precomp)"
+        >
+          ⧉ Combine
+        </button>
+        {groupPath.length > 0 && (
+          <span className="group-crumbs" title="You're editing inside a group">
+            <button className="crumb" onClick={() => onExitGroup(0)} title="Back to the root comp">
+              ⌂ Root
+            </button>
+            {groupPath.map((g, i) => (
+              <span key={`${g.id}-${i}`}>
+                <span className="crumb-sep">›</span>
+                <button
+                  className="crumb"
+                  onClick={() => onExitGroup(i + 1)}
+                  title={`Go to ${g.name}`}
+                >
+                  {g.name}
+                </button>
+              </span>
+            ))}
+          </span>
+        )}
         <button onClick={doUndo} title="Undo (Ctrl+Z)">↶</button>
         <button onClick={doRedo} title="Redo (Ctrl+Shift+Z)">↷</button>
         <button
@@ -2523,6 +2675,7 @@ export default function App() {
             onLayerContextMenu={onLayerContextMenu}
             onPickCell={onPickCell}
             onMoveVertices={onMoveVertices}
+            onEnterGroup={onEnterGroup}
             exporting={exporting}
             fpsOverlay={fpsOverlay}
           />
@@ -2586,10 +2739,13 @@ export default function App() {
           cellEffects={cellEffects}
           cellTransitionIn={selectedGridCell?.transitionIn ?? null}
           cellTransitionOut={selectedGridCell?.transitionOut ?? null}
+          allCellsTransitionIn={gridFirstCell?.transitionIn ?? null}
+          allCellsTransitionOut={gridFirstCell?.transitionOut ?? null}
           onSetCellImage={onSetCellImage}
           onClearCellImage={onClearCellImage}
           onSetCellZoom={onSetCellZoom}
           onSetCellTransition={onSetCellTransition}
+          onSetAllCellsTransition={onSetAllCellsTransition}
           onSetGridConstrain={onSetGridConstrain}
           lineWidth={gridLineWidth}
           lineColor={gridLineColor}
@@ -2639,6 +2795,7 @@ export default function App() {
         onReorder={onReorder}
         razor={razor}
         onSplitLayer={onSplitLayer}
+        onEnterGroup={onEnterGroup}
       />
 
       {showRecorder && (
@@ -2724,6 +2881,15 @@ export default function App() {
                           },
                         ]
                       : [{ label: "Effects — image layers only" }]),
+                    ...(selectedIds.length >= 2
+                      ? [{ label: "⧉ Combine into group", onClick: () => onCombineLayers() }]
+                      : []),
+                    ...(project.layers.find((l) => l.id === ctxMenu.layerId)?.kind.kind === "group"
+                      ? [
+                          { label: "↳ Enter group", onClick: () => onEnterGroup(ctxMenu.layerId!) },
+                          { label: "⋆ Explode group", onClick: () => onExplodeLayer(ctxMenu.layerId!) },
+                        ]
+                      : []),
                     {
                       label: "⊘ Clear all keyframes",
                       onClick: () => onClearKeyframes(ctxMenu.layerId!),

@@ -1537,6 +1537,16 @@ interface Props {
     engine: string | null,
     params: string | null
   ) => void;
+  allCellsTransitionIn: Transition | null;
+  allCellsTransitionOut: Transition | null;
+  onSetAllCellsTransition: (
+    layerId: number,
+    slot: "in" | "out",
+    durMs: number,
+    direction: number,
+    engine: string | null,
+    params: string | null
+  ) => void;
   onSetGridConstrain: (layerId: number, mode: "freeform" | "rails") => void;
   lineWidth: number;
   lineColor: Rgba;
@@ -1591,6 +1601,9 @@ function FrameGridSection({
   cellTransitionIn,
   cellTransitionOut,
   onSetCellTransition,
+  allCellsTransitionIn,
+  allCellsTransitionOut,
+  onSetAllCellsTransition,
   onSetGridConstrain,
   lineWidth,
   lineColor,
@@ -1630,6 +1643,16 @@ function FrameGridSection({
   onSetCellTransition: (
     layerId: number,
     cell: number,
+    slot: "in" | "out",
+    durMs: number,
+    direction: number,
+    engine: string | null,
+    params: string | null
+  ) => void;
+  allCellsTransitionIn: Transition | null;
+  allCellsTransitionOut: Transition | null;
+  onSetAllCellsTransition: (
+    layerId: number,
     slot: "in" | "out",
     durMs: number,
     direction: number,
@@ -1728,8 +1751,14 @@ function FrameGridSection({
           </button>
         </div>
       </div>
+      <AllCellsTransitionsSection
+        layerId={layerId}
+        tin={allCellsTransitionIn}
+        tout={allCellsTransitionOut}
+        onSet={onSetAllCellsTransition}
+      />
       {selectedCell == null ? (
-        <p className="insp-hint">No cell selected.</p>
+        <p className="insp-hint">Click a cell to edit just that image. Transitions above apply to every cell.</p>
       ) : (
         <>
           <div style={{ margin: "4px 0" }}>
@@ -1895,6 +1924,101 @@ function CellTransitionsSection({
                   id={value}
                   paramsJson={paramsJson}
                   onChange={(json) => onSet(layerId, cell, slot, durMs, direction, value, json)}
+                />
+              </>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Apply one transition to EVERY cell of the grid at once (the "add a transition
+ *  to all the grid's images" control). Same engine library as per-cell / layer
+ *  transitions; writes to all cells in a single undo step. */
+function AllCellsTransitionsSection({
+  layerId,
+  tin,
+  tout,
+  onSet,
+}: {
+  layerId: number;
+  tin: Transition | null;
+  tout: Transition | null;
+  onSet: (
+    layerId: number,
+    slot: "in" | "out",
+    durMs: number,
+    direction: number,
+    engine: string | null,
+    params: string | null
+  ) => void;
+}) {
+  const slots: { slot: "in" | "out"; tr: Transition | null }[] = [
+    { slot: "in", tr: tin },
+    { slot: "out", tr: tout },
+  ];
+  return (
+    <div className="insp-body">
+      <div className="insp-sep">Transitions — all cells</div>
+      <p className="insp-hint" style={{ margin: 0 }}>
+        Applies the chosen transition to every image in the grid.
+      </p>
+      {slots.map(({ slot, tr }) => {
+        const durMs = tr?.durMs ?? 800;
+        const direction = tr?.direction ?? 0;
+        const paramsJson = tr?.params ?? null;
+        const value = tr?.engine ?? LEGACY_TO_ENGINE[tr?.kind ?? ""] ?? "none";
+        return (
+          <div key={slot} className="insp-field">
+            <span style={{ textTransform: "capitalize" }}>{slot}</span>
+            <select
+              value={value}
+              onChange={(e) => {
+                const id = e.target.value;
+                if (id === "none") onSet(layerId, slot, durMs, direction, null, null);
+                else onSet(layerId, slot, durMs, direction, id, id === value ? paramsJson : null);
+              }}
+            >
+              <option value="none">None</option>
+              {TRANSITION_GROUPS.map((g) => (
+                <optgroup key={g.category} label={g.category}>
+                  {g.items.map((it) => (
+                    <option key={it.id} value={it.id}>
+                      {it.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            {value !== "none" && (
+              <>
+                <div className="row2">
+                  <input
+                    type="number"
+                    min={0}
+                    max={10000}
+                    step={50}
+                    value={durMs}
+                    title="Duration (ms)"
+                    onChange={(e) => onSet(layerId, slot, Number(e.target.value), direction, value, paramsJson)}
+                  />
+                  <select
+                    value={direction}
+                    title="Direction"
+                    onChange={(e) => onSet(layerId, slot, durMs, Number(e.target.value), value, paramsJson)}
+                  >
+                    <option value={0}>From left</option>
+                    <option value={1}>From right</option>
+                    <option value={2}>From top</option>
+                    <option value={3}>From bottom</option>
+                  </select>
+                </div>
+                <TransitionVars
+                  id={value}
+                  paramsJson={paramsJson}
+                  onChange={(json) => onSet(layerId, slot, durMs, direction, value, json)}
                 />
               </>
             )}
@@ -2088,6 +2212,9 @@ export default function Inspector({
   cellTransitionIn,
   cellTransitionOut,
   onSetCellTransition,
+  allCellsTransitionIn,
+  allCellsTransitionOut,
+  onSetAllCellsTransition,
   onSetGridConstrain,
   lineWidth,
   lineColor,
@@ -2214,10 +2341,13 @@ export default function Inspector({
           lineColor={lineColor}
           cellTransitionIn={cellTransitionIn}
           cellTransitionOut={cellTransitionOut}
+          allCellsTransitionIn={allCellsTransitionIn}
+          allCellsTransitionOut={allCellsTransitionOut}
           onSetCellImage={onSetCellImage}
           onClearCellImage={onClearCellImage}
           onSetCellZoom={onSetCellZoom}
           onSetCellTransition={onSetCellTransition}
+          onSetAllCellsTransition={onSetAllCellsTransition}
           onSetGridConstrain={onSetGridConstrain}
           onSetGridLineWidth={onSetGridLineWidth}
           onSetGridLineColor={onSetGridLineColor}

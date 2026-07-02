@@ -704,6 +704,30 @@ body {
   opacity: 1;
 }
 
+/* Group (precomp) editing breadcrumb in the toolbar. */
+.group-crumbs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(201, 162, 39, 0.14);
+  border: 1px solid rgba(201, 162, 39, 0.5);
+}
+.group-crumbs .crumb {
+  padding: 1px 5px;
+  font-size: 12px;
+  background: transparent;
+  color: #e8c24a;
+}
+.group-crumbs .crumb:hover {
+  background: rgba(201, 162, 39, 0.25);
+}
+.group-crumbs .crumb-sep {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 /* OS file-drop overlay (shown while dragging files over the app). */
 .drop-overlay {
   position: fixed;
@@ -1383,6 +1407,9 @@ body {
   border-bottom: 1px solid var(--line);
   /* Scrubbing the playhead only happens here (over the times). */
   cursor: col-resize;
+  /* Never let a scrub-drag select the tick-label text (which auto-scrolls). */
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .tl-ruler-inner {

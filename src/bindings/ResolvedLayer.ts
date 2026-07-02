@@ -2,6 +2,7 @@
 import type { LetterTransform } from "./LetterTransform";
 import type { ResolvedEffect } from "./ResolvedEffect";
 import type { ResolvedFrameGrid } from "./ResolvedFrameGrid";
+import type { ResolvedGroup } from "./ResolvedGroup";
 import type { ResolvedShapeFrame } from "./ResolvedShapeFrame";
 import type { ResolvedSurface } from "./ResolvedSurface";
 import type { ResolvedTransition } from "./ResolvedTransition";
@@ -50,4 +51,9 @@ transition: ResolvedTransition | null,
  * Resolved multi-frame grid (cells + warped lattice) when this is a
  * `FrameGrid` layer. `None` for everything else.
  */
-frameGrid: ResolvedFrameGrid | null, };
+frameGrid: ResolvedFrameGrid | null, 
+/**
+ * Resolved child layers when this is a `Group` (precomp) — the frontend
+ * renders them nested under this layer's transform. `None` otherwise.
+ */
+group: ResolvedGroup | null, };

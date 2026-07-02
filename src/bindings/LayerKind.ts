@@ -5,6 +5,7 @@ import type { ConstrainMode } from "./ConstrainMode";
 import type { Font } from "./Font";
 import type { FrameCell } from "./FrameCell";
 import type { GridVertex } from "./GridVertex";
+import type { Layer } from "./Layer";
 import type { LetterAnimation } from "./LetterAnimation";
 import type { LetterOverride } from "./LetterOverride";
 import type { LinkedEffectGroup } from "./LinkedEffectGroup";
@@ -111,4 +112,4 @@ line_color: Rgba,
 /**
  * Keyframeable grid line colour. Empty = the static `line_color`.
  */
-lineColorKeys: Array<ColorKey>, } | { "kind": "video", src: string, width: number, height: number, durationMs: number, } | { "kind": "audio", src: string, durationMs: number, };
+lineColorKeys: Array<ColorKey>, } | { "kind": "video", src: string, width: number, height: number, durationMs: number, } | { "kind": "audio", src: string, durationMs: number, } | { "kind": "group", children: Array<Layer>, };

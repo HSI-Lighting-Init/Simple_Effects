@@ -862,6 +862,95 @@ function VideoNode({
   );
 }
 
+// A nested composition (precomp). Renders its resolved children read-only inside
+// a Konva Group carrying the group's own transform/opacity, so it moves/scales/
+// keyframes as one unit and its transition/effects apply to the whole thing. An
+// invisible hit rect (sized to the children's bounds) makes the group selectable
+// and draggable; double-click enters it to edit the children.
+function GroupNode({
+  layer,
+  r,
+  screenScale,
+  interaction,
+  registerRef,
+  selected,
+  onEnter,
+  renderChild,
+}: {
+  layer: Layer;
+  r: ResolvedLayer;
+  screenScale: number;
+  interaction: Interaction;
+  registerRef: NodeRef;
+  selected: boolean;
+  onEnter: (layerId: number) => void;
+  renderChild: (child: Layer, cr: ResolvedLayer | undefined) => ReactElement | null;
+}) {
+  const groupRef = useRef<Konva.Group | null>(null);
+  const [hit, setHit] = useState({ x: 0, y: 0, width: 0, height: 0 });
+  const resolvedChildren = r.group?.children ?? [];
+  const childLayers = layer.kind.kind === "group" ? layer.kind.children : [];
+
+  // Size the hit/selection rect to the children's bounding box after they render.
+  // Bail out when unchanged so we don't loop (getClientRect returns a fresh box).
+  useLayoutEffect(() => {
+    const g = groupRef.current;
+    if (!g) return;
+    const box = g.getClientRect({ relativeTo: g, skipStroke: true, skipShadow: true });
+    if (box.width <= 0 || box.height <= 0) return;
+    setHit((prev) =>
+      prev.x === box.x && prev.y === box.y && prev.width === box.width && prev.height === box.height
+        ? prev
+        : box
+    );
+  });
+
+  return (
+    <Group
+      ref={(n) => {
+        groupRef.current = n;
+        registerRef(n);
+      }}
+      x={r.x}
+      y={r.y}
+      scaleX={r.scaleX}
+      scaleY={r.scaleY}
+      rotation={r.rotation}
+      opacity={r.opacity}
+      listening={interaction.listening}
+      draggable={interaction.draggable}
+      onDragEnd={interaction.onDragEnd}
+      onTransformEnd={interaction.onTransformEnd}
+      onContextMenu={interaction.onContextMenu}
+    >
+      {/* Hit / drag area (children are read-only, so events fall through here). */}
+      <Rect
+        x={hit.x}
+        y={hit.y}
+        width={hit.width}
+        height={hit.height}
+        fill="#000"
+        opacity={0.001}
+        onClick={interaction.onClick}
+        onDblClick={() => onEnter(layer.id)}
+      />
+      {resolvedChildren.map((cr, i) => renderChild(childLayers[i], cr))}
+      {selected && (
+        <Rect
+          x={hit.x}
+          y={hit.y}
+          width={hit.width}
+          height={hit.height}
+          stroke="#e08a3c"
+          strokeWidth={1.5 * screenScale}
+          dash={[6 * screenScale, 4 * screenScale]}
+          listening={false}
+        />
+      )}
+    </Group>
+  );
+}
+
 type DrawCtx = Parameters<typeof drawSurface>[0];
 
 /** Stroke a closed polygon of comp-space points on a Konva context. */
@@ -1770,6 +1859,8 @@ interface Props {
   onPickCell: (layerId: number, cell: number) => void;
   /** Commit dragged grid vertices (new local positions, keyframed at playhead). */
   onMoveVertices: (layerId: number, updates: { index: number; x: number; y: number }[]) => Promise<void>;
+  /** Double-click a group (precomp) to enter it and edit its children. */
+  onEnterGroup: (layerId: number) => void;
   exporting?: boolean;
   /** When set (during export with "show FPS" on), burn this fps value into the
    *  rendered frames as a corner label. Null = no overlay. */
@@ -1799,6 +1890,7 @@ export default function Preview({
   onLayerContextMenu,
   onPickCell,
   onMoveVertices,
+  onEnterGroup,
   exporting = false,
   fpsOverlay = null,
   stageRef,
@@ -1906,6 +1998,170 @@ export default function Preview({
   // fit-to-comp layer scale.
   const h = scale > 0 ? 1 / scale : 1;
 
+  // Non-interactive handlers for read-only rendering (group children at rest).
+  const readonlyInteraction: Interaction = {
+    listening: false,
+    draggable: false,
+    onClick: () => {},
+    onDragEnd: () => {},
+    onTransformEnd: () => {},
+    onContextMenu: () => {},
+  };
+  const noopRef: NodeRef = () => {};
+
+  // Render one layer's visual node. `interactive` = the top-level scope (select /
+  // drag / keyframe); `false` for a group's children, which draw read-only under
+  // the group's transform. Recurses for nested groups.
+  const renderLayer = (
+    layer: Layer,
+    r: ResolvedLayer | undefined,
+    interactive: boolean
+  ): ReactElement | null => {
+    if (!r || !r.visible) return null;
+    const k = layer.kind;
+    const inter = interactive ? interaction(layer.id) : readonlyInteraction;
+    const flatInter = interactive ? flatImageInteraction(layer.id) : readonlyInteraction;
+    const reg = interactive ? register(layer.id) : noopRef;
+    const isSel = interactive && selectedId === layer.id;
+    let node: ReactElement;
+    if (r.surface) {
+      node = (
+        <DecalNode
+          layer={layer}
+          src={k.kind === "image" ? images[k.src] : undefined}
+          r={r}
+          listening={interactive && !playing}
+          selected={isSel}
+          screenScale={h}
+          onSelect={interactive ? onSelect : () => {}}
+          onImageDrop={onImageDrop}
+          onDecalScale={onDecalScale}
+        />
+      );
+    } else if (k.kind === "colorpatch") {
+      node = (
+        <Rect
+          ref={reg}
+          x={r.x}
+          y={r.y}
+          width={k.width}
+          height={k.height}
+          offsetX={k.width / 2}
+          offsetY={k.height / 2}
+          fill={rgbaCss(k.color)}
+          scaleX={r.scaleX}
+          scaleY={r.scaleY}
+          rotation={r.rotation}
+          opacity={r.opacity}
+          globalCompositeOperation={composite(k.blend)}
+          {...inter}
+        />
+      );
+    } else if (k.kind === "text") {
+      node = (
+        <TextGlyphs
+          layerId={layer.id}
+          content={k.content}
+          size={k.size}
+          font={k.font}
+          fill={rgbaCss(r.color ?? k.color)}
+          color={r.color ?? k.color}
+          style={k.style}
+          layerStyles={k.layerStyles}
+          perChar3d={k.perChar3d}
+          r={r}
+          interaction={inter}
+          registerRef={reg}
+          parts={k.parts}
+          timeMs={timeMs}
+          decompose={interactive && decomposeId === layer.id}
+          selectedPart={interactive && decomposeId === layer.id ? selectedPart : null}
+          handleScale={h}
+          onSelectPart={interactive ? onSelectPart : () => {}}
+          onCommitPart={onCommitPart}
+        />
+      );
+    } else if (k.kind === "shape3d") {
+      node = (
+        <ShapeNode
+          layerId={layer.id}
+          r={r}
+          selected={isSel}
+          interaction={inter}
+          registerRef={reg}
+          screenScale={h}
+          onContextMenu={onShapeContextMenu}
+          exporting={exporting}
+        />
+      );
+    } else if (k.kind === "framegrid") {
+      node = (
+        <FrameGridNode
+          layer={layer}
+          r={r}
+          images={images}
+          interaction={inter}
+          registerRef={reg}
+          selected={isSel}
+          screenScale={h}
+          onPickCell={interactive ? onPickCell : () => {}}
+          onMoveVertices={onMoveVertices}
+        />
+      );
+    } else if (k.kind === "video") {
+      node = (
+        <VideoNode
+          layerId={layer.id}
+          src={k.src}
+          r={r}
+          playing={playing}
+          timeMs={timeMs}
+          layerStartMs={layer.startMs}
+          durationMs={k.durationMs ?? 0}
+          interaction={inter}
+          registerRef={reg}
+        />
+      );
+    } else if (k.kind === "audio") {
+      return null; // no visual
+    } else if (k.kind === "group") {
+      node = (
+        <GroupNode
+          layer={layer}
+          r={r}
+          screenScale={h}
+          interaction={inter}
+          registerRef={reg}
+          selected={isSel}
+          onEnter={interactive ? onEnterGroup : () => {}}
+          renderChild={(child, cr) => renderLayer(child, cr, false)}
+        />
+      );
+    } else {
+      const src = k.kind === "image" ? images[k.src] : undefined;
+      node =
+        r.transition?.engine && src ? (
+          <TransitionImageNode src={src} r={r} transition={r.transition} interaction={flatInter} registerRef={reg} />
+        ) : r.effects.length > 0 ? (
+          <EffectImageNode src={src} r={r} interaction={flatInter} registerRef={reg} />
+        ) : (
+          <ImageNode src={src} r={r} interaction={flatInter} registerRef={reg} />
+        );
+    }
+    // Engine transitions on a flat image / grid bake themselves into the node
+    // above; everything else uses the legacy transition group wrap.
+    const engineHandled =
+      !!r.transition?.engine && !r.surface && (k.kind === "image" || k.kind === "framegrid");
+    const tp = engineHandled ? null : transitionGroupProps(r.transition, project.width, project.height);
+    return tp ? (
+      <Group key={layer.id} {...tp}>
+        {node}
+      </Group>
+    ) : (
+      <Group key={layer.id}>{node}</Group>
+    );
+  };
+
   return (
     <div ref={wrapRef} className="preview-wrap">
       {scale > 0 && (
@@ -1932,160 +2188,7 @@ export default function Preview({
                 <Rect x={project.width} y={0} width={pbR - project.width} height={project.height} fill="rgba(0,0,0,0.5)" listening={false} />
               </>
             )}
-            {project.layers.map((layer) => {
-              const r = resolved[layer.id];
-              if (!r || !r.visible) return null;
-              const k = layer.kind;
-              let node: ReactElement;
-              // Pinned to a shape (image or text) → render as a decal on its
-              // surface, regardless of the layer kind.
-              if (r.surface) {
-                node = (
-                  <DecalNode
-                    layer={layer}
-                    src={k.kind === "image" ? images[k.src] : undefined}
-                    r={r}
-                    listening={!playing}
-                    selected={selectedId === layer.id}
-                    screenScale={h}
-                    onSelect={onSelect}
-                    onImageDrop={onImageDrop}
-                    onDecalScale={onDecalScale}
-                  />
-                );
-              } else if (k.kind === "colorpatch") {
-                node = (
-                  <Rect
-                    ref={register(layer.id)}
-                    x={r.x}
-                    y={r.y}
-                    width={k.width}
-                    height={k.height}
-                    offsetX={k.width / 2}
-                    offsetY={k.height / 2}
-                    fill={rgbaCss(k.color)}
-                    scaleX={r.scaleX}
-                    scaleY={r.scaleY}
-                    rotation={r.rotation}
-                    opacity={r.opacity}
-                    globalCompositeOperation={composite(k.blend)}
-                    {...interaction(layer.id)}
-                  />
-                );
-              } else if (k.kind === "text") {
-                node = (
-                  <TextGlyphs
-                    layerId={layer.id}
-                    content={k.content}
-                    size={k.size}
-                    font={k.font}
-                    fill={rgbaCss(r.color ?? k.color)}
-                    color={r.color ?? k.color}
-                    style={k.style}
-                    layerStyles={k.layerStyles}
-                    perChar3d={k.perChar3d}
-                    r={r}
-                    interaction={interaction(layer.id)}
-                    registerRef={register(layer.id)}
-                    parts={k.parts}
-                    timeMs={timeMs}
-                    decompose={decomposeId === layer.id}
-                    selectedPart={decomposeId === layer.id ? selectedPart : null}
-                    handleScale={h}
-                    onSelectPart={onSelectPart}
-                    onCommitPart={onCommitPart}
-                  />
-                );
-              } else if (k.kind === "shape3d") {
-                node = (
-                  <ShapeNode
-                    layerId={layer.id}
-                    r={r}
-                    selected={selectedId === layer.id}
-                    interaction={interaction(layer.id)}
-                    registerRef={register(layer.id)}
-                    screenScale={h}
-                    onContextMenu={onShapeContextMenu}
-                    exporting={exporting}
-                  />
-                );
-              } else if (k.kind === "framegrid") {
-                node = (
-                  <FrameGridNode
-                    layer={layer}
-                    r={r}
-                    images={images}
-                    interaction={interaction(layer.id)}
-                    registerRef={register(layer.id)}
-                    selected={selectedId === layer.id}
-                    screenScale={h}
-                    onPickCell={onPickCell}
-                    onMoveVertices={onMoveVertices}
-                  />
-                );
-              } else if (k.kind === "video") {
-                node = (
-                  <VideoNode
-                    layerId={layer.id}
-                    src={k.src}
-                    r={r}
-                    playing={playing}
-                    timeMs={timeMs}
-                    layerStartMs={layer.startMs}
-                    durationMs={k.durationMs ?? 0}
-                    interaction={interaction(layer.id)}
-                    registerRef={register(layer.id)}
-                  />
-                );
-              } else if (k.kind === "audio") {
-                // Audio has no visual — it's played by the AudioLayers controller.
-                return null;
-              } else {
-                // A flat image (not pinned) — draggable onto a shape to pin it.
-                // With effects it goes through the effect renderer. An in/out
-                // transition-engine effect renders through TransitionImageNode.
-                const src = k.kind === "image" ? images[k.src] : undefined;
-                node =
-                  r.transition?.engine && src ? (
-                    <TransitionImageNode
-                      src={src}
-                      r={r}
-                      transition={r.transition}
-                      interaction={flatImageInteraction(layer.id)}
-                      registerRef={register(layer.id)}
-                    />
-                  ) : r.effects.length > 0 ? (
-                    <EffectImageNode
-                      src={src}
-                      r={r}
-                      interaction={flatImageInteraction(layer.id)}
-                      registerRef={register(layer.id)}
-                    />
-                  ) : (
-                    <ImageNode
-                      src={src}
-                      r={r}
-                      interaction={flatImageInteraction(layer.id)}
-                      registerRef={register(layer.id)}
-                    />
-                  );
-              }
-              // Wrap in a transition group for the legacy (non-engine) kinds.
-              // Engine transitions on a flat image are already baked into the
-              // node above, so skip the group wrap for those.
-              const engineHandled =
-                !!r.transition?.engine && !r.surface && (k.kind === "image" || k.kind === "framegrid");
-              const tp = engineHandled
-                ? null
-                : transitionGroupProps(r.transition, project.width, project.height);
-              return tp ? (
-                <Group key={layer.id} {...tp}>
-                  {node}
-                </Group>
-              ) : (
-                <Group key={layer.id}>{node}</Group>
-              );
-            })}
+            {project.layers.map((layer) => renderLayer(layer, resolved[layer.id], true))}
 
             {/* Burned-in FPS label for the rendered video (export only). Placed
                 in comp space so it scales with the frame; drawn last = on top. */}
