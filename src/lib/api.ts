@@ -9,6 +9,7 @@ import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { Font } from "../bindings/Font";
 import type { Rgba } from "../bindings/Rgba";
 import type { SurfaceShape } from "../bindings/SurfaceShape";
+import type { ConstrainMode } from "../bindings/ConstrainMode";
 import type { TextStyle } from "../bindings/TextStyle";
 import type { TextAnimator } from "../bindings/TextAnimator";
 import type { TextLayerStyles } from "../bindings/TextLayerStyles";
@@ -183,6 +184,48 @@ export const setTextAnim = (layerId: number, anim: LetterAnimation | null) =>
 /** Add an invisible 3D box/cylinder object that images can be pinned to. */
 export const addShapeLayer = (shape: SurfaceShape) =>
   invoke<Project>("add_shape_layer", { shape });
+
+/** Add a multi-frame grid (rows×cols) of image cells. */
+export const addFrameGrid = (rows: number, cols: number) =>
+  invoke<Project>("add_frame_grid", { rows, cols });
+
+/** Set (or replace) the image in one grid cell (row-major index). */
+export const setCellImage = (layerId: number, cell: number, path: string) =>
+  invoke<Project>("set_cell_image", { layerId, cell, path });
+
+/** Clear the image from one grid cell. */
+export const clearCellImage = (layerId: number, cell: number) =>
+  invoke<Project>("clear_cell_image", { layerId, cell });
+
+/** Keyframe a grid cell's image zoom at the playhead (1 = fit, >1 = zoomed in). */
+export const setCellZoom = (
+  layerId: number,
+  cell: number,
+  zoom: number,
+  tMs: number,
+  seedStart: boolean
+) => invoke<Project>("set_cell_zoom", { layerId, cell, zoom, tMs, seedStart });
+
+/** Move grid lattice vertices to new local positions (keyframed at the playhead).
+ *  Each update is the new absolute local (x,y) for the vertex `index`. */
+export const setGridVertices = (
+  layerId: number,
+  updates: { index: number; x: number; y: number }[],
+  tMs: number,
+  seedStart: boolean
+) => invoke<Project>("set_grid_vertices", { layerId, updates, tMs, seedStart });
+
+/** Set a grid's vertex-drag constraint mode. */
+export const setGridConstrain = (layerId: number, mode: ConstrainMode) =>
+  invoke<Project>("set_grid_constrain", { layerId, mode });
+
+/** Merge a grid cell with its neighbour ("right" or "down") into a merged block. */
+export const mergeCell = (layerId: number, cell: number, dir: "right" | "down") =>
+  invoke<Project>("merge_cell", { layerId, cell, dir });
+
+/** Split a merged cell back into single slots. */
+export const splitCell = (layerId: number, cell: number) =>
+  invoke<Project>("split_cell", { layerId, cell });
 
 /** Set a shape's dimensions + camera (rotations are keyframed separately). */
 export const setShapeParams = (

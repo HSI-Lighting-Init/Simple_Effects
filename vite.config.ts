@@ -4,9 +4,17 @@ import react from "@vitejs/plugin-react";
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
+// A build stamp baked in at compile time, shown in the app header so it's
+// unambiguous whether a running binary reflects the latest build (kills the
+// "did you launch the fresh exe?" guessing).
+const BUILD_STAMP = new Date().toISOString().slice(0, 19).replace("T", " ");
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react()],
+  define: {
+    __BUILD_STAMP__: JSON.stringify(BUILD_STAMP),
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

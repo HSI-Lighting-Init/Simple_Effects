@@ -158,6 +158,19 @@ export function drawSurface(
 }
 
 /**
+ * Paint a single textured quad (used by the multi-frame grid, where each cell is
+ * one quad with its own image). Mirrors `drawSurface` but for a lone quad, and
+ * multiplies into whatever alpha the enclosing Group already set.
+ */
+export function drawTexturedQuad(ctx: KCtx, img: Texture, quad: SurfaceQuad, alpha = 1) {
+  const iw = img instanceof HTMLImageElement ? img.naturalWidth || img.width : img.width;
+  const ih = img instanceof HTMLImageElement ? img.naturalHeight || img.height : img.height;
+  if (!iw || !ih) return;
+  const base = (typeof ctx.globalAlpha === "number" ? ctx.globalAlpha : 1) * alpha;
+  drawQuad(ctx, img, iw, ih, quad, base);
+}
+
+/**
  * Inverse-map a comp-space point onto `(u, v)` of a projected face quad
  * (perspective-correct). `quad` is the face rectangle in UV order
  * `[TL(0,0), TR(1,0), BR(1,1), BL(0,1)]`. Returns null on a degenerate quad.

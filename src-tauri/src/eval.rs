@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::model::{
-    AnimSelector, ColorKey, Easing, Effect, LayerKind, LetterAnimation, LetterPreset, Project,
-    RangeShape, Rgba, SelectorKind, TextAnimator, Track, TransitionKind,
+    AnimSelector, ColorKey, Easing, Effect, FitMode, GridVertex, LayerKind, LetterAnimation,
+    LetterPreset, Project, RangeShape, Rgba, SelectorKind, TextAnimator, Track, TransitionKind,
 };
-use crate::surface::{self, ResolvedShapeFrame, ResolvedSurface, ShapeState};
+use crate::surface::{self, QuadVertex, ResolvedShapeFrame, ResolvedSurface, ShapeState, SurfaceQuad, Vec2};
 
 /// A layer's transform fully resolved at one instant in time. Field names are
 /// camelCase so they map straight onto Konva node props on the frontend.
@@ -49,6 +49,192 @@ pub struct ResolvedLayer {
     /// Active in/out transition at this time (factor 0 = fully transitioned /
     /// hidden, 1 = fully present). `None` outside any transition window.
     pub transition: Option<ResolvedTransition>,
+    /// Resolved multi-frame grid (cells + warped lattice) when this is a
+    /// `FrameGrid` layer. `None` for everything else.
+    pub frame_grid: Option<ResolvedFrameGrid>,
+}
+
+/// A `FrameGrid` resolved at one instant: the (possibly warped) vertex lattice
+/// plus one paint-ready cell per grid cell. Geometry is in LAYER-LOCAL px
+/// (centred on the origin); the frontend draws it under the layer's transform.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ResolvedFrameGrid {
+    pub rows: u32,
+    pub cols: u32,
+    /// The lattice in layer-local px (row-major, (rows+1)*(cols+1)) — for the
+    /// mesh overlay + editing handles.
+    pub vertices: Vec<Vec2>,
+    pub cells: Vec<ResolvedFrameCell>,
+}
+
+/// One resolved grid cell: a flat local-space quad (hw = 1), its image source +
+/// natural size, fit mode, and its effect stack sampled at this time.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ResolvedFrameCell {
+    pub quad: SurfaceQuad,
+    pub src: Option<String>,
+    pub img_w: f32,
+    pub img_h: f32,
+    pub fit: FitMode,
+    /// Zoom sampled at this time (for the inspector's slider readout).
+    pub zoom: f32,
+    /// Grid position + merge spans (so the frontend can map a cell back to its
+    /// lattice vertices for live-warp, and know its size).
+    pub row: u32,
+    pub col: u32,
+    pub row_span: u32,
+    pub col_span: u32,
+    /// True when this slot is absorbed into another cell's merged block — the
+    /// frontend skips it (no draw, no gridline, not clickable).
+    pub covered: bool,
+    pub effects: Vec<ResolvedEffect>,
+}
+
+/// Resolve a `FrameGrid` at `t_ms`: sample each vertex's warp offset, build the
+/// local-space lattice, and emit one quad per cell (with UVs adjusted for the
+/// cell's fit mode). `cells`/`vertices` shorter than expected are padded with
+/// defaults so a freshly-created grid (empty `vertices`) renders a regular mesh.
+#[allow(clippy::too_many_arguments)]
+fn resolve_frame_grid(
+    rows: u32,
+    cols: u32,
+    cell_w: f32,
+    cell_h: f32,
+    vertices: &[GridVertex],
+    cells: &[crate::model::FrameCell],
+    t_ms: u32,
+) -> ResolvedFrameGrid {
+    let vcols = cols + 1;
+    let vrows = rows + 1;
+    let grid_w = cols as f32 * cell_w;
+    let grid_h = rows as f32 * cell_h;
+    // Vertex positions in local space (centred), with the sampled warp offset.
+    let mut pts: Vec<Vec2> = Vec::with_capacity((vrows * vcols) as usize);
+    for r in 0..vrows {
+        for c in 0..vcols {
+            let base_x = c as f32 * cell_w - grid_w / 2.0;
+            let base_y = r as f32 * cell_h - grid_h / 2.0;
+            let (dx, dy) = vertices
+                .get((r * vcols + c) as usize)
+                .map(|gv| (sample_track(&gv.dx, t_ms), sample_track(&gv.dy, t_ms)))
+                .unwrap_or((0.0, 0.0));
+            pts.push(Vec2 { x: base_x + dx, y: base_y + dy });
+        }
+    }
+
+    // Merge layout: which slots are covered, and each master's effective spans.
+    let (covered, spans) = crate::model::grid_layout(rows, cols, cells);
+
+    let mut out_cells: Vec<ResolvedFrameCell> = Vec::with_capacity((rows * cols) as usize);
+    for r in 0..rows {
+        for c in 0..cols {
+            let idx = (r * cols + c) as usize;
+            if covered[idx] {
+                // Absorbed into a merged block → a placeholder the frontend skips.
+                out_cells.push(ResolvedFrameCell {
+                    quad: SurfaceQuad { corners: Vec::new(), opacity: 0.0, subdiv: 1 },
+                    src: None,
+                    img_w: 0.0,
+                    img_h: 0.0,
+                    fit: FitMode::Cover,
+                    zoom: 1.0,
+                    row: r,
+                    col: c,
+                    row_span: 1,
+                    col_span: 1,
+                    covered: true,
+                    effects: Vec::new(),
+                });
+                continue;
+            }
+            let (rs, cs) = spans[idx];
+            // Block outer corners from the lattice (spanning merged slots).
+            let tl = pts[(r * vcols + c) as usize];
+            let tr = pts[(r * vcols + c + cs) as usize];
+            let br = pts[((r + rs) * vcols + c + cs) as usize];
+            let bl = pts[((r + rs) * vcols + c) as usize];
+            let cell = cells.get(idx);
+            let (src, img_w, img_h, fit, zoom, effects) = match cell {
+                Some(cell) => (
+                    cell.src.clone(),
+                    cell.img_w as f32,
+                    cell.img_h as f32,
+                    cell.fit,
+                    sample_track(&cell.zoom, t_ms),
+                    cell.effects.iter().map(|e| resolve_effect(e, t_ms)).collect(),
+                ),
+                None => (None, 0.0, 0.0, FitMode::Cover, 1.0, Vec::new()),
+            };
+            // Fit against the merged block's aspect, then apply zoom.
+            let block_w = cs as f32 * cell_w;
+            let block_h = rs as f32 * cell_h;
+            let (u0, v0, u1, v1) = zoom_uvs(fit_uvs(fit, block_w, block_h, img_w, img_h), zoom);
+            let corners = vec![
+                QuadVertex { hx: tl.x, hy: tl.y, hw: 1.0, u: u0, v: v0 },
+                QuadVertex { hx: tr.x, hy: tr.y, hw: 1.0, u: u1, v: v0 },
+                QuadVertex { hx: br.x, hy: br.y, hw: 1.0, u: u1, v: v1 },
+                QuadVertex { hx: bl.x, hy: bl.y, hw: 1.0, u: u0, v: v1 },
+            ];
+            out_cells.push(ResolvedFrameCell {
+                quad: SurfaceQuad { corners, opacity: 1.0, subdiv: 3 },
+                src,
+                img_w,
+                img_h,
+                fit,
+                zoom,
+                row: r,
+                col: c,
+                row_span: rs,
+                col_span: cs,
+                covered: false,
+                effects,
+            });
+        }
+    }
+    ResolvedFrameGrid { rows, cols, vertices: pts, cells: out_cells }
+}
+
+/// Scale a UV sub-rect about its centre by `zoom` (>1 = zoom in / crop tighter,
+/// <1 = zoom out). The window shrinks by 1/zoom so the image appears larger.
+fn zoom_uvs(uv: (f32, f32, f32, f32), zoom: f32) -> (f32, f32, f32, f32) {
+    let z = zoom.max(0.01);
+    let (u0, v0, u1, v1) = uv;
+    let cu = (u0 + u1) / 2.0;
+    let cv = (v0 + v1) / 2.0;
+    let hu = (u1 - u0) / 2.0 / z;
+    let hv = (v1 - v0) / 2.0 / z;
+    (cu - hu, cv - hv, cu + hu, cv + hv)
+}
+
+/// Texture UV sub-rect (u0,v0,u1,v1) for a fit mode. Cover crops the longer axis;
+/// contain would need transparent margins (handled renderer-side) so it maps the
+/// full texture like stretch here and the renderer letterboxes.
+fn fit_uvs(fit: FitMode, cell_w: f32, cell_h: f32, img_w: f32, img_h: f32) -> (f32, f32, f32, f32) {
+    if img_w <= 0.0 || img_h <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
+        return (0.0, 0.0, 1.0, 1.0);
+    }
+    match fit {
+        FitMode::Stretch | FitMode::Contain => (0.0, 0.0, 1.0, 1.0),
+        FitMode::Cover => {
+            let cell_a = cell_w / cell_h;
+            let img_a = img_w / img_h;
+            if img_a > cell_a {
+                // Image is wider than the cell → crop left/right.
+                let keep = cell_a / img_a; // fraction of width to keep
+                let m = (1.0 - keep) / 2.0;
+                (m, 0.0, 1.0 - m, 1.0)
+            } else {
+                // Image is taller → crop top/bottom.
+                let keep = img_a / cell_a; // fraction of height to keep
+                let m = (1.0 - keep) / 2.0;
+                (0.0, m, 1.0, 1.0 - m)
+            }
+        }
+    }
 }
 
 /// A layer's in/out transition resolved at a point in time.
@@ -74,9 +260,14 @@ fn resolve_transition(layer: &crate::model::Layer, t_ms: u32) -> Option<Resolved
     let mut direction = 0u8;
     let mut engine: Option<String> = None;
     let mut params: Option<String> = None;
+    // A transition can't be longer than the clip it plays over, or it never
+    // finishes (progress stays near 0) and you only ever see its opening — which
+    // reads as a slow fade. Clamp each window to the layer's span.
+    let span = layer.end_ms.saturating_sub(layer.start_ms).max(1);
     if let Some(ti) = &layer.transition_in {
-        if ti.dur_ms > 0 && t_ms < layer.start_ms + ti.dur_ms {
-            let u = t_ms.saturating_sub(layer.start_ms) as f32 / ti.dur_ms as f32;
+        let dur = ti.dur_ms.min(span);
+        if dur > 0 && t_ms < layer.start_ms + dur {
+            let u = t_ms.saturating_sub(layer.start_ms) as f32 / dur as f32;
             let f = ease(Easing::EaseInOut, u);
             if f < factor {
                 factor = f;
@@ -88,9 +279,10 @@ fn resolve_transition(layer: &crate::model::Layer, t_ms: u32) -> Option<Resolved
         }
     }
     if let Some(to) = &layer.transition_out {
-        let start_out = layer.end_ms.saturating_sub(to.dur_ms);
-        if to.dur_ms > 0 && t_ms > start_out {
-            let u = layer.end_ms.saturating_sub(t_ms) as f32 / to.dur_ms as f32;
+        let dur = to.dur_ms.min(span);
+        let start_out = layer.end_ms.saturating_sub(dur);
+        if dur > 0 && t_ms > start_out {
+            let u = layer.end_ms.saturating_sub(t_ms) as f32 / dur as f32;
             let f = ease(Easing::EaseInOut, u);
             if f < factor {
                 factor = f;
@@ -453,6 +645,14 @@ pub fn evaluate(
             let effects: Vec<ResolvedEffect> =
                 layer.effects.iter().map(|e| resolve_effect(e, t_ms)).collect();
 
+            // FrameGrid → its resolved (warped) lattice + per-cell quads.
+            let frame_grid = match &layer.kind {
+                LayerKind::FrameGrid { rows, cols, cell_w, cell_h, vertices, cells, .. } => Some(
+                    resolve_frame_grid(*rows, *cols, *cell_w, *cell_h, vertices, cells, t_ms),
+                ),
+                _ => None,
+            };
+
             // A decal is baked into comp space, so its image-layer transform is
             // identity (only opacity still applies). Everything else uses its own
             // resolved transform.
@@ -472,6 +672,7 @@ pub fn evaluate(
                 shape,
                 effects,
                 transition: resolve_transition(layer, t_ms),
+                frame_grid,
             }
         })
         .collect()

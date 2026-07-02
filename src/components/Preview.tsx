@@ -5,7 +5,7 @@
 // transform ends, the changed properties are committed as keyframes at the
 // current playhead time (via onCommit) — that's what turns a manual edit into
 // animation. The component still owns no interpolation math.
-import { useEffect, useLayoutEffect, useRef, useState, type ReactElement } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactElement, type Ref } from "react";
 import {
   Stage,
   Layer as KLayer,
@@ -24,7 +24,7 @@ import Konva from "konva";
 import { getShaped } from "../lib/api";
 import type { LetterPose } from "../lib/api";
 import { sampleTrack, sampleColor } from "../lib/track";
-import { drawSurface } from "../lib/surface3d";
+import { drawSurface, drawTexturedQuad } from "../lib/surface3d";
 import type { Texture } from "../lib/surface3d";
 import { applyEffects } from "../lib/effects";
 import { createTransition, getTransitionMeta } from "../lib/transitions";
@@ -306,19 +306,31 @@ function TransitionImageNode({
             outWidth: w,
             outHeight: h,
             direction: dir,
+            // This is always a single-clip transition (the other side is empty),
+            // so distortion transitions drive themselves instead of a crossfade.
+            solo: true,
             ...userParams,
           });
           // Feature-A transitions run in reverse: the clip (on A) is fully present
           // at f=1 (progress 0) and gone at f=0 (progress 1), so it assembles in /
           // breaks apart with the window instead of just fading.
           tr.render(off, featureA ? 1 - f : f);
-          c.globalAlpha = fromEmpty;
-          c.drawImage(off, 0, 0);
-          if (toPlain > 0) {
-            c.globalAlpha = toPlain; // converge onto the exact resting frame
-            c.drawImage(texB, 0, 0);
+          if (featureA) {
+            // The effect itself carries the transition (the clip disintegrates /
+            // folds / distorts, or is opaque and resolves). Drawing it through the
+            // seam alpha ramp would just fade it — which, on a long transition,
+            // is ALL you'd see. So draw it straight; it already lands on the clean
+            // clip at f=1 and on transparency/scramble at f=0.
+            c.drawImage(off, 0, 0);
+          } else {
+            c.globalAlpha = fromEmpty;
+            c.drawImage(off, 0, 0);
+            if (toPlain > 0) {
+              c.globalAlpha = toPlain; // converge onto the exact resting frame
+              c.drawImage(texB, 0, 0);
+            }
+            c.globalAlpha = 1;
           }
-          c.globalAlpha = 1;
         } catch {
           // Unknown/failed transition → fall back to a plain opacity fade.
           c.globalAlpha = f;
@@ -728,6 +740,295 @@ function strokePoly(ctx: DrawCtx, pts: { x: number; y: number }[]) {
   ctx.beginPath();
   pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
   ctx.closePath();
+}
+
+/** Load a set of image URLs (data URLs) into decoded HTMLImageElements. Used by
+ *  the multi-frame grid, where each cell has its own image. */
+function useImageMap(urls: string[]): Map<string, HTMLImageElement> {
+  const [map, setMap] = useState<Map<string, HTMLImageElement>>(new Map());
+  const key = urls.join("|");
+  useEffect(() => {
+    const uniq = [...new Set(urls.filter(Boolean))];
+    if (uniq.length === 0) {
+      setMap(new Map());
+      return;
+    }
+    let alive = true;
+    const next = new Map<string, HTMLImageElement>();
+    let pending = uniq.length;
+    const done = () => {
+      if (--pending === 0 && alive) setMap(next);
+    };
+    for (const u of uniq) {
+      const im = new window.Image();
+      im.onload = () => {
+        next.set(u, im);
+        done();
+      };
+      im.onerror = done;
+      im.src = u;
+    }
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  return map;
+}
+
+/** A quad's 4 corners as flat local-space points (grids use hw = 1). */
+function quadPts(q: { corners: { hx: number; hy: number; hw: number }[] }): { x: number; y: number }[] {
+  return q.corners.map((c) => ({ x: c.hx / (c.hw || 1), y: c.hy / (c.hw || 1) }));
+}
+
+/** Point-in-polygon (ray cast) for locating which cell was clicked. */
+function pointInPoly(px: number, py: number, pts: { x: number; y: number }[]): boolean {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const a = pts[i], b = pts[j];
+    if (a.y > py !== b.y > py && px < ((b.x - a.x) * (py - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+// A multi-frame grid: a warpable lattice of image cells. Each cell paints its own
+// image (with its own effect stack) into its quad; the whole thing draws under the
+// layer's transform like any other node. Clicking a cell selects the layer AND
+// reports the clicked cell (so the inspector can set/clear that cell's image).
+// Vertex-warp editing arrives in a later phase.
+function FrameGridNode({
+  layer,
+  r,
+  images,
+  interaction,
+  registerRef,
+  selected,
+  screenScale,
+  onPickCell,
+  onMoveVertices,
+}: {
+  layer: Layer;
+  r: ResolvedLayer;
+  images: Record<string, string>;
+  interaction: Interaction;
+  registerRef: NodeRef;
+  selected: boolean;
+  screenScale: number;
+  onPickCell: (layerId: number, cell: number) => void;
+  onMoveVertices: (layerId: number, updates: { index: number; x: number; y: number }[]) => Promise<void>;
+}) {
+  const grid = r.frameGrid;
+  const cellUrls = (grid?.cells ?? []).map((c) => (c.src ? images[c.src] : "")).filter(Boolean);
+  const loaded = useImageMap(cellUrls);
+  const fxRefs = useRef<HTMLCanvasElement[]>([]);
+  // Live vertex positions while dragging a handle (index → local x/y). Kept in a
+  // ref so a drag doesn't trigger React re-renders (which would fight Konva's own
+  // drag position); we batchDraw manually instead.
+  const liveRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const handleRefs = useRef<Map<number, Konva.Circle>>(new Map());
+  const [selVerts, setSelVerts] = useState<Set<number>>(new Set());
+  const constrain = layer.kind.kind === "framegrid" ? layer.kind.constrain : "freeform";
+  const verts = grid?.vertices ?? [];
+  const vcols = (grid?.cols ?? 0) + 1;
+
+  // Fresh resolved data arrived (backend round-trip finished) → drop the live
+  // override so we render the committed warp.
+  const vertsRef = grid?.vertices;
+  useEffect(() => {
+    liveRef.current = new Map();
+  }, [vertsRef]);
+
+  if (!grid) return null;
+  const layerId = layer.id;
+
+  // A vertex's current position, preferring the live drag override.
+  const vpos = (i: number) => liveRef.current.get(i) ?? { x: verts[i].x, y: verts[i].y };
+
+  // The 4 lattice vertex indices for a cell's (possibly merged) block, in the
+  // quad's UV corner order.
+  const cellVerts = (i: number) => {
+    const cell = grid.cells[i];
+    const rr = cell.row;
+    const cc = cell.col;
+    const rs = cell.rowSpan;
+    const cs = cell.colSpan;
+    return [
+      rr * vcols + cc,
+      rr * vcols + (cc + cs),
+      (rr + rs) * vcols + (cc + cs),
+      (rr + rs) * vcols + cc,
+    ];
+  };
+
+  // A cell's quad with any live-dragged corners overridden (keeps UVs).
+  const liveQuad = (i: number) => {
+    const q = grid.cells[i].quad;
+    if (liveRef.current.size === 0) return q;
+    const vi = cellVerts(i);
+    return {
+      ...q,
+      corners: q.corners.map((corner, k) => {
+        const lp = liveRef.current.get(vi[k]);
+        return lp ? { ...corner, hx: lp.x, hy: lp.y, hw: 1 } : corner;
+      }),
+    };
+  };
+
+  // Which vertices move (and to where) when vertex `i` is dragged to (nx, ny).
+  const computeUpdates = (i: number, nx: number, ny: number): { index: number; x: number; y: number }[] => {
+    if (constrain === "rails") {
+      const rr = Math.floor(i / vcols);
+      const cc = i % vcols;
+      const m = new Map<number, { index: number; x: number; y: number }>();
+      for (let r2 = 0; r2 < grid.rows + 1; r2++) {
+        const idx = r2 * vcols + cc;
+        m.set(idx, { index: idx, x: nx, y: verts[idx].y });
+      }
+      for (let c2 = 0; c2 < vcols; c2++) {
+        const idx = rr * vcols + c2;
+        const ex = m.get(idx);
+        m.set(idx, { index: idx, x: ex ? ex.x : verts[idx].x, y: ny });
+      }
+      return [...m.values()];
+    }
+    if (selVerts.has(i) && selVerts.size > 1) {
+      const dx = nx - verts[i].x;
+      const dy = ny - verts[i].y;
+      return [...selVerts].map((j) => ({ index: j, x: verts[j].x + dx, y: verts[j].y + dy }));
+    }
+    return [{ index: i, x: nx, y: ny }];
+  };
+
+  return (
+    <Group
+      ref={registerRef}
+      x={r.x}
+      y={r.y}
+      scaleX={r.scaleX}
+      scaleY={r.scaleY}
+      rotation={r.rotation}
+      opacity={r.opacity}
+      listening={interaction.listening}
+      draggable={interaction.draggable}
+      onDragEnd={interaction.onDragEnd}
+      onTransformEnd={interaction.onTransformEnd}
+      onContextMenu={interaction.onContextMenu}
+    >
+      <Shape
+        fill="#000"
+        sceneFunc={(ctx) => {
+          const c = ctx as unknown as CanvasRenderingContext2D;
+          grid.cells.forEach((cell, i) => {
+            if (cell.covered) return; // absorbed into a merged block
+            const url = cell.src ? images[cell.src] : undefined;
+            const img = url ? loaded.get(url) : undefined;
+            const quad = liveQuad(i);
+            if (img) {
+              const iw = img.naturalWidth || img.width;
+              const ih = img.naturalHeight || img.height;
+              const off = fxRefs.current[i] ?? (fxRefs.current[i] = document.createElement("canvas"));
+              const tex = cell.effects.length > 0 ? applyEffects(off, img, iw, ih, cell.effects) : img;
+              drawTexturedQuad(ctx as DrawCtx, tex, quad, 1);
+            } else if (selected) {
+              c.save();
+              strokePoly(ctx as DrawCtx, quadPts(quad));
+              c.fillStyle = "rgba(108,140,255,0.10)";
+              c.fill();
+              c.restore();
+            }
+          });
+          if (selected) {
+            c.save();
+            c.strokeStyle = "rgba(108,140,255,0.9)";
+            c.lineWidth = 1.2 * screenScale;
+            for (let i = 0; i < grid.cells.length; i++) {
+              if (grid.cells[i].covered) continue;
+              strokePoly(ctx as DrawCtx, quadPts(liveQuad(i)));
+              c.stroke();
+            }
+            c.restore();
+          }
+        }}
+        hitFunc={(ctx, shape) => {
+          ctx.beginPath();
+          for (const cell of grid.cells) {
+            const pts = quadPts(cell.quad);
+            pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+            ctx.closePath();
+          }
+          ctx.fillStrokeShape(shape);
+        }}
+        listening={interaction.listening}
+        onClick={(e) => {
+          interaction.onClick?.(e); // select the layer
+          const pos = e.target.getRelativePointerPosition?.();
+          if (pos) {
+            const hit = grid.cells.findIndex(
+              (cell) => !cell.covered && pointInPoly(pos.x, pos.y, quadPts(cell.quad))
+            );
+            if (hit >= 0) onPickCell(layerId, hit);
+          }
+        }}
+      />
+      {selected &&
+        verts.map((_, i) => {
+          const p = vpos(i);
+          const on = selVerts.has(i);
+          return (
+            <Circle
+              key={i}
+              ref={(n) => {
+                if (n) handleRefs.current.set(i, n);
+                else handleRefs.current.delete(i);
+              }}
+              x={p.x}
+              y={p.y}
+              radius={(on ? 7 : 5) * screenScale}
+              fill={on ? "#fff" : "rgba(108,140,255,0.95)"}
+              stroke="#1b1b28"
+              strokeWidth={1.5 * screenScale}
+              draggable
+              onClick={(e) => {
+                e.cancelBubble = true;
+                const shift = e.evt.shiftKey;
+                setSelVerts((prev) => {
+                  const next = new Set(shift ? prev : []);
+                  if (shift && prev.has(i)) next.delete(i);
+                  else next.add(i);
+                  return next;
+                });
+              }}
+              onDragStart={(e) => {
+                e.cancelBubble = true;
+              }}
+              onDragMove={(e) => {
+                e.cancelBubble = true;
+                const node = e.target;
+                const updates = computeUpdates(i, node.x(), node.y());
+                const live = new Map<number, { x: number; y: number }>();
+                for (const u of updates) live.set(u.index, { x: u.x, y: u.y });
+                liveRef.current = live;
+                for (const u of updates) {
+                  if (u.index === i) continue;
+                  const h = handleRefs.current.get(u.index);
+                  if (h) {
+                    h.x(u.x);
+                    h.y(u.y);
+                  }
+                }
+                node.getLayer()?.batchDraw();
+              }}
+              onDragEnd={(e) => {
+                e.cancelBubble = true;
+                const node = e.target;
+                const updates = computeUpdates(i, node.x(), node.y());
+                void onMoveVertices(layerId, updates);
+              }}
+            />
+          );
+        })}
+    </Group>
+  );
 }
 
 // A layer (image or text) pinned to a Shape3D, rendered as a decal. The evaluator
@@ -1205,10 +1506,18 @@ interface Props {
   onDecalScale: (layerId: number, scale: number) => void;
   onShapeContextMenu: (layerId: number, x: number, y: number) => void;
   onLayerContextMenu: (layerId: number, x: number, y: number) => void;
+  /** A grid cell was clicked (row-major index) — selects it for image editing. */
+  onPickCell: (layerId: number, cell: number) => void;
+  /** Commit dragged grid vertices (new local positions, keyframed at playhead). */
+  onMoveVertices: (layerId: number, updates: { index: number; x: number; y: number }[]) => Promise<void>;
   exporting?: boolean;
   /** When set (during export with "show FPS" on), burn this fps value into the
    *  rendered frames as a corner label. Null = no overlay. */
   fpsOverlay?: number | null;
+  /** Receives the underlying Konva Stage so the export loop can force a
+   *  synchronous redraw of THIS exact stage (Konva's global `Konva.stages` may be
+   *  a different module instance under bundler dedup and come back empty). */
+  stageRef?: Ref<Konva.Stage>;
 }
 
 export default function Preview({
@@ -1228,8 +1537,11 @@ export default function Preview({
   onDecalScale,
   onShapeContextMenu,
   onLayerContextMenu,
+  onPickCell,
+  onMoveVertices,
   exporting = false,
   fpsOverlay = null,
+  stageRef,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
@@ -1324,6 +1636,7 @@ export default function Preview({
     <div ref={wrapRef} className="preview-wrap">
       {scale > 0 && (
         <Stage
+          ref={stageRef}
           width={stageW}
           height={stageH}
           className="preview-stage"
@@ -1410,6 +1723,20 @@ export default function Preview({
                     screenScale={h}
                     onContextMenu={onShapeContextMenu}
                     exporting={exporting}
+                  />
+                );
+              } else if (k.kind === "framegrid") {
+                node = (
+                  <FrameGridNode
+                    layer={layer}
+                    r={r}
+                    images={images}
+                    interaction={interaction(layer.id)}
+                    registerRef={register(layer.id)}
+                    selected={selectedId === layer.id}
+                    screenScale={h}
+                    onPickCell={onPickCell}
+                    onMoveVertices={onMoveVertices}
                   />
                 );
               } else {

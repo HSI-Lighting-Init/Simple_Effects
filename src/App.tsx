@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import Konva from "konva";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
@@ -14,8 +15,16 @@ import ExportDialog from "./components/ExportDialog";
 import TransitionsDemo from "./components/TransitionsDemo";
 import {
   addEffect,
+  addFrameGrid,
   addImageLayer,
   addShapeLayer,
+  setCellImage,
+  clearCellImage,
+  setCellZoom,
+  setGridVertices,
+  setGridConstrain,
+  mergeCell,
+  splitCell,
   addTextLayer,
   setCompSize,
   setCompDuration,
@@ -82,6 +91,7 @@ import {
   probePreview,
   analyzeOutputVideo,
   lastReport as lastProbeReport,
+  setProbeDebug,
 } from "./lib/renderProbe";
 import {
   encodeDeterministicWebm,
@@ -152,6 +162,10 @@ function revealableBox(p: Project, shapeId: number): boolean {
 export default function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [resolved, setResolved] = useState<Record<number, ResolvedLayer>>({});
+  // The live Konva preview Stage — used to force a synchronous redraw per frame
+  // during deterministic export (the `Konva.stages` global can be empty under
+  // bundler dedup, so we draw THIS stage directly instead).
+  const previewStageRef = useRef<Konva.Stage | null>(null);
   const [images, setImages] = useState<Record<string, string>>({});
   const [fonts, setFonts] = useState<string[]>([]);
   const [time, setTime] = useState(0);
@@ -166,6 +180,10 @@ export default function App() {
   const [showRecorder, setShowRecorder] = useState(false);
   const [decomposeId, setDecomposeId] = useState<number | null>(null);
   const [selectedPart, setSelectedPart] = useState<number | null>(null);
+  // The grid cell currently selected for image editing (row-major index).
+  const [selectedCell, setSelectedCell] = useState<{ layerId: number; cell: number } | null>(null);
+  // Multi-frame grid creation dialog (null = closed).
+  const [gridDialog, setGridDialog] = useState<{ rows: number; cols: number } | null>(null);
   const [ctxMenu, setCtxMenu] = useState<
     { x: number; y: number; shapeId?: number; layerId?: number } | null
   >(null);
@@ -265,15 +283,20 @@ export default function App() {
   const resolveImages = useCallback(
     async (p: Project) => {
       const next: Record<string, string> = {};
+      // Every image path referenced anywhere: flat image layers + grid cells.
+      const srcs: string[] = [];
       for (const layer of p.layers) {
-        if (layer.kind.kind === "image") {
-          const src = layer.kind.src;
-          if (!images[src] && !next[src]) {
-            try {
-              next[src] = await loadImageDataUrl(src);
-            } catch (e) {
-              console.warn("load image", src, e);
-            }
+        if (layer.kind.kind === "image") srcs.push(layer.kind.src);
+        else if (layer.kind.kind === "framegrid") {
+          for (const cell of layer.kind.cells) if (cell.src) srcs.push(cell.src);
+        }
+      }
+      for (const src of srcs) {
+        if (!images[src] && !next[src]) {
+          try {
+            next[src] = await loadImageDataUrl(src);
+          } catch (e) {
+            console.warn("load image", src, e);
           }
         }
       }
@@ -571,6 +594,113 @@ export default function App() {
       if (newId != null) setSelectedId(newId);
       await applyTime(timeRef.current);
       recordAction("add_shape", { shape, layerId: newId });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Create a multi-frame grid (rows×cols) and select it.
+  const onAddFrameGrid = useCallback(
+    async (rows: number, cols: number) => {
+      const p = await addFrameGrid(rows, cols);
+      setProject(p);
+      const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
+      if (newId != null) setSelectedId(newId);
+      await applyTime(timeRef.current);
+      recordAction("add_frame_grid", { rows, cols, layerId: newId });
+    },
+    [applyTime, recordAction]
+  );
+
+  // A grid cell was clicked → select the layer and mark the cell for editing.
+  const onPickCell = useCallback((layerId: number, cell: number) => {
+    setSelectedId(layerId);
+    setSelectedCell({ layerId, cell });
+  }, []);
+
+  // Set (or replace) the selected cell's image via a file picker.
+  const onSetCellImage = useCallback(
+    async (layerId: number, cell: number) => {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
+      });
+      if (typeof selected !== "string") return;
+      const p = await setCellImage(layerId, cell, selected);
+      setProject(p);
+      await resolveImages(p);
+      await applyTime(timeRef.current);
+      recordAction("set_cell_image", { layerId, cell, path: selected });
+    },
+    [resolveImages, applyTime, recordAction]
+  );
+
+  const onClearCellImage = useCallback(
+    async (layerId: number, cell: number) => {
+      const p = await clearCellImage(layerId, cell);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("clear_cell_image", { layerId, cell });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Commit dragged grid vertices (keyframed at the playhead).
+  const onMoveVertices = useCallback(
+    async (layerId: number, updates: { index: number; x: number; y: number }[]) => {
+      const t = Math.round(timeRef.current);
+      const layer = projectRef.current?.layers.find((l) => l.id === layerId);
+      const seedStart = layer ? t > layer.startMs : false;
+      const p = await setGridVertices(layerId, updates, t, seedStart);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("move_grid_vertices", { layerId, count: updates.length, timeMs: t });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Merge the selected cell with its right/down neighbour.
+  const onMergeCell = useCallback(
+    async (layerId: number, cell: number, dir: "right" | "down") => {
+      const p = await mergeCell(layerId, cell, dir);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("merge_cell", { layerId, cell, dir });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Split a merged cell back into single slots.
+  const onSplitCell = useCallback(
+    async (layerId: number, cell: number) => {
+      const p = await splitCell(layerId, cell);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("split_cell", { layerId, cell });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Switch a grid's vertex-drag constraint (free-form / rails).
+  const onSetGridConstrain = useCallback(
+    async (layerId: number, mode: "freeform" | "rails") => {
+      const p = await setGridConstrain(layerId, mode);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("set_grid_constrain", { layerId, mode });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Keyframe a grid cell's image zoom at the playhead.
+  const onSetCellZoom = useCallback(
+    async (layerId: number, cell: number, zoom: number) => {
+      const t = Math.round(timeRef.current);
+      const layer = projectRef.current?.layers.find((l) => l.id === layerId);
+      const seedStart = layer ? t > layer.startMs : false;
+      const p = await setCellZoom(layerId, cell, zoom, t, seedStart);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("set_cell_zoom", { layerId, cell, zoom, timeMs: t });
     },
     [applyTime, recordAction]
   );
@@ -1190,6 +1320,10 @@ export default function App() {
 
         // Deterministic path: render each frame, encode with an exact timestamp.
         let blob: Blob | null = null;
+        // Diagnostic: the transition factor sampled per frame. If these vary but
+        // the captured pixels don't, the freeze is in the capture/paint path, not
+        // the evaluator. If they're constant, it's the backend/transition.
+        const dbgFactors: (number | null)[] = [];
         if (isDeterministicSupported()) {
           try {
             setExportMsg("Rendering frames…");
@@ -1202,8 +1336,33 @@ export default function App() {
               durationMs: duration,
               bitrate,
               renderFrame: async (tMs) => {
-                await applyTime(tMs);
+                // Evaluate this exact frame and push it to the preview via a NORMAL
+                // state update. We deliberately do NOT use flushSync here: react-konva
+                // renders the Stage's children through its OWN concurrent reconciler
+                // and drains it with flushSyncWork() inside a layout effect. Wrapping
+                // our setState in ReactDOM's flushSync can defer that inner drain
+                // (nested sync work on a different root) instead of applying it — which
+                // left the Konva nodes on the OLD sceneFunc and froze every frame.
+                //
+                // Instead: set state, then yield across enough ticks that React commits
+                // AND react-konva commits + batch-draws on its own, THEN force one final
+                // synchronous stage draw right before the frame is grabbed.
+                const layers = await evaluateAt(tMs);
+                const map: Record<number, ResolvedLayer> = {};
+                for (const l of layers) map[l.id] = l;
+                // Sample the first active transition factor for the diagnostic trace.
+                const withTr = layers.find((l) => l.transition);
+                dbgFactors.push(withTr?.transition ? withTr.transition.factor : null);
+                setResolved(map);
+                setTime(tMs);
+                // Yield: microtask drain + two animation frames. This lets React's
+                // async commit and react-konva's reconciler+batchDraw fully run.
+                await Promise.resolve();
                 await awaitPaint();
+                // Belt-and-suspenders: force a synchronous repaint of the exact stage
+                // (and any others) so the captured canvas holds THIS frame.
+                previewStageRef.current?.draw();
+                for (const st of Konva.stages) st.draw();
               },
               onFrameRendered: probing ? (tMs) => probePreview(canvas, tMs) : undefined,
               onProgress: (frac) => {
@@ -1217,7 +1376,12 @@ export default function App() {
             });
             blob = new Blob([bytes], { type: "video/webm" });
           } catch (e) {
-            console.warn("deterministic export failed; falling back to realtime", e);
+            // Don't fail silently: a swallowed error here means we fall back to
+            // the realtime capture, which freezes when the main thread is busy —
+            // exactly the "single repeated frame" symptom. Surface it loudly so
+            // it's diagnosable instead of masquerading as a broken effect.
+            console.error("deterministic export failed; falling back to realtime capture", e);
+            setExportMsg(`Frame-accurate export failed (${e}) — using realtime capture…`);
             blob = null;
           }
         }
@@ -1225,6 +1389,21 @@ export default function App() {
 
         // Decode the produced video and probe its real frames (output trace).
         if (probing) {
+          // Summarise the per-frame transition factors: how many DISTINCT values
+          // the evaluator produced across the render. >1 means the data animates.
+          const nonNull = dbgFactors.filter((f): f is number => f != null);
+          const distinct = new Set(nonNull.map((f) => f.toFixed(3)));
+          setProbeDebug({
+            transitionFactors: {
+              frames: dbgFactors.length,
+              withTransition: nonNull.length,
+              distinctValues: distinct.size,
+              first: dbgFactors[0] ?? null,
+              min: nonNull.length ? Math.min(...nonNull) : null,
+              max: nonNull.length ? Math.max(...nonNull) : null,
+              sample: dbgFactors.slice(0, 30),
+            },
+          });
           setExportMsg("Analysing output video…");
           try {
             await analyzeOutputVideo(blob);
@@ -1246,6 +1425,8 @@ export default function App() {
         setExporting(false);
         setFpsOverlay(null);
         setExportMsg("");
+        // Restore the playhead the export loop scrubbed away.
+        setTime(timeRef.current);
         await applyTime(timeRef.current);
       }
     },
@@ -1682,6 +1863,15 @@ export default function App() {
     selectedId != null && selectedPart != null
       ? resolved[selectedId]?.letters[selectedPart]?.fill ?? null
       : null;
+  // The selected grid cell's zoom AT THE PLAYHEAD (for the inspector's slider).
+  const selectedResolvedCell =
+    selectedCell != null && selectedCell.layerId === selectedId
+      ? resolved[selectedId]?.frameGrid?.cells[selectedCell.cell] ?? null
+      : null;
+  const cellZoomNow = selectedResolvedCell?.zoom ?? null;
+  const cellMerged = selectedResolvedCell
+    ? selectedResolvedCell.rowSpan > 1 || selectedResolvedCell.colSpan > 1
+    : false;
   // The image layer open in the isolated Effect Editor (if any).
   const fxLayer = fxEditorId != null ? project.layers.find((l) => l.id === fxEditorId) ?? null : null;
 
@@ -1791,6 +1981,8 @@ export default function App() {
         { separator: true },
         { label: "3D Box", onClick: () => onAddShape("box") },
         { label: "3D Cylinder", onClick: () => onAddShape("cylinder") },
+        { separator: true },
+        { label: "Multi-Frame Grid…", onClick: () => setGridDialog({ rows: 2, cols: 2 }) },
       ],
     },
     {
@@ -1864,7 +2056,10 @@ export default function App() {
     >
       <MenuBar menus={menus} />
       <header className="toolbar">
-        <span className="brand">simple · effects</span>
+        <span className="brand" title={`build ${__BUILD_STAMP__}`}>simple · effects</span>
+        <span className="build-stamp" title="Build timestamp — confirms the running app is the latest build">
+          {__BUILD_STAMP__}
+        </span>
         <span className="filename" title={filePathRef.current ?? "Unsaved project"}>
           {fileName ?? "Untitled"}
           {dirty && <span className="dirty-dot" title="Unsaved changes"> •</span>}
@@ -1927,6 +2122,7 @@ export default function App() {
           <Preview
             project={project}
             resolved={resolved}
+            stageRef={previewStageRef}
             images={images}
             timeMs={time}
             selectedId={selectedId}
@@ -1941,6 +2137,8 @@ export default function App() {
             onDecalScale={onDecalScale}
             onShapeContextMenu={onShapeContextMenu}
             onLayerContextMenu={onLayerContextMenu}
+            onPickCell={onPickCell}
+            onMoveVertices={onMoveVertices}
             exporting={exporting}
             fpsOverlay={fpsOverlay}
           />
@@ -1998,6 +2196,15 @@ export default function App() {
           onClearLetterColor={onClearLetterColor}
           onDecomposeKey={onDecomposeKey}
           onSetLayerTransition={onSetLayerTransition}
+          selectedCell={selectedCell?.layerId === selectedLayer?.id ? selectedCell?.cell ?? null : null}
+          cellZoomNow={cellZoomNow}
+          cellMerged={cellMerged}
+          onSetCellImage={onSetCellImage}
+          onClearCellImage={onClearCellImage}
+          onSetCellZoom={onSetCellZoom}
+          onSetGridConstrain={onSetGridConstrain}
+          onMergeCell={onMergeCell}
+          onSplitCell={onSplitCell}
         />
       </div>
 
@@ -2180,6 +2387,63 @@ export default function App() {
           </div>
         </div>
       )}
+      {gridDialog && (
+        <div className="modal-backdrop" onMouseDown={() => setGridDialog(null)}>
+          <div className="modal-box" onMouseDown={(e) => e.stopPropagation()}>
+            <h3 className="modal-title">New multi-frame grid</h3>
+            <p className="modal-text">Choose the grid size. You can warp the vertices after.</p>
+            <div className="modal-row">
+              <label className="modal-field">
+                Columns
+                <input
+                  type="number"
+                  min={1}
+                  max={32}
+                  value={gridDialog.cols}
+                  onChange={(e) =>
+                    setGridDialog((g) => (g ? { ...g, cols: clampGrid(e.target.value) } : g))
+                  }
+                />
+              </label>
+              <span className="modal-times">×</span>
+              <label className="modal-field">
+                Rows
+                <input
+                  type="number"
+                  min={1}
+                  max={32}
+                  value={gridDialog.rows}
+                  onChange={(e) =>
+                    setGridDialog((g) => (g ? { ...g, rows: clampGrid(e.target.value) } : g))
+                  }
+                />
+              </label>
+            </div>
+            <div className="modal-actions">
+              <button className="insp-btn" onClick={() => setGridDialog(null)}>
+                Cancel
+              </button>
+              <button
+                className="insp-btn active"
+                onClick={() => {
+                  const { rows, cols } = gridDialog;
+                  setGridDialog(null);
+                  onAddFrameGrid(rows, cols);
+                }}
+              >
+                Create {gridDialog.cols}×{gridDialog.rows}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+/** Clamp a grid-dimension text input to 1..32. */
+function clampGrid(v: string): number {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(1, Math.min(32, n));
 }

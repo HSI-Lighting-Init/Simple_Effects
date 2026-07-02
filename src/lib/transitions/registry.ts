@@ -778,14 +778,26 @@ export const REGISTRY: TransitionMeta[] = [
   { id: "perspectiveSlide", label: "Perspective Slide", category: "Camera Movement & Depth", description: "Tilted-in-perspective frames slide across (3D).", create: (f, t, p) => new PerspectiveSlide("perspectiveSlide", f, t, p), params: [EASING, FIT] },
 ];
 
-// Transitions that FEATURE clip A — they animate or destroy A to reveal B
-// (disintegration, folds, page peels). Everything else builds up / reveals B.
-// See `TransitionMeta.feature`. Marked here so a single-clip transition can put
-// the clip on the correct side (otherwise A is empty and they'd just fade).
+// Transitions that FEATURE clip A — they animate/destroy A (or crossfade a
+// distortion through it) to reveal B, rather than building B up from nothing.
+// Everything else reveals/builds B. See `TransitionMeta.feature`. This matters
+// for a SINGLE-clip transition: those must put the clip on the correct side, or
+// A is empty (nothing to animate / a translucent crossfade) and they collapse to
+// a fade. (Applied between two real clips this flag is irrelevant.)
 const FEATURE_A_IDS = new Set<string>([
+  // Particles / disintegration (grid of A flies away over B).
   "particleDissolve", "shatter", "explosion", "smokeBurst", "sandstorm", "bubbles",
-  "confetti", "fire", "magicDust", "lowPolyExplode", "crumble",
+  "confetti", "fire", "magicDust", "lowPolyExplode", "crumble", "morphingParticles",
+  // Page / fold / peel (A folds or peels off B).
   "fold", "accordionFold", "pageTurn", "pageRoll", "pageCurl", "peelOff", "stickyPeel",
+  // 3D that animates A away over B.
+  "tumble", "doors3d", "curtains3d",
+  // Distortion / glitch — draw B under a warp of A, or crossfade a distortion
+  // (which with an empty A would just show the clip translucent).
+  "glitch", "pixelSort", "badTV", "dataMosh", "waveWarp", "ripple", "swirl",
+  "liquify", "melt", "stretch", "motionTile", "retroVHS", "flicker", "lightLeak", "prism",
+  // Motion / zoom where A slides or scales away to reveal B.
+  "uncover", "scaleDown",
 ]);
 for (const m of REGISTRY) m.feature = FEATURE_A_IDS.has(m.id) ? "a" : "b";
 

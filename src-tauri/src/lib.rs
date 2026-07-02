@@ -17,8 +17,9 @@ use tauri::{Manager, State};
 
 use eval::ResolvedLayer;
 use model::{
-    ColorKey, Decal, Easing, Effect, Keyframe, Layer, LayerKind, LetterAnimation, LetterOverride,
-    Project, Rgba, SurfaceShape, Track, Transform, TransformEdit, Transition, TransitionKind,
+    ColorKey, ConstrainMode, Decal, Easing, Effect, FrameCell, GridVertex, Keyframe, Layer,
+    LayerKind, LetterAnimation, LetterOverride, Project, Rgba, SurfaceShape, Track, Transform,
+    TransformEdit, Transition, TransitionKind,
 };
 use text::{Font, ShapedText};
 
@@ -994,6 +995,225 @@ fn add_shape_layer(state: State<AppState>, shape: SurfaceShape) -> Project {
     project.clone()
 }
 
+/// Add a multi-frame grid (`rows`×`cols`) centred in the comp, sized to ~70% of
+/// it. Cells start empty; the vertex lattice starts regular (no warp). Undoable.
+#[tauri::command]
+fn add_frame_grid(state: State<AppState>, rows: u32, cols: u32) -> Project {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let rows = rows.clamp(1, 32);
+    let cols = cols.clamp(1, 32);
+    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
+    let end_ms = project.duration_ms;
+    // Fill ~70% of the comp, keeping cells as square as the aspect allows.
+    let grid_w = project.width as f32 * 0.7;
+    let grid_h = project.height as f32 * 0.7;
+    let cell_w = grid_w / cols as f32;
+    let cell_h = grid_h / rows as f32;
+    let vertices = vec![GridVertex::default(); ((rows + 1) * (cols + 1)) as usize];
+    let cells = vec![FrameCell::default(); (rows * cols) as usize];
+    project.layers.push(Layer {
+        id: next_id,
+        name: format!("Grid {cols}×{rows}"),
+        start_ms: 0,
+        end_ms,
+        kind: LayerKind::FrameGrid { rows, cols, cell_w, cell_h, vertices, constrain: ConstrainMode::FreeForm, cells },
+        transform: Transform::at(cx, cy),
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+    project.clone()
+}
+
+/// Set (or replace) the image in one grid cell (`cell` = row-major index). Reads
+/// the image's natural size for aspect-correct fitting. Undoable.
+#[tauri::command]
+fn set_cell_image(state: State<AppState>, layer_id: u32, cell: u32, path: String) -> Result<Project, String> {
+    let (iw, ih) = image::image_dimensions(&path).unwrap_or((1, 1));
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    let c = cells.get_mut(cell as usize).ok_or("cell out of range")?;
+    c.src = Some(path);
+    c.img_w = iw;
+    c.img_h = ih;
+    Ok(project.clone())
+}
+
+/// Clear the image from one grid cell. Undoable.
+#[tauri::command]
+fn clear_cell_image(state: State<AppState>, layer_id: u32, cell: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    let c = cells.get_mut(cell as usize).ok_or("cell out of range")?;
+    c.src = None;
+    Ok(project.clone())
+}
+
+/// One vertex move: the new ABSOLUTE local position for lattice vertex `index`
+/// (row-major, (cols+1) wide). The backend converts it to the stored warp offset.
+#[derive(serde::Deserialize)]
+struct VertexMove {
+    index: u32,
+    x: f32,
+    y: f32,
+}
+
+/// Move one or more `FrameGrid` lattice vertices to new local positions, keyframed
+/// at `t_ms`. The frontend computes the affected set (single / multi-select /
+/// rails), so this just converts each to a warp offset and upserts its keys.
+/// Undoable.
+#[tauri::command]
+fn set_grid_vertices(
+    state: State<AppState>,
+    layer_id: u32,
+    updates: Vec<VertexMove>,
+    t_ms: u32,
+    seed_start: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let start = project.layers.iter().find(|l| l.id == layer_id).map(|l| l.start_ms).unwrap_or(0);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { rows, cols, cell_w, cell_h, vertices, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    let vcols = *cols + 1;
+    let grid_w = *cols as f32 * *cell_w;
+    let grid_h = *rows as f32 * *cell_h;
+    for up in updates {
+        let Some(gv) = vertices.get_mut(up.index as usize) else { continue };
+        let r = up.index / vcols;
+        let c = up.index % vcols;
+        let base_x = c as f32 * *cell_w - grid_w / 2.0;
+        let base_y = r as f32 * *cell_h - grid_h / 2.0;
+        upsert_key(&mut gv.dx, t_ms, Some(up.x - base_x), seed_start, start);
+        upsert_key(&mut gv.dy, t_ms, Some(up.y - base_y), seed_start, start);
+    }
+    Ok(project.clone())
+}
+
+/// Set a `FrameGrid`'s vertex-drag constraint mode ("freeform" or "rails"). Not
+/// keyframed. Undoable.
+#[tauri::command]
+fn set_grid_constrain(state: State<AppState>, layer_id: u32, mode: ConstrainMode) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { constrain, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    *constrain = mode;
+    Ok(project.clone())
+}
+
+/// Keyframe a grid cell's image zoom at `t_ms` (1 = fit, >1 = zoomed in). Drops a
+/// keyframe at the playhead so the zoom can animate. Undoable.
+#[tauri::command]
+fn set_cell_zoom(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    zoom: f32,
+    t_ms: u32,
+    seed_start: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let start = project.layers.iter().find(|l| l.id == layer_id).map(|l| l.start_ms).unwrap_or(0);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    let c = cells.get_mut(cell as usize).ok_or("cell out of range")?;
+    upsert_key(&mut c.zoom, t_ms, Some(zoom.max(0.01)), seed_start, start);
+    Ok(project.clone())
+}
+
+/// Merge the cell at `cell` (row-major) with its neighbour to the `"right"` or
+/// `"down"`, growing it into a merged block. The master keeps its image; the
+/// absorbed cells' images are cleared. No-op (returns unchanged) if the merge
+/// isn't a clean rectangle (target slots must be single, unmerged, and free).
+/// Undoable.
+#[tauri::command]
+fn merge_cell(state: State<AppState>, layer_id: u32, cell: u32, dir: String) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    let layer = project.layers.iter().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { rows, cols, cells, .. } = &layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    let (rows, cols) = (*rows, *cols);
+    let (covered, spans) = model::grid_layout(rows, cols, cells);
+    let idx = cell as usize;
+    if idx >= (rows * cols) as usize || covered[idx] {
+        return Ok(project.clone()); // not a master → nothing to merge
+    }
+    let r = cell / cols;
+    let c = cell % cols;
+    let (rs, cs) = spans[idx];
+    // The line of slots we'd absorb; each must exist, be uncovered, and be single.
+    let targets: Vec<u32> = match dir.as_str() {
+        "right" => {
+            if c + cs >= cols {
+                return Ok(project.clone());
+            }
+            (r..r + rs).map(|rr| rr * cols + (c + cs)).collect()
+        }
+        "down" => {
+            if r + rs >= rows {
+                return Ok(project.clone());
+            }
+            (c..c + cs).map(|cc| (r + rs) * cols + cc).collect()
+        }
+        _ => return Err("dir must be \"right\" or \"down\"".into()),
+    };
+    for &t in &targets {
+        let ti = t as usize;
+        if covered[ti] || spans[ti] != (1, 1) {
+            return Ok(project.clone()); // would make a non-rectangular merge
+        }
+    }
+    // Commit: grow the master's span, clear absorbed images.
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).unwrap();
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else { unreachable!() };
+    match dir.as_str() {
+        "right" => cells[idx].col_span = cs + 1,
+        _ => cells[idx].row_span = rs + 1,
+    }
+    for &t in &targets {
+        cells[t as usize].src = None;
+    }
+    Ok(project.clone())
+}
+
+/// Split a merged cell back into single slots (its `col_span`/`row_span` reset to
+/// 1). The previously-absorbed slots reappear empty. Undoable.
+#[tauri::command]
+fn split_cell(state: State<AppState>, layer_id: u32, cell: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    let c = cells.get_mut(cell as usize).ok_or("cell out of range")?;
+    c.col_span = 1;
+    c.row_span = 1;
+    Ok(project.clone())
+}
+
 /// Set a `Shape3D` layer's static parameters (dimensions + camera). Rotations are
 /// keyframed separately (`set_shape_rotation_key`). Undoable.
 #[tauri::command]
@@ -1482,6 +1702,18 @@ fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
             f(rotation_y);
             f(rotation_z);
         }
+        LayerKind::FrameGrid { vertices, cells, .. } => {
+            for v in vertices.iter_mut() {
+                f(&mut v.dx);
+                f(&mut v.dy);
+            }
+            for cell in cells.iter_mut() {
+                f(&mut cell.zoom);
+                for e in cell.effects.iter_mut() {
+                    walk_effect_tracks(e, &mut f);
+                }
+            }
+        }
         _ => {}
     }
     if let Some(d) = &mut layer.attach {
@@ -1491,18 +1723,24 @@ fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
         f(&mut d.rotation);
     }
     for e in &mut layer.effects {
-        match e {
-            Effect::Grayscale { amount }
-            | Effect::Brightness { amount }
-            | Effect::Contrast { amount }
-            | Effect::Saturate { amount }
-            | Effect::Invert { amount } => f(amount),
-            Effect::Blur { radius } => f(radius),
-            Effect::Hue { degrees } => f(degrees),
-            Effect::Wipe { position, softness, .. } => {
-                f(position);
-                f(softness);
-            }
+        walk_effect_tracks(e, &mut f);
+    }
+}
+
+/// Call `f` on each keyframeable `Track` inside one effect (shared by layer-level
+/// and per-cell effect stacks).
+fn walk_effect_tracks(e: &mut Effect, f: &mut dyn FnMut(&mut Track)) {
+    match e {
+        Effect::Grayscale { amount }
+        | Effect::Brightness { amount }
+        | Effect::Contrast { amount }
+        | Effect::Saturate { amount }
+        | Effect::Invert { amount } => f(amount),
+        Effect::Blur { radius } => f(radius),
+        Effect::Hue { degrees } => f(degrees),
+        Effect::Wipe { position, softness, .. } => {
+            f(position);
+            f(softness);
         }
     }
 }
@@ -1690,6 +1928,14 @@ pub fn run() {
             clear_letter_overrides,
             set_decompose_key,
             add_shape_layer,
+            add_frame_grid,
+            set_cell_image,
+            clear_cell_image,
+            set_cell_zoom,
+            set_grid_vertices,
+            set_grid_constrain,
+            merge_cell,
+            split_cell,
             set_shape_params,
             set_shape_rotation_key,
             attach_to_shape,

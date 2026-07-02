@@ -1513,6 +1513,124 @@ interface Props {
   onLetterColor: (layerId: number, index: number, color: Rgba) => void;
   onClearLetterColor: (layerId: number, index: number) => void;
   onSetLayerTransition: SetLayerTransition;
+  /** Selected grid cell (row-major index) for a FrameGrid layer, or null. */
+  selectedCell: number | null;
+  /** The selected cell's zoom at the playhead (for the slider readout). */
+  cellZoomNow: number | null;
+  /** Whether the selected cell is a merged block (spans > 1). */
+  cellMerged: boolean;
+  onSetCellImage: (layerId: number, cell: number) => void;
+  onClearCellImage: (layerId: number, cell: number) => void;
+  onSetCellZoom: (layerId: number, cell: number, zoom: number) => void;
+  onSetGridConstrain: (layerId: number, mode: "freeform" | "rails") => void;
+  onMergeCell: (layerId: number, cell: number, dir: "right" | "down") => void;
+  onSplitCell: (layerId: number, cell: number) => void;
+}
+
+/** Multi-frame grid controls: grid size + set/clear the selected cell's image. */
+function FrameGridSection({
+  layerId,
+  rows,
+  cols,
+  hasImage,
+  selectedCell,
+  cellZoomNow,
+  cellMerged,
+  constrain,
+  onSetCellImage,
+  onClearCellImage,
+  onSetCellZoom,
+  onSetGridConstrain,
+  onMergeCell,
+  onSplitCell,
+}: {
+  layerId: number;
+  rows: number;
+  cols: number;
+  hasImage: boolean;
+  selectedCell: number | null;
+  cellZoomNow: number | null;
+  cellMerged: boolean;
+  constrain: "freeform" | "rails";
+  onSetCellImage: (layerId: number, cell: number) => void;
+  onClearCellImage: (layerId: number, cell: number) => void;
+  onSetCellZoom: (layerId: number, cell: number, zoom: number) => void;
+  onSetGridConstrain: (layerId: number, mode: "freeform" | "rails") => void;
+  onMergeCell: (layerId: number, cell: number, dir: "right" | "down") => void;
+  onSplitCell: (layerId: number, cell: number) => void;
+}) {
+  const cellLabel =
+    selectedCell != null ? `row ${Math.floor(selectedCell / cols) + 1}, col ${(selectedCell % cols) + 1}` : null;
+  const zoom = cellZoomNow ?? 1;
+  return (
+    <div className="insp-body">
+      <div className="insp-sep">Multi-frame grid</div>
+      <p className="insp-hint">
+        {cols}×{rows} grid. Click a cell to set its image; drag the blue vertex handles to warp.
+        Shift-click handles to select several and drag them together.
+      </p>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", margin: "4px 0 8px" }}>
+        <span className="insp-hint" style={{ margin: 0 }}>Vertex drag:</span>
+        <button
+          className={constrain === "freeform" ? "insp-btn active" : "insp-btn"}
+          onClick={() => onSetGridConstrain(layerId, "freeform")}
+        >
+          Free-form
+        </button>
+        <button
+          className={constrain === "rails" ? "insp-btn active" : "insp-btn"}
+          onClick={() => onSetGridConstrain(layerId, "rails")}
+        >
+          Rails
+        </button>
+      </div>
+      {selectedCell == null ? (
+        <p className="insp-hint">No cell selected.</p>
+      ) : (
+        <>
+          <div style={{ margin: "4px 0" }}>
+            Cell #{selectedCell + 1} ({cellLabel})
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="insp-btn" onClick={() => onSetCellImage(layerId, selectedCell)}>
+              {hasImage ? "Replace image…" : "Set image…"}
+            </button>
+            {hasImage && (
+              <button className="insp-btn" onClick={() => onClearCellImage(layerId, selectedCell)}>
+                Clear
+              </button>
+            )}
+          </div>
+          {hasImage && (
+            <label className="insp-field" style={{ marginTop: 8 }}>
+              Zoom {zoom.toFixed(2)}×
+              <input
+                type="range"
+                min={0.2}
+                max={4}
+                step={0.05}
+                value={zoom}
+                onChange={(e) => onSetCellZoom(layerId, selectedCell, Number(e.target.value))}
+              />
+            </label>
+          )}
+          <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+            <button className="insp-btn" onClick={() => onMergeCell(layerId, selectedCell, "right")}>
+              Merge →
+            </button>
+            <button className="insp-btn" onClick={() => onMergeCell(layerId, selectedCell, "down")}>
+              Merge ↓
+            </button>
+            {cellMerged && (
+              <button className="insp-btn" onClick={() => onSplitCell(layerId, selectedCell)}>
+                Split
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 export default function Inspector({
@@ -1554,6 +1672,15 @@ export default function Inspector({
   onLetterColor,
   onClearLetterColor,
   onSetLayerTransition,
+  selectedCell,
+  cellZoomNow,
+  cellMerged,
+  onSetCellImage,
+  onClearCellImage,
+  onSetCellZoom,
+  onSetGridConstrain,
+  onMergeCell,
+  onSplitCell,
 }: Props) {
   const decalControls = layer && (layer.kind.kind === "image" || layer.kind.kind === "text") && (
     <DecalControls
@@ -1643,6 +1770,24 @@ export default function Inspector({
         <span className="muted">
           {layer.kind.kind} layer — drag on the canvas to move/scale, ◆ Key to set a keyframe.
         </span>
+      )}
+      {layer && layer.kind.kind === "framegrid" && (
+        <FrameGridSection
+          layerId={layer.id}
+          rows={layer.kind.rows}
+          cols={layer.kind.cols}
+          hasImage={selectedCell != null ? !!layer.kind.cells[selectedCell]?.src : false}
+          selectedCell={selectedCell}
+          cellZoomNow={cellZoomNow}
+          cellMerged={cellMerged}
+          constrain={layer.kind.constrain}
+          onSetCellImage={onSetCellImage}
+          onClearCellImage={onClearCellImage}
+          onSetCellZoom={onSetCellZoom}
+          onSetGridConstrain={onSetGridConstrain}
+          onMergeCell={onMergeCell}
+          onSplitCell={onSplitCell}
+        />
       )}
       {layer && <TransitionsSection layer={layer} onSet={onSetLayerTransition} />}
     </aside>

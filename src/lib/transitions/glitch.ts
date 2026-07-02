@@ -20,6 +20,10 @@ export interface GlitchParams extends BaseParams {
   frequency?: number; // cycles, for warps
   hue?: number; // for light leak
   orientation?: "horizontal" | "vertical"; // stretch axis
+  /** Single-clip mode: the transition runs on one clip (the other side is
+   *  empty), so the distortion — not a crossfade — must carry the whole
+   *  transition. Set by the app when applying the effect to a lone clip. */
+  solo?: boolean;
 }
 
 /** Draw `src` as horizontal bands, each shifted in X by off(normalizedY). */
@@ -52,6 +56,17 @@ export abstract class GlitchBase<P extends GlitchParams = GlitchParams> extends 
   /** 0→1→0, peaking at the midpoint. */
   protected bump(p: number): number {
     return 1 - Math.abs(2 * p - 1);
+  }
+  /**
+   * Distortion strength over progress. Between two clips it peaks at the seam
+   * (mid) and is clean at both ends — `bump`. On a SINGLE clip (`solo`) the
+   * crossfade is dead (the other side is empty), so the distortion must drive
+   * the whole transition: ramp it monotonically with `p` instead, so the clip
+   * arrives fully distorted and resolves to clean (the app runs solo effects in
+   * reverse, so p=1 is the "just appeared" end and p=0 the settled end).
+   */
+  protected intensity(p: number): number {
+    return this.params.solo ? clamp01(p) : this.bump(p);
   }
   /** Crossfaded base of A→B at p into a reusable scratch canvas. */
   protected base(a: HTMLCanvasElement, b: HTMLCanvasElement, p: number): HTMLCanvasElement {
@@ -105,26 +120,43 @@ export class Glitch extends GlitchBase {
   }
 }
 
-/** Pixel Sorting (stylised): bright bands stretch/smear along the sort axis. */
+/** Pixel Sorting (stylised): thin seeded slices are stretched into long streaks
+ *  that resolve back into the image. Streaks run in BOTH axes so the effect is
+ *  visible regardless of content — a purely vertical stretch is invisible on an
+ *  image that's uniform down its columns (e.g. vertical colour bars), and a
+ *  purely horizontal one is invisible on horizontal bars; doing both guarantees
+ *  the frame visibly breaks up on any real image. */
 export class PixelSort extends GlitchBase {
   composeCpu(ctx: CanvasRenderingContext2D, a: HTMLCanvasElement, b: HTMLCanvasElement, p: number) {
     const w = this.outW, h = this.outH;
     const base = this.base(a, b, p);
-    const g = this.bump(p) * this.amount();
+    const g = this.intensity(p) * this.amount();
     const seed = this.seed();
     ctx.drawImage(base, 0, 0);
-    // Smear columns downward by a seeded amount to mimic a vertical sort.
-    const cols = 64;
-    const bw = w / cols;
-    ctx.save();
-    ctx.globalAlpha = 0.85;
+    if (g < 0.01) return;
+    // Vertical streaks: each column stretches a thin slice downward. Higher `g`
+    // moves the slice toward the top and lengthens the streak toward full height.
+    const cols = 200;
+    const bw = Math.ceil(w / cols);
     for (let i = 0; i < cols; i++) {
-      const stretch = hash2(i, seed, 11) * g;
-      if (stretch < 0.02) continue;
-      const sy = h * 0.5 * (1 - stretch);
-      ctx.drawImage(base, i * bw, sy, bw, 2, i * bw, sy, bw, h - sy);
+      const x = i * bw;
+      const r = hash2(i, seed, 11);
+      const srcY = Math.floor(r * h * (1 - g));
+      const len = Math.max(3, g * (h - srcY));
+      ctx.drawImage(base, x, srcY, bw, 3, x, srcY, bw, len);
     }
-    ctx.restore();
+    // Horizontal streaks: each row stretches a thin slice rightward. This is the
+    // transpose of the pass above, so it stays visible on content that's uniform
+    // down its columns (vertical bars) where the vertical pass does nothing.
+    const rows = 200;
+    const bh = Math.ceil(h / rows);
+    for (let i = 0; i < rows; i++) {
+      const y = i * bh;
+      const r = hash2(i, seed, 17);
+      const srcX = Math.floor(r * w * (1 - g));
+      const len = Math.max(3, g * (w - srcX));
+      ctx.drawImage(base, srcX, y, 3, bh, srcX, y, len, bh);
+    }
   }
 }
 
@@ -199,7 +231,7 @@ export class WaveWarp extends GlitchBase {
   composeCpu(ctx: CanvasRenderingContext2D, a: HTMLCanvasElement, b: HTMLCanvasElement, p: number) {
     const w = this.outW, h = this.outH;
     const base = this.base(a, b, p);
-    const amp = ((this.params.amplitude as number) ?? 40) * this.bump(p);
+    const amp = ((this.params.amplitude as number) ?? 40) * this.intensity(p);
     const freq = (this.params.frequency as number) ?? 3;
     warpH(ctx, base, w, h, 80, (ny) => Math.sin((ny * freq + p) * Math.PI * 2) * amp);
   }
@@ -210,7 +242,7 @@ export class Ripple extends GlitchBase {
   composeCpu(ctx: CanvasRenderingContext2D, a: HTMLCanvasElement, b: HTMLCanvasElement, p: number) {
     const w = this.outW, h = this.outH;
     const base = this.base(a, b, p);
-    const amp = ((this.params.amplitude as number) ?? 30) * this.bump(p);
+    const amp = ((this.params.amplitude as number) ?? 30) * this.intensity(p);
     const freq = (this.params.frequency as number) ?? 6;
     const rings = 60;
     ctx.save();
@@ -239,7 +271,7 @@ export class Swirl extends GlitchBase {
   composeCpu(ctx: CanvasRenderingContext2D, a: HTMLCanvasElement, b: HTMLCanvasElement, p: number) {
     const w = this.outW, h = this.outH;
     const base = this.base(a, b, p);
-    const twist = ((this.params.amplitude as number) ?? 6) * this.bump(p);
+    const twist = ((this.params.amplitude as number) ?? 6) * this.intensity(p);
     const rings = 48;
     const maxR = Math.hypot(w, h) * 0.5;
     ctx.save();
@@ -267,7 +299,7 @@ export class Liquify extends GlitchBase {
   composeCpu(ctx: CanvasRenderingContext2D, a: HTMLCanvasElement, b: HTMLCanvasElement, p: number) {
     const w = this.outW, h = this.outH;
     const base = this.base(a, b, p);
-    const amp = ((this.params.amplitude as number) ?? 50) * this.bump(p);
+    const amp = ((this.params.amplitude as number) ?? 50) * this.intensity(p);
     const seed = this.seed();
     warpH(ctx, base, w, h, 60, (_ny, i) => (valueNoise2D(i * 0.4, p * 3, seed) - 0.5) * amp * 2);
   }
@@ -398,7 +430,7 @@ export class Prism extends GlitchBase {
   composeCpu(ctx: CanvasRenderingContext2D, a: HTMLCanvasElement, b: HTMLCanvasElement, p: number) {
     const w = this.outW, h = this.outH;
     const base = this.base(a, b, p);
-    const offset = ((this.params.amplitude as number) ?? 24) * this.bump(p);
+    const offset = ((this.params.amplitude as number) ?? 24) * this.intensity(p);
     chromaticAberration(ctx, base, w, h, offset);
   }
 }

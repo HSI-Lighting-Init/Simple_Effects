@@ -178,6 +178,165 @@ pub enum LayerKind {
         width: f32,
         height: f32,
     },
+    /// A multi-frame grid: a warpable lattice of `rows`×`cols` image cells. It's a
+    /// single timeline layer (the container); each cell is a lightweight child
+    /// carrying its own source image + effect stack. The `vertices` lattice
+    /// ((rows+1)×(cols+1), row-major) stores a keyframeable offset from each
+    /// vertex's regular position, so the mesh can be warped (free-form) or moved
+    /// along gridlines (rails) and animated. Draws in the layer's own transform.
+    FrameGrid {
+        rows: u32,
+        cols: u32,
+        /// Un-warped cell size in layer-local px. Grid is centred on the origin.
+        cell_w: f32,
+        cell_h: f32,
+        /// Per-vertex warp offset (row-major, (rows+1)*(cols+1)). Empty = regular.
+        #[serde(default)]
+        vertices: Vec<GridVertex>,
+        #[serde(default)]
+        constrain: ConstrainMode,
+        /// One per cell (row-major, rows*cols).
+        cells: Vec<FrameCell>,
+    },
+}
+
+/// One vertex of a `FrameGrid`'s lattice — a keyframeable offset (px) from the
+/// vertex's regular grid position, so warps can animate over time.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct GridVertex {
+    pub dx: Track,
+    pub dy: Track,
+}
+
+/// How dragging a `FrameGrid` vertex behaves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum ConstrainMode {
+    /// Each vertex moves independently (arbitrary mesh warp).
+    #[default]
+    FreeForm,
+    /// Dragging a vertex moves its whole row-line + column-line (cells stay
+    /// aligned rectangles).
+    Rails,
+}
+
+/// How a cell's image is fitted into its (possibly warped) cell.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum FitMode {
+    /// Fill the cell, cropping overflow (aspect preserved).
+    #[default]
+    Cover,
+    /// Fit inside the cell, letterboxing (aspect preserved).
+    Contain,
+    /// Stretch to the cell (aspect not preserved).
+    Stretch,
+}
+
+/// One image cell of a `FrameGrid` (a lightweight child, not a timeline layer).
+/// `src` is an absolute image path (`None` = an empty cell). `effects` is the
+/// cell's own effect stack, applied when it renders.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct FrameCell {
+    #[serde(default)]
+    pub src: Option<String>,
+    #[serde(default)]
+    pub img_w: u32,
+    #[serde(default)]
+    pub img_h: u32,
+    #[serde(default)]
+    pub fit: FitMode,
+    /// Keyframeable zoom of the image within its cell (1 = fit per `fit`, >1 =
+    /// zoomed in / cropped, <1 = zoomed out). Scales about the cell centre.
+    #[serde(default = "one_track")]
+    pub zoom: Track,
+    /// Merge spans: how many columns/rows this cell covers (1 = a single slot).
+    /// A cell with span > 1 is the "master" of a merged block; the slots it
+    /// covers render nothing (their images are cleared on merge).
+    #[serde(default = "one_u32")]
+    pub col_span: u32,
+    #[serde(default = "one_u32")]
+    pub row_span: u32,
+    #[serde(default)]
+    pub effects: Vec<Effect>,
+}
+
+fn one_track() -> Track {
+    Track::constant(1.0)
+}
+fn one_u32() -> u32 {
+    1
+}
+
+impl Default for FrameCell {
+    fn default() -> Self {
+        FrameCell {
+            src: None,
+            img_w: 0,
+            img_h: 0,
+            fit: FitMode::default(),
+            zoom: one_track(),
+            col_span: 1,
+            row_span: 1,
+            effects: Vec::new(),
+        }
+    }
+}
+
+/// Resolve a grid's merge layout: for each slot (row-major) return whether it's
+/// `covered` by another cell's span, and each master's effective `(row_span,
+/// col_span)` (clamped to the grid and to not overlap an already-claimed slot).
+/// Shared by the evaluator (rendering) and the merge command (validation).
+pub fn grid_layout(rows: u32, cols: u32, cells: &[FrameCell]) -> (Vec<bool>, Vec<(u32, u32)>) {
+    let n = (rows * cols) as usize;
+    let mut covered = vec![false; n];
+    let mut spans = vec![(1u32, 1u32); n];
+    for r in 0..rows {
+        for c in 0..cols {
+            let idx = (r * cols + c) as usize;
+            if covered[idx] {
+                continue;
+            }
+            let mut cs = cells.get(idx).map(|x| x.col_span.max(1)).unwrap_or(1).min(cols - c);
+            let mut rs = cells.get(idx).map(|x| x.row_span.max(1)).unwrap_or(1).min(rows - r);
+            // Shrink the block if it would overlap an already-claimed slot.
+            loop {
+                let mut clash = false;
+                for rr in r..r + rs {
+                    for cc in c..c + cs {
+                        if (rr, cc) != (r, c) && covered[(rr * cols + cc) as usize] {
+                            clash = true;
+                        }
+                    }
+                }
+                if !clash {
+                    break;
+                }
+                if cs > 1 {
+                    cs -= 1;
+                } else if rs > 1 {
+                    rs -= 1;
+                } else {
+                    break;
+                }
+            }
+            spans[idx] = (rs, cs);
+            for rr in r..r + rs {
+                for cc in c..c + cs {
+                    if (rr, cc) != (r, c) {
+                        covered[(rr * cols + cc) as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+    (covered, spans)
 }
 
 /// Per-property keyframe tracks. `x`/`y` are the layer's CENTRE in comp pixels;

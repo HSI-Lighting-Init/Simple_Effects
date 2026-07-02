@@ -83,7 +83,12 @@ export interface ProbeSubject {
   layers: LayerSubject[];
 }
 
+/** Bumped whenever the export pipeline changes, so a dump proves which binary
+ *  produced it (kills the "did you run the fresh build?" ambiguity). */
+export const EXPORT_PIPELINE_VERSION = "no-flushsync-yield-v4";
+
 export interface ProbeReport {
+  pipelineVersion: string;
   startedAt: string;
   comp: { width: number; height: number; fps: number; durationMs: number };
   /** What's being tested: the active transitions/effects by name. */
@@ -91,6 +96,10 @@ export interface ProbeReport {
   expected: { blackLineX: number; whiteLineX: number };
   preview: ProbeFrame[];
   output: ProbeFrame[];
+  /** Free-form diagnostics recorded by the export loop (e.g. the transition
+   *  factor sampled per frame — proves whether the data varies over time even
+   *  if the captured pixels don't). */
+  debug?: Record<string, unknown>;
 }
 
 let enabled = false;
@@ -109,9 +118,13 @@ export function setProbeEnabled(v: boolean): void {
 export function lastReport(): ProbeReport | null {
   return report;
 }
+/** Attach free-form diagnostics to the current probe run (merged into report.debug). */
+export function setProbeDebug(data: Record<string, unknown>): void {
+  if (report) report.debug = { ...(report.debug ?? {}), ...data };
+}
 
 export function beginProbeRun(comp: ProbeReport["comp"], startedAt: string, subject: ProbeSubject | null = null): void {
-  report = { startedAt, comp, subject, expected: { ...EXPECTED }, preview: [], output: [] };
+  report = { pipelineVersion: EXPORT_PIPELINE_VERSION, startedAt, comp, subject, expected: { ...EXPECTED }, preview: [], output: [] };
   prevPreviewGrid = null;
   prevOutputGrid = null;
   if (!tiny) {
