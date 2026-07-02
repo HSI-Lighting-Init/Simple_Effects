@@ -1,7 +1,7 @@
 // A tiny right-click menu rendered as an absolutely-positioned overlay. Closes
 // on the next click / right-click / blur anywhere. Items may carry a `submenu`,
 // which flies out to the side on hover (used to pick which box face to map onto).
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export interface MenuItem {
   label: string;
@@ -21,6 +21,31 @@ export default function ContextMenu({
   onClose: () => void;
 }) {
   const [openSub, setOpenSub] = useState<number | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  // Start at the click point; after measuring, clamp so the whole menu stays
+  // within the viewport (fixed-position menus can't be scrolled into view, so a
+  // menu opened near the bottom/right edge would otherwise be cut off).
+  const [pos, setPos] = useState({ left: x, top: y });
+
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!el) return;
+    const margin = 6;
+    const { width, height } = el.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let left = x;
+    let top = y;
+    // Prefer opening down/right; if it would overflow, flip to above/left of the
+    // cursor, then clamp so it never leaves the viewport.
+    if (left + width > vw - margin) left = Math.max(margin, x - width);
+    if (top + height > vh - margin) top = Math.max(margin, y - height);
+    left = Math.min(left, vw - width - margin);
+    top = Math.min(top, vh - height - margin);
+    left = Math.max(margin, left);
+    top = Math.max(margin, top);
+    setPos({ left, top });
+  }, [x, y, items]);
 
   useEffect(() => {
     const close = () => onClose();
@@ -38,8 +63,9 @@ export default function ContextMenu({
 
   return (
     <div
+      ref={menuRef}
       className="ctx-menu"
-      style={{ left: x, top: y }}
+      style={{ left: pos.left, top: pos.top }}
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -58,22 +84,7 @@ export default function ContextMenu({
               <span>{it.label}</span>
               <span className="ctx-arrow">▸</span>
             </button>
-            {openSub === i && (
-              <div className="ctx-flyout">
-                {it.submenu.map((s, j) => (
-                  <button
-                    key={j}
-                    className="ctx-item"
-                    onClick={() => {
-                      s.onClick?.();
-                      onClose();
-                    }}
-                  >
-                    {s.label}
-                  </button>
-                ))}
-              </div>
-            )}
+            {openSub === i && <Flyout items={it.submenu} onClose={onClose} />}
           </div>
         ) : (
           <button
@@ -88,6 +99,40 @@ export default function ContextMenu({
           </button>
         )
       )}
+    </div>
+  );
+}
+
+// A submenu flyout that nudges itself vertically so it never spills past the
+// bottom of the viewport (it opens to the right of its parent row).
+function Flyout({ items, onClose }: { items: MenuItem[]; onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [shift, setShift] = useState(0);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const margin = 6;
+    const rect = el.getBoundingClientRect();
+    const overflow = rect.bottom - (window.innerHeight - margin);
+    if (overflow > 0) setShift(-Math.min(overflow, rect.top - margin));
+    else setShift(0);
+  }, [items]);
+
+  return (
+    <div className="ctx-flyout" ref={ref} style={{ marginTop: shift }}>
+      {items.map((s, j) => (
+        <button
+          key={j}
+          className="ctx-item"
+          onClick={() => {
+            s.onClick?.();
+            onClose();
+          }}
+        >
+          {s.label}
+        </button>
+      ))}
     </div>
   );
 }

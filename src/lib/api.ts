@@ -75,6 +75,9 @@ export const saveProjectFile = (path: string) =>
 export const openProjectFile = (path: string) =>
   invoke<Project>("open_project_file", { path });
 
+/** A .sefx path the app was launched with (double-clicked file), consumed once. */
+export const takeLaunchFile = () => invoke<string | null>("take_launch_file");
+
 /** Resolve every layer's transform at one playhead time (comp ms). */
 export const evaluateAt = (tMs: number) =>
   invoke<ResolvedLayer[]>("evaluate_at", { tMs });

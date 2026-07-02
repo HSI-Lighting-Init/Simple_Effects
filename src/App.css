@@ -1260,6 +1260,60 @@ body {
   border-top: 1px solid var(--line);
 }
 
+/* Export estimates row: size / render time / frame count. */
+.export-estimate {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.export-estimate > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.export-estimate .muted {
+  font-size: 11px;
+}
+
+.export-estimate strong {
+  font-size: 14px;
+}
+
+/* Per-level size reference chips under the compression slider. */
+.export-levels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.export-level {
+  font-size: 11px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted, #9aa);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.export-level:hover {
+  border-color: rgba(108, 140, 255, 0.6);
+}
+
+.export-level.active {
+  color: var(--text);
+  border-color: rgba(108, 140, 255, 0.9);
+  background: rgba(108, 140, 255, 0.18);
+}
+
 /* Isolated effect editor overlay. */
 .fx-editor-backdrop {
   position: fixed;

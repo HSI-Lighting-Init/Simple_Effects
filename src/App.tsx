@@ -70,6 +70,7 @@ import {
   reorderLayers,
   saveProjectFile,
   openProjectFile,
+  takeLaunchFile,
   attachToShape,
   clearKeyframes,
   clearLetterOverrides,
@@ -131,7 +132,6 @@ import {
 import {
   encodeDeterministicWebm,
   isDeterministicSupported,
-  bitrateForLevel,
 } from "./lib/deterministicExport";
 import type { Project } from "./bindings/Project";
 import type { ResolvedLayer } from "./bindings/ResolvedLayer";
@@ -1516,28 +1516,49 @@ export default function App() {
     // If Save As was cancelled, keep the prompt open so nothing is lost.
   }, [doSave]);
 
+  // Load a specific .sefx path into the editor (shared by the Open dialog and
+  // the "launched with a file" startup path).
+  const loadProjectPath = useCallback(
+    async (path: string) => {
+      try {
+        stop();
+        const p = await openProjectFile(path);
+        pristineRef.current = true; // a freshly-opened file is not "unsaved"
+        setProject(p);
+        setDirty(false);
+        durationRef.current = p.durationMs;
+        filePathRef.current = path;
+        setFileName(baseName(path));
+        setSelectedId(null);
+        setDecomposeId(null);
+        await resolveImages(p);
+        seek(0);
+        recordAction("open_project", { path });
+      } catch (e) {
+        alert(`Open failed: ${e}`);
+      }
+    },
+    [stop, resolveImages, seek, recordAction],
+  );
+
   // Open a .sefx project, replacing the current one and loading its images.
   const doOpenProject = useCallback(async () => {
     const selected = await open({ multiple: false, filters: SEFX_FILTER });
     if (typeof selected !== "string") return;
-    try {
-      stop();
-      const p = await openProjectFile(selected);
-      pristineRef.current = true; // a freshly-opened file is not "unsaved"
-      setProject(p);
-      setDirty(false);
-      durationRef.current = p.durationMs;
-      filePathRef.current = selected;
-      setFileName(baseName(selected));
-      setSelectedId(null);
-      setDecomposeId(null);
-      await resolveImages(p);
-      seek(0);
-      recordAction("open_project", { path: selected });
-    } catch (e) {
-      alert(`Open failed: ${e}`);
-    }
-  }, [stop, resolveImages, seek, recordAction]);
+    await loadProjectPath(selected);
+  }, [loadProjectPath]);
+
+  // If the app was launched by double-clicking a .sefx file, open it on startup
+  // instead of showing the blank default project. Runs exactly once.
+  const openedLaunchFile = useRef(false);
+  useEffect(() => {
+    if (openedLaunchFile.current) return;
+    openedLaunchFile.current = true;
+    void (async () => {
+      const path = await takeLaunchFile();
+      if (path) await loadProjectPath(path);
+    })();
+  }, [loadProjectPath]);
 
   // Reflect the bound file name (and unsaved-changes dot) in the window title.
   useEffect(() => {
@@ -1551,7 +1572,13 @@ export default function App() {
   // real-time MediaRecorder capture if WebCodecs isn't available. MP4 is the
   // WebM transcoded by Rust/ffmpeg. `level` 1..5 = compression/bitrate.
   const onExport = useCallback(
-    async (format: "mp4" | "webm", level: number, fps: number, burnFps: boolean) => {
+    async (
+      format: "mp4" | "webm",
+      level: number,
+      fps: number,
+      burnFps: boolean,
+      bitrate: number,
+    ) => {
       if (exportingRef.current) return;
       // Render the whole comp, not a group's inner scope.
       const rootP = await ensureRootScope();
@@ -1612,7 +1639,10 @@ export default function App() {
           );
         }
         const duration = p.durationMs;
-        const bitrate = bitrateForLevel(level);
+        // Frame count for this render — used to calibrate the render-time estimate
+        // shown in the export dialog on the next run.
+        const totalFrames = Math.max(1, Math.ceil((duration / 1000) * fps));
+        const renderStartedAt = performance.now();
 
         // Wait for the canvas to actually paint the latest applied time.
         const awaitPaint = () =>
@@ -1774,6 +1804,16 @@ export default function App() {
         setExportMsg(format === "mp4" ? "Encoding MP4 (ffmpeg)…" : "Saving…");
         const base64 = await blobToBase64(blob);
         await exportVideo(base64, path, format, level);
+        // Calibrate the render-time estimate: record how long this export took
+        // per frame so the dialog can predict the next one more accurately.
+        const msPerFrame = (performance.now() - renderStartedAt) / totalFrames;
+        if (Number.isFinite(msPerFrame) && msPerFrame > 0) {
+          try {
+            localStorage.setItem("sefx.export.msPerFrame", String(Math.round(msPerFrame)));
+          } catch {
+            /* localStorage may be unavailable; the estimate just stays at its default */
+          }
+        }
         recordAction("export_video", { path, format, level, deterministic: isDeterministicSupported() });
         alert(`Saved video:\n${path}`);
       } catch (e) {
@@ -2460,6 +2500,26 @@ export default function App() {
           onClick: () => selectedId != null && onClearKeyframes(selectedId),
           disabled: selectedId == null,
         },
+        { separator: true },
+        {
+          label: "Combine into Group",
+          onClick: () => void onCombineLayers(),
+          disabled: selectedIds.length < 2,
+        },
+        {
+          label: "Enter Group",
+          onClick: () => selectedId != null && void onEnterGroup(selectedId),
+          disabled:
+            selectedId == null ||
+            project.layers.find((l) => l.id === selectedId)?.kind.kind !== "group",
+        },
+        {
+          label: "Explode Group",
+          onClick: () => selectedId != null && void onExplodeLayer(selectedId),
+          disabled:
+            selectedId == null ||
+            project.layers.find((l) => l.id === selectedId)?.kind.kind !== "group",
+        },
       ],
     },
     {
@@ -2917,6 +2977,9 @@ export default function App() {
       {showExportDialog && (
         <ExportDialog
           defaultFps={project.fps}
+          durationMs={project.durationMs}
+          width={project.width}
+          height={project.height}
           onExport={onExport}
           onClose={() => setShowExportDialog(false)}
         />

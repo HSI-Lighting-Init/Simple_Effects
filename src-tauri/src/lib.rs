@@ -58,6 +58,9 @@ struct AppState {
     shaped: Mutex<HashMap<u32, ShapedText>>,
     history: Mutex<History>,
     nav: Mutex<Vec<NavFrame>>,
+    /// A `.sefx` path passed on the command line (e.g. the OS double-clicking an
+    /// associated file). Consumed once by the frontend on startup.
+    launch_file: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -1053,6 +1056,22 @@ fn save_project_file(state: State<AppState>, path: String) -> Result<(), String>
     let project = state.project.lock().unwrap();
     let json = serde_json::to_string_pretty(&*project).map_err(|e| format!("serialize: {e}"))?;
     std::fs::write(&path, json).map_err(|e| format!("write {path}: {e}"))
+}
+
+/// Return (and clear) any `.sefx` path the app was launched with (e.g. the OS
+/// opening an associated file by double-click). The frontend calls this once on
+/// startup and, if present, opens that project instead of the blank default.
+#[tauri::command]
+fn take_launch_file(state: State<AppState>) -> Option<String> {
+    state.launch_file.lock().unwrap().take()
+}
+
+/// Scan CLI args for the first existing `.sefx` file (the path the OS passes when
+/// a double-clicked, associated file launches the app).
+fn launch_file_from_args() -> Option<String> {
+    std::env::args().skip(1).find(|a| {
+        a.to_lowercase().ends_with(".sefx") && std::path::Path::new(a).is_file()
+    })
 }
 
 /// Open a Simple Effects (.sefx) project file, replacing the current project and
@@ -2567,12 +2586,14 @@ pub fn run() {
                 shaped: Mutex::new(shaped),
                 history: Mutex::new(History::default()),
                 nav: Mutex::new(Vec::new()),
+                launch_file: Mutex::new(launch_file_from_args()),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_project,
             set_project,
+            take_launch_file,
             evaluate_at,
             add_image_layer,
             add_video_layer,
