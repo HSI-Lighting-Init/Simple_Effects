@@ -2,6 +2,7 @@
 import type { Effect } from "./Effect";
 import type { FitMode } from "./FitMode";
 import type { Track } from "./Track";
+import type { Transition } from "./Transition";
 
 /**
  * One image cell of a `FrameGrid` (a lightweight child, not a timeline layer).
@@ -19,4 +20,9 @@ zoom: Track,
  * A cell with span > 1 is the "master" of a merged block; the slots it
  * covers render nothing (their images are cleared on merge).
  */
-colSpan: number, rowSpan: number, effects: Array<Effect>, };
+colSpan: number, rowSpan: number, effects: Array<Effect>, 
+/**
+ * Per-cell in/out transitions, played over the grid layer's start/end (the
+ * cell's image assembles in / breaks out). Same engine as layer transitions.
+ */
+transitionIn: Transition | null, transitionOut: Transition | null, };

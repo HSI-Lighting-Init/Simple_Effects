@@ -27,6 +27,7 @@ import { sampleTrack, sampleColor } from "../lib/track";
 import { drawSurface, drawTexturedQuad } from "../lib/surface3d";
 import type { Texture } from "../lib/surface3d";
 import { applyEffects } from "../lib/effects";
+import { getMediaUrl, registerVideoEl } from "../lib/media";
 import { createTransition, getTransitionMeta } from "../lib/transitions";
 import type { Clip } from "../lib/transitions";
 import type { Project } from "../bindings/Project";
@@ -43,6 +44,16 @@ import type { TextLayerStyles } from "../bindings/TextLayerStyles";
 
 function rgbaCss(c: Rgba): string {
   return `rgba(${c.r}, ${c.g}, ${c.b}, ${c.a / 255})`;
+}
+
+// --- Transition runtime diagnostic (temporary) ------------------------------
+// The image-transition sceneFunc writes here; the HUD reads it each React render.
+// "OK …" = the engine ran; "CATCH …" = it threw and fell back to a fade. If a
+// transition is set but this never shows OK/CATCH, the layer isn't an image and
+// isn't using the engine at all (that path also just fades).
+export let TRANSITION_DEBUG = "";
+export function getTransitionDebug(): string {
+  return TRANSITION_DEBUG;
 }
 
 // A small pool of reusable offscreen canvases for text compositing (keyed by
@@ -315,6 +326,7 @@ function TransitionImageNode({
           // at f=1 (progress 0) and gone at f=0 (progress 1), so it assembles in /
           // breaks apart with the window instead of just fading.
           tr.render(off, featureA ? 1 - f : f);
+          TRANSITION_DEBUG = `OK engine=${transition.engine} f=${f.toFixed(2)} featureA=${featureA}`;
           if (featureA) {
             // The effect itself carries the transition (the clip disintegrates /
             // folds / distorts, or is opaque and resolves). Drawing it through the
@@ -331,8 +343,9 @@ function TransitionImageNode({
             }
             c.globalAlpha = 1;
           }
-        } catch {
+        } catch (err) {
           // Unknown/failed transition → fall back to a plain opacity fade.
+          TRANSITION_DEBUG = `CATCH engine=${transition.engine}: ${err instanceof Error ? err.message : String(err)}`;
           c.globalAlpha = f;
           c.drawImage(texB, 0, 0);
           c.globalAlpha = 1;
@@ -732,6 +745,123 @@ function ImageNode({
   );
 }
 
+// A video layer. Draws the current frame of an <HTMLVideoElement> whose source
+// time tracks the playhead (comp time since the layer start). Selects/drags/
+// keyframes exactly like ImageNode. During playback a Konva.Animation keeps the
+// layer redrawing so frames flow; while paused we seek and redraw on 'seeked'.
+// The element is registered so the deterministic export can seek it per frame.
+function VideoNode({
+  layerId,
+  src,
+  r,
+  playing,
+  timeMs,
+  layerStartMs,
+  durationMs,
+  interaction,
+  registerRef,
+}: {
+  layerId: number;
+  src: string;
+  r: ResolvedLayer;
+  playing: boolean;
+  timeMs: number;
+  layerStartMs: number;
+  durationMs: number;
+  interaction: Interaction;
+  registerRef: NodeRef;
+}) {
+  const [vid, setVid] = useState<HTMLVideoElement | null>(null);
+  const imgRef = useRef<Konva.Image | null>(null);
+
+  // Create the element once per source (blob URL is canvas-safe for export).
+  useEffect(() => {
+    let alive = true;
+    let el: HTMLVideoElement | null = null;
+    getMediaUrl(src).then((url) => {
+      if (!alive) return;
+      const v = document.createElement("video");
+      v.playsInline = true;
+      v.preload = "auto";
+      v.src = url;
+      v.onloadeddata = () => {
+        registerVideoEl(layerId, v);
+        setVid(v);
+        imgRef.current?.getLayer()?.batchDraw();
+      };
+      v.onseeked = () => imgRef.current?.getLayer()?.batchDraw();
+      el = v;
+    });
+    return () => {
+      alive = false;
+      registerVideoEl(layerId, null);
+      if (el) {
+        el.pause();
+        el.removeAttribute("src");
+        el.load();
+      }
+    };
+  }, [src, layerId]);
+
+  // Sync the source time / play state to the playhead.
+  useEffect(() => {
+    const v = vid;
+    if (!v) return;
+    const durSec = durationMs > 0 ? durationMs / 1000 : Infinity;
+    const localSec = Math.max(0, (timeMs - layerStartMs) / 1000);
+    const target = Number.isFinite(durSec) ? Math.min(localSec, durSec - 0.001) : localSec;
+    if (playing) {
+      if (Math.abs(v.currentTime - target) > 0.3) v.currentTime = Math.max(0, target);
+      // Play with sound; if the autoplay policy blocks unmuted playback, retry
+      // muted so the frames still advance (video stays visible, just silent).
+      if (v.paused)
+        v.play().catch(() => {
+          v.muted = true;
+          v.play().catch(() => {});
+        });
+    } else {
+      if (!v.paused) v.pause();
+      if (Math.abs(v.currentTime - target) > 0.02) v.currentTime = Math.max(0, target);
+    }
+  }, [vid, playing, timeMs, layerStartMs, durationMs]);
+
+  // While playing, keep the layer repainting so the moving frame shows.
+  useEffect(() => {
+    if (!playing || !vid) return;
+    const layer = imgRef.current?.getLayer();
+    if (!layer) return;
+    const anim = new Konva.Animation(() => {}, layer);
+    anim.start();
+    return () => {
+      anim.stop();
+    };
+  }, [playing, vid]);
+
+  if (!vid) return null;
+  const w = vid.videoWidth || 1;
+  const h = vid.videoHeight || 1;
+  return (
+    <KImage
+      ref={(n) => {
+        imgRef.current = n;
+        registerRef(n);
+      }}
+      image={vid}
+      x={r.x}
+      y={r.y}
+      width={w}
+      height={h}
+      offsetX={w / 2}
+      offsetY={h / 2}
+      scaleX={r.scaleX}
+      scaleY={r.scaleY}
+      rotation={r.rotation}
+      opacity={r.opacity}
+      {...interaction}
+    />
+  );
+}
+
 type DrawCtx = Parameters<typeof drawSurface>[0];
 
 /** Stroke a closed polygon of comp-space points on a Konva context. */
@@ -774,6 +904,45 @@ function useImageMap(urls: string[]): Map<string, HTMLImageElement> {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   return map;
+}
+
+/** Render a cell's transition into `out` and return it as the cell's texture.
+ *  `base` is the image (with its effects already baked). Mirrors the layer
+ *  TransitionImageNode: feature-A engines animate the clip (played in reverse so
+ *  it assembles in), others reveal the clip from empty. On failure returns base. */
+function cellTransitionTexture(
+  out: HTMLCanvasElement,
+  base: Texture,
+  iw: number,
+  ih: number,
+  transition: NonNullable<ResolvedLayer["frameGrid"]>["cells"][number]["transition"]
+): Texture {
+  if (!transition?.engine) return base;
+  const featureA = getTransitionMeta(transition.engine)?.feature === "a";
+  const clip: Clip = { source: base, width: iw, height: ih };
+  const empty: Clip = { source: null, width: 0, height: 0 };
+  const dir = DIRS[transition.direction] ?? "left";
+  let userParams: Record<string, unknown> = {};
+  if (transition.params) {
+    try {
+      userParams = JSON.parse(transition.params) as Record<string, unknown>;
+    } catch {
+      userParams = {};
+    }
+  }
+  try {
+    const tr = createTransition(transition.engine, featureA ? clip : empty, featureA ? empty : clip, {
+      outWidth: iw,
+      outHeight: ih,
+      direction: dir,
+      solo: true,
+      ...userParams,
+    });
+    tr.render(out, featureA ? 1 - transition.factor : transition.factor);
+    return out;
+  } catch {
+    return base;
+  }
 }
 
 /** A quad's 4 corners as flat local-space points (grids use hw = 1). */
@@ -821,6 +990,11 @@ function FrameGridNode({
   const cellUrls = (grid?.cells ?? []).map((c) => (c.src ? images[c.src] : "")).filter(Boolean);
   const loaded = useImageMap(cellUrls);
   const fxRefs = useRef<HTMLCanvasElement[]>([]);
+  const trRefs = useRef<HTMLCanvasElement[]>([]);
+  // Offscreen canvases for a whole-grid transition: the grid rasterised into one
+  // texture, and the transition engine's output.
+  const gridRasterRef = useRef<HTMLCanvasElement | null>(null);
+  const gridTransRef = useRef<HTMLCanvasElement | null>(null);
   // Live vertex positions while dragging a handle (index → local x/y). Kept in a
   // ref so a drag doesn't trigger React re-renders (which would fight Konva's own
   // drag position); we batchDraw manually instead.
@@ -918,26 +1092,112 @@ function FrameGridNode({
         fill="#000"
         sceneFunc={(ctx) => {
           const c = ctx as unknown as CanvasRenderingContext2D;
-          grid.cells.forEach((cell, i) => {
-            if (cell.covered) return; // absorbed into a merged block
-            const url = cell.src ? images[cell.src] : undefined;
-            const img = url ? loaded.get(url) : undefined;
-            const quad = liveQuad(i);
-            if (img) {
-              const iw = img.naturalWidth || img.width;
-              const ih = img.naturalHeight || img.height;
-              const off = fxRefs.current[i] ?? (fxRefs.current[i] = document.createElement("canvas"));
-              const tex = cell.effects.length > 0 ? applyEffects(off, img, iw, ih, cell.effects) : img;
-              drawTexturedQuad(ctx as DrawCtx, tex, quad, 1);
-            } else if (selected) {
-              c.save();
-              strokePoly(ctx as DrawCtx, quadPts(quad));
-              c.fillStyle = "rgba(108,140,255,0.10)";
-              c.fill();
-              c.restore();
+          // A whole-grid transition (engine set on the layer) rasterises every
+          // cell into one texture and runs the transition engine on that, so the
+          // grid transitions as a single image instead of falling back to a fade.
+          const gridTransition = r.transition?.engine ? r.transition : null;
+
+          // Compute a cell's texture (effects baked; optionally its own transition).
+          const cellTex = (i: number, img: HTMLImageElement, withCellTr: boolean): Texture => {
+            const cell = grid.cells[i];
+            const iw = img.naturalWidth || img.width;
+            const ih = img.naturalHeight || img.height;
+            const off = fxRefs.current[i] ?? (fxRefs.current[i] = document.createElement("canvas"));
+            let tex: Texture = cell.effects.length > 0 ? applyEffects(off, img, iw, ih, cell.effects) : img;
+            if (withCellTr && cell.transition?.engine) {
+              const trc = trRefs.current[i] ?? (trRefs.current[i] = document.createElement("canvas"));
+              tex = cellTransitionTexture(trc, tex, iw, ih, cell.transition);
             }
-          });
-          if (selected) {
+            return tex;
+          };
+
+          if (gridTransition) {
+            // Bounding box of the (possibly warped) grid in layer-local space.
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            let any = false;
+            grid.cells.forEach((cell, i) => {
+              if (cell.covered) return;
+              for (const p of quadPts(liveQuad(i))) {
+                any = true;
+                if (p.x < minX) minX = p.x;
+                if (p.y < minY) minY = p.y;
+                if (p.x > maxX) maxX = p.x;
+                if (p.y > maxY) maxY = p.y;
+              }
+            });
+            const bw = maxX - minX;
+            const bh = maxY - minY;
+            if (any && bw > 0 && bh > 0) {
+              const RS = 2; // supersample for a crisp transition texture
+              const cw = Math.max(1, Math.min(4096, Math.round(bw * RS)));
+              const ch = Math.max(1, Math.min(4096, Math.round(bh * RS)));
+              const raster = gridRasterRef.current ?? (gridRasterRef.current = document.createElement("canvas"));
+              if (raster.width !== cw) raster.width = cw;
+              if (raster.height !== ch) raster.height = ch;
+              const rctx = raster.getContext("2d")!;
+              rctx.setTransform(1, 0, 0, 1, 0, 0);
+              rctx.clearRect(0, 0, cw, ch);
+              // Map layer-local (minX,minY) → canvas (0,0) at RS scale.
+              const sx = cw / bw, sy = ch / bh;
+              rctx.setTransform(sx, 0, 0, sy, -minX * sx, -minY * sy);
+              grid.cells.forEach((cell, i) => {
+                if (cell.covered) return;
+                const url = cell.src ? images[cell.src] : undefined;
+                const img = url ? loaded.get(url) : undefined;
+                if (img) drawTexturedQuad(rctx as unknown as DrawCtx, cellTex(i, img, false), liveQuad(i), 1);
+              });
+              rctx.setTransform(1, 0, 0, 1, 0, 0);
+              const outCanvas = gridTransRef.current ?? (gridTransRef.current = document.createElement("canvas"));
+              const outTex = cellTransitionTexture(outCanvas, raster, cw, ch, gridTransition);
+              // Draw the transitioned raster back over the grid's bounding rect.
+              const rectQuad = {
+                corners: [
+                  { hx: minX, hy: minY, hw: 1, u: 0, v: 0 },
+                  { hx: maxX, hy: minY, hw: 1, u: 1, v: 0 },
+                  { hx: maxX, hy: maxY, hw: 1, u: 1, v: 1 },
+                  { hx: minX, hy: maxY, hw: 1, u: 0, v: 1 },
+                ],
+                opacity: 1,
+                subdiv: 1,
+              };
+              drawTexturedQuad(ctx as DrawCtx, outTex, rectQuad, 1);
+            }
+          } else {
+            grid.cells.forEach((cell, i) => {
+              if (cell.covered) return; // absorbed into a merged block
+              const url = cell.src ? images[cell.src] : undefined;
+              const img = url ? loaded.get(url) : undefined;
+              const quad = liveQuad(i);
+              if (img) {
+                drawTexturedQuad(ctx as DrawCtx, cellTex(i, img, true), quad, 1);
+              } else if (selected) {
+                c.save();
+                strokePoly(ctx as DrawCtx, quadPts(quad));
+                c.fillStyle = "rgba(108,140,255,0.10)";
+                c.fill();
+                c.restore();
+              }
+            });
+          }
+
+          // Styled grid lines (keyframeable colour + width). Drawn on top of the
+          // cell images, but skipped during a whole-grid transition (the grid is a
+          // single transitioning texture then).
+          if (!gridTransition && grid.lineWidth > 0 && grid.lineColor.a > 0) {
+            c.save();
+            c.strokeStyle = rgbaCss(grid.lineColor);
+            c.lineWidth = grid.lineWidth;
+            c.lineJoin = "miter";
+            for (let i = 0; i < grid.cells.length; i++) {
+              if (grid.cells[i].covered) continue;
+              strokePoly(ctx as DrawCtx, quadPts(liveQuad(i)));
+              c.stroke();
+            }
+            c.restore();
+          }
+
+          // Editor-only cell outline overlay (shows the mesh when selected).
+          if (selected && !gridTransition) {
             c.save();
             c.strokeStyle = "rgba(108,140,255,0.9)";
             c.lineWidth = 1.2 * screenScale;
@@ -1558,15 +1818,29 @@ export default function Preview({
     return () => ro.disconnect();
   }, []);
 
-  const pad = 24;
+  const pad = 48;
   const fitScale =
     box.w > 0 && box.h > 0
       ? Math.min((box.w - pad) / project.width, (box.h - pad) / project.height)
       : 0;
   // During export render at full comp resolution (1:1) for a crisp video.
   const scale = exporting ? 1 : fitScale;
-  const stageW = project.width * scale;
-  const stageH = project.height * scale;
+  const compW = project.width * scale;
+  const compH = project.height * scale;
+  // In the editor the Stage fills the whole viewport (a "pasteboard") and the
+  // comp is centred inside it, so a layer dragged past the frame stays visible
+  // and grab-able instead of being clipped to the canvas edge. On export the
+  // Stage is exactly the comp so nothing outside the frame is rendered.
+  const stageW = exporting ? compW : Math.max(box.w, compW);
+  const stageH = exporting ? compH : Math.max(box.h, compH);
+  const originX = exporting ? 0 : Math.round((stageW - compW) / 2);
+  const originY = exporting ? 0 : Math.round((stageH - compH) / 2);
+  // Comp bounds expressed in the (scaled) layer's own coordinate space — used to
+  // draw the pasteboard dimming around the frame.
+  const pbL = -originX / (scale || 1);
+  const pbT = -originY / (scale || 1);
+  const pbR = (stageW - originX) / (scale || 1);
+  const pbB = (stageH - originY) / (scale || 1);
 
   const register = (id: number): NodeRef => (n) => {
     if (n) nodeRefs.current[id] = n;
@@ -1647,7 +1921,17 @@ export default function Preview({
             }
           }}
         >
-          <KLayer scaleX={scale} scaleY={scale}>
+          <KLayer x={originX} y={originY} scaleX={scale} scaleY={scale}>
+            {/* Pasteboard: dim everything outside the comp so the frame reads
+                clearly, while off-frame layers still show on top of it. */}
+            {!exporting && (
+              <>
+                <Rect x={pbL} y={pbT} width={pbR - pbL} height={-pbT} fill="rgba(0,0,0,0.5)" listening={false} />
+                <Rect x={pbL} y={project.height} width={pbR - pbL} height={pbB - project.height} fill="rgba(0,0,0,0.5)" listening={false} />
+                <Rect x={pbL} y={0} width={-pbL} height={project.height} fill="rgba(0,0,0,0.5)" listening={false} />
+                <Rect x={project.width} y={0} width={pbR - project.width} height={project.height} fill="rgba(0,0,0,0.5)" listening={false} />
+              </>
+            )}
             {project.layers.map((layer) => {
               const r = resolved[layer.id];
               if (!r || !r.visible) return null;
@@ -1739,6 +2023,23 @@ export default function Preview({
                     onMoveVertices={onMoveVertices}
                   />
                 );
+              } else if (k.kind === "video") {
+                node = (
+                  <VideoNode
+                    layerId={layer.id}
+                    src={k.src}
+                    r={r}
+                    playing={playing}
+                    timeMs={timeMs}
+                    layerStartMs={layer.startMs}
+                    durationMs={k.durationMs ?? 0}
+                    interaction={interaction(layer.id)}
+                    registerRef={register(layer.id)}
+                  />
+                );
+              } else if (k.kind === "audio") {
+                // Audio has no visual — it's played by the AudioLayers controller.
+                return null;
               } else {
                 // A flat image (not pinned) — draggable onto a shape to pin it.
                 // With effects it goes through the effect renderer. An in/out
@@ -1773,7 +2074,7 @@ export default function Preview({
               // Engine transitions on a flat image are already baked into the
               // node above, so skip the group wrap for those.
               const engineHandled =
-                !!r.transition?.engine && !r.surface && k.kind === "image";
+                !!r.transition?.engine && !r.surface && (k.kind === "image" || k.kind === "framegrid");
               const tp = engineHandled
                 ? null
                 : transitionGroupProps(r.transition, project.width, project.height);
@@ -1806,6 +2107,23 @@ export default function Preview({
                   fill="#ffffff"
                 />
               </Group>
+            )}
+
+            {/* The comp frame outline — always drawn on top so the boundary of
+                the exported area is unmistakable (editor only). */}
+            {!exporting && (
+              <Rect
+                x={0}
+                y={0}
+                width={project.width}
+                height={project.height}
+                stroke="#5b8cff"
+                strokeWidth={1.5}
+                dash={[6, 4]}
+                strokeScaleEnabled={false}
+                listening={false}
+                perfectDrawEnabled={false}
+              />
             )}
 
             {!playing && (

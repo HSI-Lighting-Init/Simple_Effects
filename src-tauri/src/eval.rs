@@ -12,7 +12,8 @@ use ts_rs::TS;
 
 use crate::model::{
     AnimSelector, ColorKey, Easing, Effect, FitMode, GridVertex, LayerKind, LetterAnimation,
-    LetterPreset, Project, RangeShape, Rgba, SelectorKind, TextAnimator, Track, TransitionKind,
+    LetterPreset, LinkedEffectGroup, Project, RangeShape, Rgba, SelectorKind, TextAnimator, Track,
+    TransitionKind,
 };
 use crate::surface::{self, QuadVertex, ResolvedShapeFrame, ResolvedSurface, ShapeState, SurfaceQuad, Vec2};
 
@@ -67,6 +68,22 @@ pub struct ResolvedFrameGrid {
     /// mesh overlay + editing handles.
     pub vertices: Vec<Vec2>,
     pub cells: Vec<ResolvedFrameCell>,
+    /// Shared effect groups (for the inspector's linked-effects UI). Their
+    /// effects are already folded into each member cell's `effects`.
+    pub linked: Vec<ResolvedLinkedEffect>,
+    /// Grid line thickness (layer-local px) and colour sampled at this time.
+    pub line_width: f32,
+    pub line_color: Rgba,
+}
+
+/// A linked effect group resolved at this time (its shared stack + members).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ResolvedLinkedEffect {
+    pub id: u32,
+    pub effects: Vec<ResolvedEffect>,
+    pub members: Vec<u32>,
 }
 
 /// One resolved grid cell: a flat local-space quad (hw = 1), its image source +
@@ -92,6 +109,9 @@ pub struct ResolvedFrameCell {
     /// frontend skips it (no draw, no gridline, not clickable).
     pub covered: bool,
     pub effects: Vec<ResolvedEffect>,
+    /// The cell's active in/out transition at this time (played over the grid
+    /// layer's start/end). `None` outside any window.
+    pub transition: Option<ResolvedTransition>,
 }
 
 /// Resolve a `FrameGrid` at `t_ms`: sample each vertex's warp offset, build the
@@ -106,6 +126,12 @@ fn resolve_frame_grid(
     cell_h: f32,
     vertices: &[GridVertex],
     cells: &[crate::model::FrameCell],
+    linked: &[LinkedEffectGroup],
+    line_width: f32,
+    line_color: Rgba,
+    line_color_keys: &[ColorKey],
+    layer_start: u32,
+    layer_end: u32,
     t_ms: u32,
 ) -> ResolvedFrameGrid {
     let vcols = cols + 1;
@@ -129,6 +155,16 @@ fn resolve_frame_grid(
     // Merge layout: which slots are covered, and each master's effective spans.
     let (covered, spans) = crate::model::grid_layout(rows, cols, cells);
 
+    // Resolve the shared linked groups once (same for every member).
+    let resolved_linked: Vec<ResolvedLinkedEffect> = linked
+        .iter()
+        .map(|g| ResolvedLinkedEffect {
+            id: g.id,
+            effects: g.effects.iter().map(|e| resolve_effect(e, t_ms)).collect(),
+            members: g.members.clone(),
+        })
+        .collect();
+
     let mut out_cells: Vec<ResolvedFrameCell> = Vec::with_capacity((rows * cols) as usize);
     for r in 0..rows {
         for c in 0..cols {
@@ -148,6 +184,7 @@ fn resolve_frame_grid(
                     col_span: 1,
                     covered: true,
                     effects: Vec::new(),
+                    transition: None,
                 });
                 continue;
             }
@@ -158,7 +195,7 @@ fn resolve_frame_grid(
             let br = pts[((r + rs) * vcols + c + cs) as usize];
             let bl = pts[((r + rs) * vcols + c) as usize];
             let cell = cells.get(idx);
-            let (src, img_w, img_h, fit, zoom, effects) = match cell {
+            let (src, img_w, img_h, fit, zoom, mut effects): (_, _, _, _, _, Vec<ResolvedEffect>) = match cell {
                 Some(cell) => (
                     cell.src.clone(),
                     cell.img_w as f32,
@@ -169,6 +206,15 @@ fn resolve_frame_grid(
                 ),
                 None => (None, 0.0, 0.0, FitMode::Cover, 1.0, Vec::new()),
             };
+            // Fold in every linked group this cell belongs to (after its local stack).
+            for g in &resolved_linked {
+                if g.members.contains(&(idx as u32)) {
+                    effects.extend(g.effects.iter().cloned());
+                }
+            }
+            let cell_transition = cell.and_then(|c| {
+                resolve_transition_windows(&c.transition_in, &c.transition_out, layer_start, layer_end, t_ms)
+            });
             // Fit against the merged block's aspect, then apply zoom.
             let block_w = cs as f32 * cell_w;
             let block_h = rs as f32 * cell_h;
@@ -192,10 +238,20 @@ fn resolve_frame_grid(
                 col_span: cs,
                 covered: false,
                 effects,
+                transition: cell_transition,
             });
         }
     }
-    ResolvedFrameGrid { rows, cols, vertices: pts, cells: out_cells }
+    let line_color = sample_color(line_color_keys, line_color, t_ms);
+    ResolvedFrameGrid {
+        rows,
+        cols,
+        vertices: pts,
+        cells: out_cells,
+        linked: resolved_linked,
+        line_width,
+        line_color,
+    }
 }
 
 /// Scale a UV sub-rect about its centre by `zoom` (>1 = zoom in / crop tighter,
@@ -252,9 +308,21 @@ pub struct ResolvedTransition {
     pub params: Option<String>,
 }
 
-/// Resolve a layer's active transition (in or out) at `t_ms`, if any. When both
-/// windows overlap, the more-transitioned (smaller factor) one wins.
+/// Resolve a layer's active transition (in or out) at `t_ms`, if any.
 fn resolve_transition(layer: &crate::model::Layer, t_ms: u32) -> Option<ResolvedTransition> {
+    resolve_transition_windows(&layer.transition_in, &layer.transition_out, layer.start_ms, layer.end_ms, t_ms)
+}
+
+/// Resolve an in/out transition pair over the window [`start_ms`, `end_ms`] at
+/// `t_ms`. Shared by layer transitions and per-cell grid transitions. When both
+/// windows overlap, the more-transitioned (smaller factor) one wins.
+fn resolve_transition_windows(
+    transition_in: &Option<crate::model::Transition>,
+    transition_out: &Option<crate::model::Transition>,
+    start_ms: u32,
+    end_ms: u32,
+    t_ms: u32,
+) -> Option<ResolvedTransition> {
     let mut factor = 2.0f32; // sentinel above any real factor
     let mut kind = None;
     let mut direction = 0u8;
@@ -262,12 +330,12 @@ fn resolve_transition(layer: &crate::model::Layer, t_ms: u32) -> Option<Resolved
     let mut params: Option<String> = None;
     // A transition can't be longer than the clip it plays over, or it never
     // finishes (progress stays near 0) and you only ever see its opening — which
-    // reads as a slow fade. Clamp each window to the layer's span.
-    let span = layer.end_ms.saturating_sub(layer.start_ms).max(1);
-    if let Some(ti) = &layer.transition_in {
+    // reads as a slow fade. Clamp each window to the span.
+    let span = end_ms.saturating_sub(start_ms).max(1);
+    if let Some(ti) = transition_in {
         let dur = ti.dur_ms.min(span);
-        if dur > 0 && t_ms < layer.start_ms + dur {
-            let u = t_ms.saturating_sub(layer.start_ms) as f32 / dur as f32;
+        if dur > 0 && t_ms < start_ms + dur {
+            let u = t_ms.saturating_sub(start_ms) as f32 / dur as f32;
             let f = ease(Easing::EaseInOut, u);
             if f < factor {
                 factor = f;
@@ -278,11 +346,11 @@ fn resolve_transition(layer: &crate::model::Layer, t_ms: u32) -> Option<Resolved
             }
         }
     }
-    if let Some(to) = &layer.transition_out {
+    if let Some(to) = transition_out {
         let dur = to.dur_ms.min(span);
-        let start_out = layer.end_ms.saturating_sub(dur);
+        let start_out = end_ms.saturating_sub(dur);
         if dur > 0 && t_ms > start_out {
-            let u = layer.end_ms.saturating_sub(t_ms) as f32 / dur as f32;
+            let u = end_ms.saturating_sub(t_ms) as f32 / dur as f32;
             let f = ease(Easing::EaseInOut, u);
             if f < factor {
                 factor = f;
@@ -647,9 +715,33 @@ pub fn evaluate(
 
             // FrameGrid → its resolved (warped) lattice + per-cell quads.
             let frame_grid = match &layer.kind {
-                LayerKind::FrameGrid { rows, cols, cell_w, cell_h, vertices, cells, .. } => Some(
-                    resolve_frame_grid(*rows, *cols, *cell_w, *cell_h, vertices, cells, t_ms),
-                ),
+                LayerKind::FrameGrid {
+                    rows,
+                    cols,
+                    cell_w,
+                    cell_h,
+                    vertices,
+                    cells,
+                    linked,
+                    line_width,
+                    line_color,
+                    line_color_keys,
+                    ..
+                } => Some(resolve_frame_grid(
+                    *rows,
+                    *cols,
+                    *cell_w,
+                    *cell_h,
+                    vertices,
+                    cells,
+                    linked,
+                    *line_width,
+                    *line_color,
+                    line_color_keys,
+                    layer.start_ms,
+                    layer.end_ms,
+                    t_ms,
+                )),
                 _ => None,
             };
 

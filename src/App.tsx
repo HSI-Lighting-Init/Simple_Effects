@@ -2,10 +2,21 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouse
 import Konva from "konva";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 import Preview from "./components/Preview";
 import Timeline from "./components/Timeline";
 import Inspector from "./components/Inspector";
+import MediaPanel from "./components/MediaPanel";
+import AudioLayers from "./components/AudioLayers";
+import {
+  mediaKind,
+  getVideoMeta,
+  getAudioMeta,
+  getVideoPoster,
+  seekVideosForFrame,
+  IMPORT_EXTENSIONS,
+} from "./lib/media";
 import RecorderPanel from "./components/RecorderPanel";
 import ContextMenu from "./components/ContextMenu";
 import MenuBar, { type MenuDef } from "./components/MenuBar";
@@ -17,14 +28,32 @@ import {
   addEffect,
   addFrameGrid,
   addImageLayer,
+  addVideoLayer,
+  addAudioLayer,
   addShapeLayer,
   setCellImage,
   clearCellImage,
+  setCellTransition,
   setCellZoom,
   setGridVertices,
   setGridConstrain,
+  setGridLineWidth,
+  setGridLineColor,
+  clearGridLineColor,
   mergeCell,
   splitCell,
+  addCellEffect,
+  removeCellEffect,
+  keyCellEffect,
+  setCellWipeStatic,
+  linkEffect,
+  addLinkedEffect,
+  removeLinkedEffectItem,
+  keyLinkedEffect,
+  setLinkedWipeStatic,
+  removeLinkedGroup,
+  setLinkedMember,
+  unlinkCell,
   addTextLayer,
   setCompSize,
   setCompDuration,
@@ -173,8 +202,18 @@ export default function App() {
   // Resizable panels: inspector width + timeline height (px), dragged via the
   // splitters between the preview / inspector / timeline.
   const [inspectorW, setInspectorW] = useState(300);
+  const [mediaW, setMediaW] = useState(180);
   const [timelineH, setTimelineH] = useState(224);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  // Multi-selection of layers (timeline area): every selected id, with
+  // `selectedId` as the primary (drives the inspector / preview transformer).
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  // The media bin (imported image/video/audio paths, not necessarily placed yet).
+  const [media, setMedia] = useState<string[]>([]);
+  // Thumbnails for non-image media (video poster frames), path → data URL.
+  const [mediaThumbs, setMediaThumbs] = useState<Record<string, string>>({});
+  // True while an OS file drag is hovering the window (shows the drop overlay).
+  const [fileDragging, setFileDragging] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recCount, setRecCount] = useState(0);
   const [showRecorder, setShowRecorder] = useState(false);
@@ -225,11 +264,13 @@ export default function App() {
   const projectRef = useRef<Project | null>(null);
   const resolvedRef = useRef<Record<number, ResolvedLayer>>({});
   const selectedIdRef = useRef<number | null>(null);
+  const selectedIdsRef = useRef<number[]>([]);
   const lastSeekRecRef = useRef(0);
 
   useEffect(() => { projectRef.current = project; }, [project]);
   useEffect(() => { resolvedRef.current = resolved; }, [resolved]);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
+  useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
 
   // A compact snapshot of the scene (every layer's resolved transform + the
   // kind-specific bits) for the recorder.
@@ -365,6 +406,26 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
+  // Drag the vertical splitter to resize the media bin (left panel).
+  const startMediaResize = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = mediaW;
+    const move = (ev: MouseEvent) => {
+      setMediaW(Math.max(120, Math.min(420, startW + (ev.clientX - startX))));
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+
   // Drag the vertical splitter to resize the inspector (right panel). Dragging
   // left widens it (it's anchored to the right edge).
   const startInspectorResize = (e: ReactMouseEvent) => {
@@ -494,6 +555,88 @@ export default function App() {
     await applyTime(timeRef.current);
     recordAction("add_image", { layerId: newId, path: selected });
   }, [resolveImages, applyTime, recordAction]);
+
+  // --- Media bin ---------------------------------------------------------
+  // Add image/video/audio files to the bin (dedup) and load their thumbnails
+  // (image data URLs / video poster frames). Accepts dialog or OS-drop paths.
+  const addMediaPaths = useCallback(async (paths: string[]) => {
+    const supported = paths.filter((p) => mediaKind(p) != null);
+    if (!supported.length) return;
+    setMedia((cur) => {
+      const seen = new Set(cur);
+      return [...cur, ...supported.filter((p) => !seen.has(p))];
+    });
+    const imgThumbs: Record<string, string> = {};
+    const vidThumbs: Record<string, string> = {};
+    for (const src of supported) {
+      const kind = mediaKind(src);
+      try {
+        if (kind === "image") imgThumbs[src] = await loadImageDataUrl(src);
+        else if (kind === "video") vidThumbs[src] = await getVideoPoster(src);
+      } catch (e) {
+        console.warn("thumbnail", src, e);
+      }
+    }
+    if (Object.keys(imgThumbs).length) setImages((m) => ({ ...m, ...imgThumbs }));
+    if (Object.keys(vidThumbs).length) setMediaThumbs((m) => ({ ...m, ...vidThumbs }));
+    recordAction("media_import", { count: supported.length });
+  }, [recordAction]);
+
+  const onImportMedia = useCallback(async () => {
+    const selected = await open({
+      multiple: true,
+      filters: [{ name: "Media", extensions: IMPORT_EXTENSIONS }],
+    });
+    const paths = Array.isArray(selected) ? selected : typeof selected === "string" ? [selected] : [];
+    if (paths.length) await addMediaPaths(paths);
+  }, [addMediaPaths]);
+
+  const onAddMediaToTimeline = useCallback(async (path: string) => {
+    const kind = mediaKind(path);
+    let p: Project;
+    if (kind === "video") {
+      const meta = await getVideoMeta(path).catch(() => ({ width: 1280, height: 720, durationMs: 0 }));
+      p = await addVideoLayer(path, meta.width, meta.height, meta.durationMs);
+    } else if (kind === "audio") {
+      const meta = await getAudioMeta(path).catch(() => ({ durationMs: 0 }));
+      p = await addAudioLayer(path, meta.durationMs);
+    } else {
+      p = await addImageLayer(path);
+      await resolveImages(p);
+    }
+    setProject(p);
+    durationRef.current = p.durationMs;
+    const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
+    if (newId != null) setSelectedId(newId);
+    await applyTime(timeRef.current);
+    recordAction("add_media", { layerId: newId, path, kind });
+  }, [resolveImages, applyTime, recordAction]);
+
+  const onRemoveMedia = useCallback((path: string) => {
+    setMedia((cur) => cur.filter((p) => p !== path));
+  }, []);
+
+  // OS file drag-and-drop: WebView2 hands file drops to Tauri (not the DOM), so
+  // we listen on the webview and add any dropped images to the media bin.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === "over") setFileDragging(true);
+        else if (p.type === "leave") setFileDragging(false);
+        else if (p.type === "drop") {
+          setFileDragging(false);
+          if (p.paths?.length) void addMediaPaths(p.paths);
+        }
+      })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch(() => {});
+    return () => unlisten?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addMediaPaths]);
 
   const onAddText = useCallback(async () => {
     const p = await addTextLayer("سلام", 140);
@@ -687,6 +830,55 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("set_grid_constrain", { layerId, mode });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onSetGridLineWidth = useCallback(
+    async (layerId: number, width: number) => {
+      const p = await setGridLineWidth(layerId, width);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("set_grid_line_width", { layerId, width });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onSetGridLineColor = useCallback(
+    async (layerId: number, color: Rgba) => {
+      const p = await setGridLineColor(layerId, color, Math.round(timeRef.current), true);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("set_grid_line_color", { layerId });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onClearGridLineColor = useCallback(
+    async (layerId: number, color: Rgba) => {
+      const p = await clearGridLineColor(layerId, color);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("clear_grid_line_color", { layerId });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Set (or clear) a grid cell's in/out transition.
+  const onSetCellTransition = useCallback(
+    async (
+      layerId: number,
+      cell: number,
+      slot: "in" | "out",
+      durMs: number,
+      direction: number,
+      engine: string | null,
+      params: string | null
+    ) => {
+      const p = await setCellTransition(layerId, cell, slot, durMs, direction, engine, params);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("set_cell_transition", { layerId, cell, slot, engine });
     },
     [applyTime, recordAction]
   );
@@ -947,6 +1139,115 @@ export default function App() {
       recordAction("wipe_static", { layerId, index, angle, invert });
     },
     [applyTime, recordAction]
+  );
+
+  // Per-cell effect stack (multi-frame grid). Mirror the layer-effect handlers,
+  // threading the selected cell index.
+  const onAddCellEffect = useCallback(
+    async (layerId: number, cell: number, kind: string) => {
+      const p = await addCellEffect(layerId, cell, kind);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("add_cell_effect", { layerId, cell, kind });
+    },
+    [applyTime, recordAction]
+  );
+  const onRemoveCellEffect = useCallback(
+    async (layerId: number, cell: number, index: number) => {
+      const p = await removeCellEffect(layerId, cell, index);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("remove_cell_effect", { layerId, cell, index });
+    },
+    [applyTime, recordAction]
+  );
+  const onKeyCellEffect = useCallback(
+    async (
+      layerId: number,
+      cell: number,
+      index: number,
+      param: "amount" | "radius" | "degrees" | "position" | "softness",
+      value: number,
+      seedStart: boolean
+    ) => {
+      const p = await keyCellEffect(layerId, cell, index, param, Math.round(timeRef.current), value, seedStart);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("key_cell_effect", { layerId, cell, index, param, value });
+    },
+    [applyTime, recordAction]
+  );
+  const onSetCellWipeStatic = useCallback(
+    async (layerId: number, cell: number, index: number, angle: number, invert: boolean) => {
+      const p = await setCellWipeStatic(layerId, cell, index, angle, invert);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("cell_wipe_static", { layerId, cell, index, angle, invert });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Linked (shared) effect groups. A thin wrapper per command; all keyframe/edit
+  // at the playhead and re-resolve.
+  const runGridEdit = useCallback(
+    async (p: Promise<Project>, action: string, data: Record<string, unknown>) => {
+      const proj = await p;
+      setProject(proj);
+      await applyTime(timeRef.current);
+      recordAction(action, data);
+    },
+    [applyTime, recordAction]
+  );
+  const onLinkEffect = useCallback(
+    (layerId: number, kind: string, cells: number[]) =>
+      runGridEdit(linkEffect(layerId, kind, cells), "link_effect", { layerId, kind, count: cells.length }),
+    [runGridEdit]
+  );
+  const onAddLinkedEffect = useCallback(
+    (layerId: number, groupId: number, kind: string) =>
+      runGridEdit(addLinkedEffect(layerId, groupId, kind), "add_linked_effect", { layerId, groupId, kind }),
+    [runGridEdit]
+  );
+  const onRemoveLinkedEffectItem = useCallback(
+    (layerId: number, groupId: number, index: number) =>
+      runGridEdit(removeLinkedEffectItem(layerId, groupId, index), "remove_linked_effect", { layerId, groupId, index }),
+    [runGridEdit]
+  );
+  const onKeyLinkedEffect = useCallback(
+    (
+      layerId: number,
+      groupId: number,
+      index: number,
+      param: "amount" | "radius" | "degrees" | "position" | "softness",
+      value: number,
+      seedStart: boolean
+    ) =>
+      runGridEdit(
+        keyLinkedEffect(layerId, groupId, index, param, Math.round(timeRef.current), value, seedStart),
+        "key_linked_effect",
+        { layerId, groupId, index, param, value }
+      ),
+    [runGridEdit]
+  );
+  const onSetLinkedWipeStatic = useCallback(
+    (layerId: number, groupId: number, index: number, angle: number, invert: boolean) =>
+      runGridEdit(setLinkedWipeStatic(layerId, groupId, index, angle, invert), "linked_wipe_static", { layerId, groupId, index }),
+    [runGridEdit]
+  );
+  const onRemoveLinkedGroup = useCallback(
+    (layerId: number, groupId: number) =>
+      runGridEdit(removeLinkedGroup(layerId, groupId), "remove_linked_group", { layerId, groupId }),
+    [runGridEdit]
+  );
+  const onSetLinkedMember = useCallback(
+    (layerId: number, groupId: number, cell: number, member: boolean) =>
+      runGridEdit(setLinkedMember(layerId, groupId, cell, member), "set_linked_member", { layerId, groupId, cell, member }),
+    [runGridEdit]
+  );
+  const onUnlinkCell = useCallback(
+    (layerId: number, groupId: number, cell: number) =>
+      runGridEdit(unlinkCell(layerId, groupId, cell), "unlink_cell", { layerId, groupId, cell }),
+    [runGridEdit]
   );
 
   // Delete a whole layer (object). Deselects + exits decompose if it was active.
@@ -1355,6 +1656,19 @@ export default function App() {
                 dbgFactors.push(withTr?.transition ? withTr.transition.factor : null);
                 setResolved(map);
                 setTime(tMs);
+                // Seek every video layer to this exact source-time and wait for the
+                // decode, so the captured frame shows the right video content.
+                const videoTargets = p.layers
+                  .filter((l) => l.kind.kind === "video")
+                  .map((l) => {
+                    const durMs = l.kind.kind === "video" ? l.kind.durationMs : 0;
+                    const localSec = Math.max(0, (tMs - l.startMs) / 1000);
+                    return {
+                      layerId: l.id,
+                      timeSec: durMs > 0 ? Math.min(localSec, durMs / 1000 - 0.001) : localSec,
+                    };
+                  });
+                if (videoTargets.length) await seekVideosForFrame(videoTargets);
                 // Yield: microtask drain + two animation frames. This lets React's
                 // async commit and react-konva's reconciler+batchDraw fully run.
                 await Promise.resolve();
@@ -1565,17 +1879,48 @@ export default function App() {
     recordAction("keyframe", { layerId: selectedId });
   }, [selectedId, resolved, applyTime, recordAction]);
 
-  // User-initiated selection is recorded; internal auto-selects use setSelectedId.
+  // User-initiated selection is recorded. `additive` (Ctrl/⌘/Shift-click in the
+  // timeline) toggles the layer in/out of a multi-selection; otherwise it becomes
+  // the sole selection. The primary (`selectedId`) drives the inspector/preview.
   const selectLayer = useCallback(
-    (id: number | null) => {
-      setSelectedId(id);
+    (id: number | null, additive = false) => {
+      if (id == null) {
+        setSelectedId(null);
+        setSelectedIds([]);
+      } else if (additive) {
+        setSelectedIds((cur) => {
+          if (cur.includes(id)) {
+            const next = cur.filter((x) => x !== id);
+            setSelectedId(next.length ? next[next.length - 1] : null);
+            return next;
+          }
+          setSelectedId(id);
+          return [...cur, id];
+        });
+      } else {
+        setSelectedId(id);
+        setSelectedIds([id]);
+      }
       // Leave decompose mode if we're selecting a different layer.
       setDecomposeId((cur) => (cur != null && cur !== id ? null : cur));
       setSelectedPart(null);
-      recordAction("select", { layerId: id });
+      recordAction("select", { layerId: id, additive });
     },
     [recordAction]
   );
+
+  // Keep the multi-selection consistent with the primary selection for every
+  // internal single-select (adding a layer, paste, delete, undo, etc. all call
+  // `setSelectedId` directly): if the primary lands outside the current
+  // multi-selection, collapse the selection to just it.
+  useEffect(() => {
+    if (selectedId == null) {
+      setSelectedIds((cur) => (cur.length ? [] : cur));
+    } else {
+      setSelectedIds((cur) => (cur.includes(selectedId) ? cur : [selectedId]));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   const doUndo = useCallback(async () => {
     const p = await undo();
@@ -1667,10 +2012,16 @@ export default function App() {
       // Delete / Backspace removes the selected layer (not while in decompose
       // per-glyph editing, where it may mean something else).
       if ((e.key === "Delete" || e.key === "Backspace") && !inField) {
+        const ids = selectedIdsRef.current;
         const sel = selectedIdRef.current;
-        if (sel != null && decomposeId == null) {
+        if (decomposeId == null && (ids.length || sel != null)) {
           e.preventDefault();
-          void onDeleteLayer(sel);
+          // Delete every selected layer (multi-select). Order doesn't matter —
+          // ids are independent objects.
+          const toDelete = ids.length ? ids : sel != null ? [sel] : [];
+          void (async () => {
+            for (const id of toDelete) await onDeleteLayer(id);
+          })();
         }
         return;
       }
@@ -1872,6 +2223,18 @@ export default function App() {
   const cellMerged = selectedResolvedCell
     ? selectedResolvedCell.rowSpan > 1 || selectedResolvedCell.colSpan > 1
     : false;
+  const cellEffects = selectedResolvedCell?.effects ?? [];
+  const gridLinked = selectedId != null ? resolved[selectedId]?.frameGrid?.linked ?? [] : [];
+  // Grid line style at the playhead (colour may be keyframed) for the inspector.
+  const gridLineWidth = (selectedId != null ? resolved[selectedId]?.frameGrid?.lineWidth : null) ?? 0;
+  const gridLineColor =
+    (selectedId != null ? resolved[selectedId]?.frameGrid?.lineColor : null) ??
+    ({ r: 255, g: 255, b: 255, a: 255 } as Rgba);
+  // The selected cell's in/out transitions (from the project model, not resolved).
+  const selectedGridCell =
+    selectedLayer?.kind.kind === "framegrid" && selectedCell != null && selectedCell.layerId === selectedId
+      ? selectedLayer.kind.cells[selectedCell.cell] ?? null
+      : null;
   // The image layer open in the isolated Effect Editor (if any).
   const fxLayer = fxEditorId != null ? project.layers.find((l) => l.id === fxEditorId) ?? null : null;
 
@@ -2055,6 +2418,12 @@ export default function App() {
       style={{ gridTemplateRows: `30px 48px 1fr 6px ${timelineH}px` }}
     >
       <MenuBar menus={menus} />
+      {fileDragging && (
+        <div className="drop-overlay">
+          <div className="drop-card">⤓ Drop media (image / video / audio) to add it to the bin</div>
+        </div>
+      )}
+      <AudioLayers project={project} timeMs={time} playing={playing} />
       <header className="toolbar">
         <span className="brand" title={`build ${__BUILD_STAMP__}`}>simple · effects</span>
         <span className="build-stamp" title="Build timestamp — confirms the running app is the latest build">
@@ -2117,7 +2486,22 @@ export default function App() {
         </span>
       </header>
 
-      <div className="mid" style={{ gridTemplateColumns: `1fr 6px ${inspectorW}px` }}>
+      <div
+        className="mid"
+        style={{ gridTemplateColumns: `${mediaW}px 6px 1fr 6px ${inspectorW}px` }}
+      >
+        <MediaPanel
+          media={media}
+          thumbs={{ ...images, ...mediaThumbs }}
+          onImport={onImportMedia}
+          onAddToTimeline={onAddMediaToTimeline}
+          onRemove={onRemoveMedia}
+        />
+        <div
+          className="v-resizer"
+          onMouseDown={startMediaResize}
+          title="Drag to resize the media bin"
+        />
         <main className="stage-area">
           <Preview
             project={project}
@@ -2199,12 +2583,34 @@ export default function App() {
           selectedCell={selectedCell?.layerId === selectedLayer?.id ? selectedCell?.cell ?? null : null}
           cellZoomNow={cellZoomNow}
           cellMerged={cellMerged}
+          cellEffects={cellEffects}
+          cellTransitionIn={selectedGridCell?.transitionIn ?? null}
+          cellTransitionOut={selectedGridCell?.transitionOut ?? null}
           onSetCellImage={onSetCellImage}
           onClearCellImage={onClearCellImage}
           onSetCellZoom={onSetCellZoom}
+          onSetCellTransition={onSetCellTransition}
           onSetGridConstrain={onSetGridConstrain}
+          lineWidth={gridLineWidth}
+          lineColor={gridLineColor}
+          onSetGridLineWidth={onSetGridLineWidth}
+          onSetGridLineColor={onSetGridLineColor}
+          onClearGridLineColor={onClearGridLineColor}
           onMergeCell={onMergeCell}
           onSplitCell={onSplitCell}
+          onAddCellEffect={onAddCellEffect}
+          onRemoveCellEffect={onRemoveCellEffect}
+          onKeyCellEffect={onKeyCellEffect}
+          onSetCellWipeStatic={onSetCellWipeStatic}
+          gridLinked={gridLinked}
+          onLinkEffect={onLinkEffect}
+          onAddLinkedEffect={onAddLinkedEffect}
+          onRemoveLinkedEffectItem={onRemoveLinkedEffectItem}
+          onKeyLinkedEffect={onKeyLinkedEffect}
+          onSetLinkedWipeStatic={onSetLinkedWipeStatic}
+          onRemoveLinkedGroup={onRemoveLinkedGroup}
+          onSetLinkedMember={onSetLinkedMember}
+          onUnlinkCell={onUnlinkCell}
         />
       </div>
 
@@ -2218,6 +2624,7 @@ export default function App() {
         project={project}
         time={time}
         selectedId={selectedId}
+        selectedIds={selectedIds}
         onSelect={selectLayer}
         onToggleHidden={onToggleHidden}
         onSeek={(t) => {

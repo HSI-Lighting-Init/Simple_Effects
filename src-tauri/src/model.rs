@@ -197,7 +197,62 @@ pub enum LayerKind {
         constrain: ConstrainMode,
         /// One per cell (row-major, rows*cols).
         cells: Vec<FrameCell>,
+        /// Shared effect stacks applied across several cells at once (the "sync"
+        /// feature). A member cell renders its local effects then each linked
+        /// group it belongs to.
+        #[serde(default)]
+        linked: Vec<LinkedEffectGroup>,
+        /// Grid line thickness in layer-local px (0 = no lines drawn). Scaled by
+        /// the layer transform like the rest of the mesh.
+        #[serde(default = "default_line_width")]
+        line_width: f32,
+        /// Base grid line colour. Overridden by `line_color_keys` when non-empty
+        /// (so the line colour can be keyframed over the clip).
+        #[serde(default = "default_line_color")]
+        line_color: Rgba,
+        /// Keyframeable grid line colour. Empty = the static `line_color`.
+        #[serde(default, rename = "lineColorKeys")]
+        line_color_keys: Vec<ColorKey>,
     },
+    /// A video loaded from disk. Renders like an `Image` but the displayed frame
+    /// tracks the playhead (comp time since the layer start → source time). The
+    /// frontend owns decode/playback via an `HTMLVideoElement`; `width`/`height`
+    /// are the natural pixel size and `duration_ms` the clip's intrinsic length.
+    Video {
+        src: String,
+        width: u32,
+        height: u32,
+        #[serde(default, rename = "durationMs")]
+        duration_ms: u32,
+    },
+    /// An audio clip. No visual — it plays during preview playback, synced to the
+    /// playhead over its `[start_ms, end_ms]` range. `duration_ms` is the clip's
+    /// intrinsic length.
+    Audio {
+        src: String,
+        #[serde(default, rename = "durationMs")]
+        duration_ms: u32,
+    },
+}
+
+fn default_line_width() -> f32 {
+    0.0
+}
+fn default_line_color() -> Rgba {
+    Rgba { r: 255, g: 255, b: 255, a: 255 }
+}
+
+/// A shared effect stack applied to several `FrameGrid` cells at once. Editing it
+/// updates every member; "unlinking" a cell copies these effects into that cell's
+/// own stack so it can diverge.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct LinkedEffectGroup {
+    pub id: u32,
+    pub effects: Vec<Effect>,
+    /// Cell indices (row-major) this group applies to.
+    pub members: Vec<u32>,
 }
 
 /// One vertex of a `FrameGrid`'s lattice — a keyframeable offset (px) from the
@@ -265,6 +320,12 @@ pub struct FrameCell {
     pub row_span: u32,
     #[serde(default)]
     pub effects: Vec<Effect>,
+    /// Per-cell in/out transitions, played over the grid layer's start/end (the
+    /// cell's image assembles in / breaks out). Same engine as layer transitions.
+    #[serde(default)]
+    pub transition_in: Option<Transition>,
+    #[serde(default)]
+    pub transition_out: Option<Transition>,
 }
 
 fn one_track() -> Track {
@@ -285,6 +346,8 @@ impl Default for FrameCell {
             col_span: 1,
             row_span: 1,
             effects: Vec::new(),
+            transition_in: None,
+            transition_out: None,
         }
     }
 }

@@ -7,6 +7,7 @@ import type { FrameCell } from "./FrameCell";
 import type { GridVertex } from "./GridVertex";
 import type { LetterAnimation } from "./LetterAnimation";
 import type { LetterOverride } from "./LetterOverride";
+import type { LinkedEffectGroup } from "./LinkedEffectGroup";
 import type { Rgba } from "./Rgba";
 import type { SurfaceShape } from "./SurfaceShape";
 import type { TextAnimator } from "./TextAnimator";
@@ -90,4 +91,24 @@ vertices: Array<GridVertex>, constrain: ConstrainMode,
 /**
  * One per cell (row-major, rows*cols).
  */
-cells: Array<FrameCell>, };
+cells: Array<FrameCell>, 
+/**
+ * Shared effect stacks applied across several cells at once (the "sync"
+ * feature). A member cell renders its local effects then each linked
+ * group it belongs to.
+ */
+linked: Array<LinkedEffectGroup>, 
+/**
+ * Grid line thickness in layer-local px (0 = no lines drawn). Scaled by
+ * the layer transform like the rest of the mesh.
+ */
+line_width: number, 
+/**
+ * Base grid line colour. Overridden by `line_color_keys` when non-empty
+ * (so the line colour can be keyframed over the clip).
+ */
+line_color: Rgba, 
+/**
+ * Keyframeable grid line colour. Empty = the static `line_color`.
+ */
+lineColorKeys: Array<ColorKey>, } | { "kind": "video", src: string, width: number, height: number, durationMs: number, } | { "kind": "audio", src: string, durationMs: number, };

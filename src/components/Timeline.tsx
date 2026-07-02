@@ -21,12 +21,16 @@ function tcLabel(ms: number, fps: number, frames: boolean): string {
   return `${s}s`;
 }
 
-/** A live drag of a layer block: moving the whole range or trimming one edge. */
+/** A live drag of a layer block: moving the whole range or trimming one edge.
+ *  In "move" mode every layer in `groupIds` shifts by `deltaMs` (multi-select
+ *  group move); trims only affect the primary `id`. */
 interface Drag {
   id: number;
   mode: "move" | "start" | "end";
   startMs: number;
   endMs: number;
+  deltaMs: number;
+  groupIds: number[];
   moved: boolean;
 }
 
@@ -35,6 +39,8 @@ function kindColor(l: Layer): string {
   if (k.kind === "colorpatch") return `rgb(${k.color.r}, ${k.color.g}, ${k.color.b})`;
   if (k.kind === "text") return "#6c8cff";
   if (k.kind === "shape3d") return "#b06cff";
+  if (k.kind === "video") return "#e08a3c";
+  if (k.kind === "audio") return "#3ca0e0";
   return "#3bb6a6"; // image
 }
 
@@ -62,7 +68,10 @@ interface Props {
   project: Project;
   time: number;
   selectedId: number | null;
-  onSelect: (id: number | null) => void;
+  /** Every selected layer id (multi-select) — all get highlighted. */
+  selectedIds: number[];
+  /** Select a layer. `additive` (Ctrl/⌘/Shift-click) toggles it in a multi-select. */
+  onSelect: (id: number | null, additive?: boolean) => void;
   onToggleHidden: (id: number) => void;
   onSeek: (t: number) => void;
   onDeleteLayer: (id: number) => void;
@@ -83,6 +92,7 @@ export default function Timeline({
   project,
   time,
   selectedId,
+  selectedIds,
   onSelect,
   onToggleHidden,
   onSeek,
@@ -165,7 +175,11 @@ export default function Timeline({
   const startRowDrag = (e: React.MouseEvent, layer: Layer) => {
     // Let the eye/▼ and delete buttons handle their own clicks.
     if ((e.target as HTMLElement).closest("button")) return;
-    onSelect(layer.id);
+    // Ctrl/⌘/Shift-click adds to the multi-selection; a plain click on an already
+    // multi-selected row keeps the group (so it can be group-dragged).
+    const additive = e.ctrlKey || e.metaKey || e.shiftKey;
+    if (additive) onSelect(layer.id, true);
+    else if (!selectedIds.includes(layer.id)) onSelect(layer.id);
     const startY = e.clientY;
     let over: number | null = null;
     let moved = false;
@@ -192,6 +206,10 @@ export default function Timeline({
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
       if (moved && over != null) commitReorder(layer.id, over);
+      else if (!moved && !additive && selectedIds.includes(layer.id) && selectedIds.length > 1) {
+        // Plain click on a member of a multi-selection collapses to just it.
+        onSelect(layer.id);
+      }
       setRowDragId(null);
       setRowOverId(null);
     };
@@ -216,22 +234,45 @@ export default function Timeline({
     layer: Layer,
     mode: Drag["mode"]
   ) => {
-    e.stopPropagation(); // don't scrub the playhead
+    e.stopPropagation(); // this is a layer edit, not a playhead scrub
     if (razor) {
       splitAt(e.clientX, layer);
       return;
     }
-    onSelect(layer.id);
+    // Ctrl/⌘/Shift-click toggles multi-selection (no drag). A plain click on a
+    // layer that isn't already part of a multi-selection selects just it.
+    const additive = e.ctrlKey || e.metaKey || e.shiftKey;
+    if (additive) {
+      onSelect(layer.id, true);
+      return;
+    }
+    const inGroup = mode === "move" && selectedIds.includes(layer.id) && selectedIds.length > 1;
+    if (!inGroup) onSelect(layer.id);
+
     const el = tracksRef.current;
     if (!el) return;
     const trackW = el.getBoundingClientRect().width || 1;
     const span = layer.endMs - layer.startMs;
     const startX = e.clientX;
-    // Snap targets: the comp bounds, the playhead, and every other layer's edges.
+
+    // The layers that move together, and their ranges at drag start.
+    const groupIds = inGroup ? selectedIds.slice() : [layer.id];
+    const orig = new Map<number, { s: number; e: number }>();
+    let groupMinStart = Infinity;
+    let groupMaxEnd = -Infinity;
+    for (const gid of groupIds) {
+      const L = project.layers.find((l) => l.id === gid);
+      if (!L) continue;
+      orig.set(gid, { s: L.startMs, e: L.endMs });
+      groupMinStart = Math.min(groupMinStart, L.startMs);
+      groupMaxEnd = Math.max(groupMaxEnd, L.endMs);
+    }
+
+    // Snap targets: the comp bounds, the playhead, and every non-moving layer's edges.
     const thresholdMs = (7 / trackW) * dur;
     const snapTargets = [0, dur, time];
     for (const o of project.layers) {
-      if (o.id !== layer.id) snapTargets.push(o.startMs, o.endMs);
+      if (!groupIds.includes(o.id)) snapTargets.push(o.startMs, o.endMs);
     }
     const snap = (v: number) => {
       let best = v;
@@ -250,6 +291,8 @@ export default function Timeline({
       mode,
       startMs: layer.startMs,
       endMs: layer.endMs,
+      deltaMs: 0,
+      groupIds,
       moved: false,
     };
     setDrag(next);
@@ -258,9 +301,10 @@ export default function Timeline({
       const dMs = ((ev.clientX - startX) / trackW) * dur;
       let s = layer.startMs;
       let en = layer.endMs;
+      let delta = 0;
       if (mode === "move") {
         let ns = layer.startMs + dMs;
-        // Snap whichever edge lands closest to a target; move both together.
+        // Snap whichever edge lands closest to a target; move the whole group together.
         const snS = snap(ns);
         const snE = snap(ns + span);
         if (snS !== ns && (snE === ns + span || Math.abs(snS - ns) <= Math.abs(snE - (ns + span)))) {
@@ -268,9 +312,11 @@ export default function Timeline({
         } else if (snE !== ns + span) {
           ns = snE - span;
         }
-        ns = Math.max(0, Math.min(dur - span, ns));
-        s = Math.round(ns);
-        en = Math.round(ns + span);
+        delta = ns - layer.startMs;
+        // Keep the rigid group inside the comp bounds.
+        delta = Math.max(-groupMinStart, Math.min(dur - groupMaxEnd, delta));
+        s = Math.round(layer.startMs + delta);
+        en = Math.round(layer.endMs + delta);
       } else if (mode === "start") {
         s = Math.round(Math.max(0, Math.min(layer.endMs - MIN_SPAN_MS, snap(layer.startMs + dMs))));
         en = layer.endMs;
@@ -278,13 +324,32 @@ export default function Timeline({
         s = layer.startMs;
         en = Math.round(Math.min(dur, Math.max(layer.startMs + MIN_SPAN_MS, snap(layer.endMs + dMs))));
       }
-      next = { ...next, startMs: s, endMs: en, moved: next.moved || Math.abs(ev.clientX - startX) > 3 };
+      next = {
+        ...next,
+        startMs: s,
+        endMs: en,
+        deltaMs: delta,
+        moved: next.moved || Math.abs(ev.clientX - startX) > 3,
+      };
       setDrag(next);
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
-      if (next.moved) onSetLayerRange(next.id, next.startMs, next.endMs);
+      if (next.moved) {
+        if (mode === "move" && next.groupIds.length > 1) {
+          for (const gid of next.groupIds) {
+            const o = orig.get(gid);
+            if (o) onSetLayerRange(gid, Math.round(o.s + next.deltaMs), Math.round(o.e + next.deltaMs));
+          }
+        } else {
+          onSetLayerRange(next.id, next.startMs, next.endMs);
+        }
+      } else if (inGroup) {
+        // A plain click (no drag) on a member of a multi-selection collapses to
+        // just that layer.
+        onSelect(layer.id);
+      }
       setDrag(null);
     };
     window.addEventListener("mousemove", move);
@@ -392,7 +457,7 @@ export default function Timeline({
           </span>
         </div>
 
-        <div className="tl-ruler" ref={rulerRef}>
+        <div className="tl-ruler" ref={rulerRef} onMouseDown={onMouseDown} title="Click or drag to move the playhead">
           <div className="tl-ruler-inner" ref={rulerInnerRef} style={{ width: `${zoom * 100}%` }}>
             {minorTicks.map((t) => (
               <span
@@ -421,15 +486,15 @@ export default function Timeline({
               data-layer-id={l.id}
               className={
                 "tl-label" +
-                (l.id === selectedId ? " selected" : "") +
+                (selectedIds.includes(l.id) ? " selected" : "") +
+                (l.id === selectedId ? " primary" : "") +
                 (l.hidden ? " hidden" : "") +
                 (l.id === rowDragId ? " row-dragging" : "") +
                 (l.id === rowOverId && rowDragId != null && rowOverId !== rowDragId
                   ? " row-over"
                   : "")
               }
-              title="Drag onto another layer to drop this one under it"
-              onClick={() => onSelect(l.id)}
+              title="Click to select · Ctrl/Shift-click to multi-select · drag onto another layer to reorder"
               onMouseDown={(e) => startRowDrag(e, l)}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -472,26 +537,40 @@ export default function Timeline({
             className={"tl-tracks-inner" + (razor ? " razor" : "")}
             ref={tracksRef}
             style={{ width: `${zoom * 100}%` }}
-            onMouseDown={onMouseDown}
+            onMouseDown={(e) => {
+              // Clicking empty track space clears the selection — it never scrubs
+              // the playhead (that's the ruler's job).
+              if (e.target === e.currentTarget) onSelect(null);
+            }}
           >
           {layers.map((l) => {
-            // While dragging this layer, render from the live preview range.
-            const sMs = drag?.id === l.id ? drag.startMs : l.startMs;
-            const eMs = drag?.id === l.id ? drag.endMs : l.endMs;
+            // While dragging, render from the live preview range. In a group move
+            // every selected layer shifts by the same delta.
+            let sMs = l.startMs;
+            let eMs = l.endMs;
+            if (drag && drag.groupIds.includes(l.id)) {
+              if (drag.mode === "move") {
+                sMs = Math.round(l.startMs + drag.deltaMs);
+                eMs = Math.round(l.endMs + drag.deltaMs);
+              } else if (drag.id === l.id) {
+                sMs = drag.startMs;
+                eMs = drag.endMs;
+              }
+            }
             const left = (sMs / dur) * 100;
             const width = ((eMs - sMs) / dur) * 100;
             const span = Math.max(1, eMs - sMs);
             return (
               <div key={l.id} className={"tl-track" + (l.hidden ? " hidden" : "")}>
                 <div
-                  className="tl-block"
+                  className={"tl-block" + (selectedIds.includes(l.id) ? " selected" : "")}
                   style={{ left: `${left}%`, width: `${width}%`, background: kindColor(l) }}
                   title={`${(sMs / 1000).toFixed(2)}s – ${(eMs / 1000).toFixed(2)}s · drag to move, edges to trim · right-click for effects`}
                   onMouseDown={(e) => startBlockDrag(e, l, "move")}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     e.nativeEvent.stopPropagation();
-                    onSelect(l.id);
+                    if (!selectedIds.includes(l.id)) onSelect(l.id);
                     onLayerContextMenu(l.id, e.clientX, e.clientY);
                   }}
                 >

@@ -82,6 +82,14 @@ export const evaluateAt = (tMs: number) =>
 export const addImageLayer = (path: string) =>
   invoke<Project>("add_image_layer", { path });
 
+/** Add a video layer (natural size + duration are read on the frontend). */
+export const addVideoLayer = (path: string, width: number, height: number, durationMs: number) =>
+  invoke<Project>("add_video_layer", { path, width, height, durationMs });
+
+/** Add an audio layer (duration is read on the frontend). */
+export const addAudioLayer = (path: string, durationMs: number) =>
+  invoke<Project>("add_audio_layer", { path, durationMs });
+
 /** Show/hide a layer (the layer-list on/off toggle). */
 export const setLayerHidden = (layerId: number, hidden: boolean) =>
   invoke<Project>("set_layer_hidden", { layerId, hidden });
@@ -197,6 +205,17 @@ export const setCellImage = (layerId: number, cell: number, path: string) =>
 export const clearCellImage = (layerId: number, cell: number) =>
   invoke<Project>("clear_cell_image", { layerId, cell });
 
+/** Set (or clear, engine=null) a grid cell's in/out transition. */
+export const setCellTransition = (
+  layerId: number,
+  cell: number,
+  slot: "in" | "out",
+  durMs: number,
+  direction: number,
+  engine: string | null,
+  params: string | null
+) => invoke<Project>("set_cell_transition", { layerId, cell, slot, durMs, direction, engine, params });
+
 /** Keyframe a grid cell's image zoom at the playhead (1 = fit, >1 = zoomed in). */
 export const setCellZoom = (
   layerId: number,
@@ -218,6 +237,18 @@ export const setGridVertices = (
 /** Set a grid's vertex-drag constraint mode. */
 export const setGridConstrain = (layerId: number, mode: ConstrainMode) =>
   invoke<Project>("set_grid_constrain", { layerId, mode });
+
+/** Set the grid's line thickness in layer-local px (0 = hidden). */
+export const setGridLineWidth = (layerId: number, width: number) =>
+  invoke<Project>("set_grid_line_width", { layerId, width });
+
+/** Keyframe the grid line colour at the playhead (so it can animate). */
+export const setGridLineColor = (layerId: number, color: Rgba, tMs: number, seedStart: boolean) =>
+  invoke<Project>("set_grid_line_color", { layerId, color, tMs, seedStart });
+
+/** Clear the grid line-colour keyframes, freezing it at `color`. */
+export const clearGridLineColor = (layerId: number, color: Rgba) =>
+  invoke<Project>("clear_grid_line_color", { layerId, color });
 
 /** Merge a grid cell with its neighbour ("right" or "down") into a merged block. */
 export const mergeCell = (layerId: number, cell: number, dir: "right" | "down") =>
@@ -296,6 +327,68 @@ export const keyEffect = (
 /** Set a wipe effect's static fields (angle + invert). */
 export const setWipeStatic = (layerId: number, index: number, angle: number, invert: boolean) =>
   invoke<Project>("set_wipe_static", { layerId, index, angle, invert });
+
+// --- Per-cell effects (multi-frame grid) ---
+export const addCellEffect = (layerId: number, cell: number, kind: string) =>
+  invoke<Project>("add_cell_effect", { layerId, cell, kind });
+
+export const removeCellEffect = (layerId: number, cell: number, index: number) =>
+  invoke<Project>("remove_cell_effect", { layerId, cell, index });
+
+export const keyCellEffect = (
+  layerId: number,
+  cell: number,
+  index: number,
+  param: "amount" | "radius" | "degrees" | "position" | "softness",
+  tMs: number,
+  value: number,
+  seedStart: boolean
+) => invoke<Project>("key_cell_effect", { layerId, cell, index, param, tMs, value, seedStart });
+
+export const setCellWipeStatic = (
+  layerId: number,
+  cell: number,
+  index: number,
+  angle: number,
+  invert: boolean
+) => invoke<Project>("set_cell_wipe_static", { layerId, cell, index, angle, invert });
+
+// --- Linked (shared) effect groups (multi-frame grid) ---
+export const linkEffect = (layerId: number, kind: string, cells: number[]) =>
+  invoke<Project>("link_effect", { layerId, kind, cells });
+
+export const addLinkedEffect = (layerId: number, groupId: number, kind: string) =>
+  invoke<Project>("add_linked_effect", { layerId, groupId, kind });
+
+export const removeLinkedEffectItem = (layerId: number, groupId: number, index: number) =>
+  invoke<Project>("remove_linked_effect_item", { layerId, groupId, index });
+
+export const keyLinkedEffect = (
+  layerId: number,
+  groupId: number,
+  index: number,
+  param: "amount" | "radius" | "degrees" | "position" | "softness",
+  tMs: number,
+  value: number,
+  seedStart: boolean
+) => invoke<Project>("key_linked_effect", { layerId, groupId, index, param, tMs, value, seedStart });
+
+export const setLinkedWipeStatic = (
+  layerId: number,
+  groupId: number,
+  index: number,
+  angle: number,
+  invert: boolean
+) => invoke<Project>("set_linked_wipe_static", { layerId, groupId, index, angle, invert });
+
+export const removeLinkedGroup = (layerId: number, groupId: number) =>
+  invoke<Project>("remove_linked_group", { layerId, groupId });
+
+export const setLinkedMember = (layerId: number, groupId: number, cell: number, member: boolean) =>
+  invoke<Project>("set_linked_member", { layerId, groupId, cell, member });
+
+export const unlinkCell = (layerId: number, groupId: number, cell: number) =>
+  invoke<Project>("unlink_cell", { layerId, groupId, cell });
 
 /** Write raw bytes (base64) to a path — used to save the exported video. */
 export const saveBinaryFile = (path: string, base64: string) =>

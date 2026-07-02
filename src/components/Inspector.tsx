@@ -25,6 +25,8 @@ import type { BlendMode } from "../bindings/BlendMode";
 import type { SurfaceShape } from "../bindings/SurfaceShape";
 import type { Decal } from "../bindings/Decal";
 import type { ResolvedEffect } from "../bindings/ResolvedEffect";
+import type { ResolvedLinkedEffect } from "../bindings/ResolvedLinkedEffect";
+import type { Transition } from "../bindings/Transition";
 import { REGISTRY, getTransitionMeta, type ParamSpec } from "../lib/transitions";
 
 type TransitionSlot = "in" | "out";
@@ -1519,12 +1521,57 @@ interface Props {
   cellZoomNow: number | null;
   /** Whether the selected cell is a merged block (spans > 1). */
   cellMerged: boolean;
+  /** The selected cell's resolved effect stack (at the playhead). */
+  cellEffects: ResolvedEffect[];
   onSetCellImage: (layerId: number, cell: number) => void;
   onClearCellImage: (layerId: number, cell: number) => void;
   onSetCellZoom: (layerId: number, cell: number, zoom: number) => void;
+  cellTransitionIn: Transition | null;
+  cellTransitionOut: Transition | null;
+  onSetCellTransition: (
+    layerId: number,
+    cell: number,
+    slot: "in" | "out",
+    durMs: number,
+    direction: number,
+    engine: string | null,
+    params: string | null
+  ) => void;
   onSetGridConstrain: (layerId: number, mode: "freeform" | "rails") => void;
+  lineWidth: number;
+  lineColor: Rgba;
+  onSetGridLineWidth: (layerId: number, width: number) => void;
+  onSetGridLineColor: (layerId: number, color: Rgba) => void;
+  onClearGridLineColor: (layerId: number, color: Rgba) => void;
   onMergeCell: (layerId: number, cell: number, dir: "right" | "down") => void;
   onSplitCell: (layerId: number, cell: number) => void;
+  onAddCellEffect: (layerId: number, cell: number, kind: string) => void;
+  onRemoveCellEffect: (layerId: number, cell: number, index: number) => void;
+  onKeyCellEffect: (
+    layerId: number,
+    cell: number,
+    index: number,
+    param: EffectParam,
+    value: number,
+    seedStart: boolean
+  ) => void;
+  onSetCellWipeStatic: (layerId: number, cell: number, index: number, angle: number, invert: boolean) => void;
+  gridLinked: ResolvedLinkedEffect[];
+  onLinkEffect: (layerId: number, kind: string, cells: number[]) => void;
+  onAddLinkedEffect: (layerId: number, groupId: number, kind: string) => void;
+  onRemoveLinkedEffectItem: (layerId: number, groupId: number, index: number) => void;
+  onKeyLinkedEffect: (
+    layerId: number,
+    groupId: number,
+    index: number,
+    param: EffectParam,
+    value: number,
+    seedStart: boolean
+  ) => void;
+  onSetLinkedWipeStatic: (layerId: number, groupId: number, index: number, angle: number, invert: boolean) => void;
+  onRemoveLinkedGroup: (layerId: number, groupId: number) => void;
+  onSetLinkedMember: (layerId: number, groupId: number, cell: number, member: boolean) => void;
+  onUnlinkCell: (layerId: number, groupId: number, cell: number) => void;
 }
 
 /** Multi-frame grid controls: grid size + set/clear the selected cell's image. */
@@ -1536,13 +1583,35 @@ function FrameGridSection({
   selectedCell,
   cellZoomNow,
   cellMerged,
+  cellEffects,
   constrain,
   onSetCellImage,
   onClearCellImage,
   onSetCellZoom,
+  cellTransitionIn,
+  cellTransitionOut,
+  onSetCellTransition,
   onSetGridConstrain,
+  lineWidth,
+  lineColor,
+  onSetGridLineWidth,
+  onSetGridLineColor,
+  onClearGridLineColor,
   onMergeCell,
   onSplitCell,
+  onAddCellEffect,
+  onRemoveCellEffect,
+  onKeyCellEffect,
+  onSetCellWipeStatic,
+  gridLinked,
+  onLinkEffect,
+  onAddLinkedEffect,
+  onRemoveLinkedEffectItem,
+  onKeyLinkedEffect,
+  onSetLinkedWipeStatic,
+  onRemoveLinkedGroup,
+  onSetLinkedMember,
+  onUnlinkCell,
 }: {
   layerId: number;
   rows: number;
@@ -1551,13 +1620,57 @@ function FrameGridSection({
   selectedCell: number | null;
   cellZoomNow: number | null;
   cellMerged: boolean;
+  cellEffects: ResolvedEffect[];
   constrain: "freeform" | "rails";
   onSetCellImage: (layerId: number, cell: number) => void;
   onClearCellImage: (layerId: number, cell: number) => void;
   onSetCellZoom: (layerId: number, cell: number, zoom: number) => void;
+  cellTransitionIn: Transition | null;
+  cellTransitionOut: Transition | null;
+  onSetCellTransition: (
+    layerId: number,
+    cell: number,
+    slot: "in" | "out",
+    durMs: number,
+    direction: number,
+    engine: string | null,
+    params: string | null
+  ) => void;
   onSetGridConstrain: (layerId: number, mode: "freeform" | "rails") => void;
+  lineWidth: number;
+  lineColor: Rgba;
+  onSetGridLineWidth: (layerId: number, width: number) => void;
+  onSetGridLineColor: (layerId: number, color: Rgba) => void;
+  onClearGridLineColor: (layerId: number, color: Rgba) => void;
   onMergeCell: (layerId: number, cell: number, dir: "right" | "down") => void;
   onSplitCell: (layerId: number, cell: number) => void;
+  onAddCellEffect: (layerId: number, cell: number, kind: string) => void;
+  onRemoveCellEffect: (layerId: number, cell: number, index: number) => void;
+  onKeyCellEffect: (
+    layerId: number,
+    cell: number,
+    index: number,
+    param: EffectParam,
+    value: number,
+    seedStart: boolean
+  ) => void;
+  onSetCellWipeStatic: (layerId: number, cell: number, index: number, angle: number, invert: boolean) => void;
+  gridLinked: ResolvedLinkedEffect[];
+  onLinkEffect: (layerId: number, kind: string, cells: number[]) => void;
+  onAddLinkedEffect: (layerId: number, groupId: number, kind: string) => void;
+  onRemoveLinkedEffectItem: (layerId: number, groupId: number, index: number) => void;
+  onKeyLinkedEffect: (
+    layerId: number,
+    groupId: number,
+    index: number,
+    param: EffectParam,
+    value: number,
+    seedStart: boolean
+  ) => void;
+  onSetLinkedWipeStatic: (layerId: number, groupId: number, index: number, angle: number, invert: boolean) => void;
+  onRemoveLinkedGroup: (layerId: number, groupId: number) => void;
+  onSetLinkedMember: (layerId: number, groupId: number, cell: number, member: boolean) => void;
+  onUnlinkCell: (layerId: number, groupId: number, cell: number) => void;
 }) {
   const cellLabel =
     selectedCell != null ? `row ${Math.floor(selectedCell / cols) + 1}, col ${(selectedCell % cols) + 1}` : null;
@@ -1583,6 +1696,37 @@ function FrameGridSection({
         >
           Rails
         </button>
+      </div>
+      <div className="insp-field">
+        <label>Grid lines</label>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input
+            type="color"
+            value={rgbaToHex(lineColor)}
+            title="Line colour (keyframed at the playhead)"
+            onChange={(e) => onSetGridLineColor(layerId, { ...hexToRgba(e.target.value), a: 255 })}
+          />
+          <input
+            type="range"
+            min={0}
+            max={20}
+            step={0.5}
+            value={lineWidth}
+            title="Line thickness (0 = hidden)"
+            onChange={(e) => onSetGridLineWidth(layerId, Number(e.target.value))}
+            style={{ flex: 1 }}
+          />
+          <span className="insp-hint" style={{ margin: 0, minWidth: 34, textAlign: "right" }}>
+            {lineWidth.toFixed(1)}px
+          </span>
+          <button
+            className="insp-btn"
+            title="Clear line-colour keyframes"
+            onClick={() => onClearGridLineColor(layerId, lineColor)}
+          >
+            Clear keys
+          </button>
+        </div>
       </div>
       {selectedCell == null ? (
         <p className="insp-hint">No cell selected.</p>
@@ -1627,8 +1771,270 @@ function FrameGridSection({
               </button>
             )}
           </div>
+          {hasImage && (
+            <EffectsSection
+              layerId={layerId}
+              effects={cellEffects}
+              onAddEffect={(lid, kind) => onAddCellEffect(lid, selectedCell, kind)}
+              onRemoveEffect={(lid, idx) => onRemoveCellEffect(lid, selectedCell, idx)}
+              onKeyEffect={(lid, idx, param, value, seed) => onKeyCellEffect(lid, selectedCell, idx, param, value, seed)}
+              onSetWipeStatic={(lid, idx, angle, invert) => onSetCellWipeStatic(lid, selectedCell, idx, angle, invert)}
+            />
+          )}
+          {hasImage && (
+            <CellTransitionsSection
+              layerId={layerId}
+              cell={selectedCell}
+              tin={cellTransitionIn}
+              tout={cellTransitionOut}
+              onSet={onSetCellTransition}
+            />
+          )}
         </>
       )}
+      <LinkedEffectsSection
+        layerId={layerId}
+        rows={rows}
+        cols={cols}
+        selectedCell={selectedCell}
+        gridLinked={gridLinked}
+        onLinkEffect={onLinkEffect}
+        onAddLinkedEffect={onAddLinkedEffect}
+        onRemoveLinkedEffectItem={onRemoveLinkedEffectItem}
+        onKeyLinkedEffect={onKeyLinkedEffect}
+        onSetLinkedWipeStatic={onSetLinkedWipeStatic}
+        onRemoveLinkedGroup={onRemoveLinkedGroup}
+        onSetLinkedMember={onSetLinkedMember}
+        onUnlinkCell={onUnlinkCell}
+      />
+    </div>
+  );
+}
+
+/** Per-cell in/out transitions — same engine library as layer transitions, played
+ *  over the grid layer's start/end so the cell's image assembles in / breaks out. */
+function CellTransitionsSection({
+  layerId,
+  cell,
+  tin,
+  tout,
+  onSet,
+}: {
+  layerId: number;
+  cell: number;
+  tin: Transition | null;
+  tout: Transition | null;
+  onSet: (
+    layerId: number,
+    cell: number,
+    slot: "in" | "out",
+    durMs: number,
+    direction: number,
+    engine: string | null,
+    params: string | null
+  ) => void;
+}) {
+  const slots: { slot: "in" | "out"; tr: Transition | null }[] = [
+    { slot: "in", tr: tin },
+    { slot: "out", tr: tout },
+  ];
+  return (
+    <div className="insp-body">
+      <div className="insp-sep">Cell transition</div>
+      {slots.map(({ slot, tr }) => {
+        const durMs = tr?.durMs ?? 800;
+        const direction = tr?.direction ?? 0;
+        const paramsJson = tr?.params ?? null;
+        const value = tr?.engine ?? LEGACY_TO_ENGINE[tr?.kind ?? ""] ?? "none";
+        return (
+          <div key={slot} className="insp-field">
+            <span style={{ textTransform: "capitalize" }}>{slot}</span>
+            <select
+              value={value}
+              onChange={(e) => {
+                const id = e.target.value;
+                if (id === "none") onSet(layerId, cell, slot, durMs, direction, null, null);
+                else onSet(layerId, cell, slot, durMs, direction, id, id === value ? paramsJson : null);
+              }}
+            >
+              <option value="none">None</option>
+              {TRANSITION_GROUPS.map((g) => (
+                <optgroup key={g.category} label={g.category}>
+                  {g.items.map((it) => (
+                    <option key={it.id} value={it.id}>
+                      {it.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            {value !== "none" && (
+              <>
+                <div className="row2">
+                  <input
+                    type="number"
+                    min={0}
+                    max={10000}
+                    step={50}
+                    value={durMs}
+                    title="Duration (ms)"
+                    onChange={(e) => onSet(layerId, cell, slot, Number(e.target.value), direction, value, paramsJson)}
+                  />
+                  <select
+                    value={direction}
+                    title="Direction"
+                    onChange={(e) => onSet(layerId, cell, slot, durMs, Number(e.target.value), value, paramsJson)}
+                  >
+                    <option value={0}>From left</option>
+                    <option value={1}>From right</option>
+                    <option value={2}>From top</option>
+                    <option value={3}>From bottom</option>
+                  </select>
+                </div>
+                <TransitionVars
+                  id={value}
+                  paramsJson={paramsJson}
+                  onChange={(json) => onSet(layerId, cell, slot, durMs, direction, value, json)}
+                />
+              </>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Shared/linked effect groups: apply one keyframeable effect stack across many
+ *  cells at once, toggle which cells it covers, and unlink a cell to diverge. */
+function LinkedEffectsSection({
+  layerId,
+  rows,
+  cols,
+  selectedCell,
+  gridLinked,
+  onLinkEffect,
+  onAddLinkedEffect,
+  onRemoveLinkedEffectItem,
+  onKeyLinkedEffect,
+  onSetLinkedWipeStatic,
+  onRemoveLinkedGroup,
+  onSetLinkedMember,
+  onUnlinkCell,
+}: {
+  layerId: number;
+  rows: number;
+  cols: number;
+  selectedCell: number | null;
+  gridLinked: ResolvedLinkedEffect[];
+  onLinkEffect: (layerId: number, kind: string, cells: number[]) => void;
+  onAddLinkedEffect: (layerId: number, groupId: number, kind: string) => void;
+  onRemoveLinkedEffectItem: (layerId: number, groupId: number, index: number) => void;
+  onKeyLinkedEffect: (
+    layerId: number,
+    groupId: number,
+    index: number,
+    param: EffectParam,
+    value: number,
+    seedStart: boolean
+  ) => void;
+  onSetLinkedWipeStatic: (layerId: number, groupId: number, index: number, angle: number, invert: boolean) => void;
+  onRemoveLinkedGroup: (layerId: number, groupId: number) => void;
+  onSetLinkedMember: (layerId: number, groupId: number, cell: number, member: boolean) => void;
+  onUnlinkCell: (layerId: number, groupId: number, cell: number) => void;
+}) {
+  const allCells = Array.from({ length: rows * cols }, (_, i) => i);
+  return (
+    <div className="insp-body">
+      <div className="insp-sep">Linked effects (shared)</div>
+      <label className="insp-field">
+        Link a new effect across all cells
+        <select
+          value=""
+          onChange={(e) => {
+            if (e.target.value) onLinkEffect(layerId, e.target.value, allCells);
+          }}
+        >
+          <option value="">＋ Link…</option>
+          {EFFECT_TYPES.map((t) => (
+            <option key={t.kind} value={t.kind}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {gridLinked.length === 0 && (
+        <p className="insp-hint">
+          A linked effect is one shared, keyframeable stack applied to many cells at once. Toggle
+          which cells it covers below; “Unlink” a cell to give it an independent copy.
+        </p>
+      )}
+      {gridLinked.map((g) => (
+        <div key={g.id} style={{ border: "1px solid var(--line, #2a2a38)", borderRadius: 6, padding: 8, marginTop: 8 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <strong>Group {g.id} · {g.members.length} cell{g.members.length === 1 ? "" : "s"}</strong>
+            <button className="insp-btn" title="Delete group" onClick={() => onRemoveLinkedGroup(layerId, g.id)}>
+              ✕
+            </button>
+          </div>
+          <label className="insp-field">
+            Add to this group
+            <select
+              value=""
+              onChange={(e) => {
+                if (e.target.value) onAddLinkedEffect(layerId, g.id, e.target.value);
+              }}
+            >
+              <option value="">＋ Add…</option>
+              {EFFECT_TYPES.map((t) => (
+                <option key={t.kind} value={t.kind}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {g.effects.map((eff, i) => (
+            <EffectRow
+              key={i}
+              layerId={layerId}
+              index={i}
+              eff={eff}
+              onRemove={(lid, idx) => onRemoveLinkedEffectItem(lid, g.id, idx)}
+              onKey={(lid, idx, param, value, seed) => onKeyLinkedEffect(lid, g.id, idx, param, value, seed)}
+              onSetWipeStatic={(lid, idx, angle, invert) => onSetLinkedWipeStatic(lid, g.id, idx, angle, invert)}
+            />
+          ))}
+          <div className="insp-hint" style={{ margin: "6px 0 4px" }}>Applies to (click to toggle):</div>
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: 2, maxWidth: cols * 28 }}>
+            {allCells.map((ci) => {
+              const on = g.members.includes(ci);
+              return (
+                <button
+                  key={ci}
+                  onClick={() => onSetLinkedMember(layerId, g.id, ci, !on)}
+                  title={`cell ${ci + 1}`}
+                  style={{
+                    height: 22,
+                    borderRadius: 3,
+                    cursor: "pointer",
+                    background: on ? "var(--accent, #6c8cff)" : "var(--panel-2, #1d1d28)",
+                    border: "1px solid var(--line, #2a2a38)",
+                    color: on ? "#fff" : "var(--muted, #888)",
+                    fontSize: 10,
+                  }}
+                >
+                  {ci + 1}
+                </button>
+              );
+            })}
+          </div>
+          {selectedCell != null && g.members.includes(selectedCell) && (
+            <button className="insp-btn" style={{ marginTop: 6 }} onClick={() => onUnlinkCell(layerId, g.id, selectedCell)}>
+              Unlink cell #{selectedCell + 1} (keep as local copy)
+            </button>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -1675,12 +2081,34 @@ export default function Inspector({
   selectedCell,
   cellZoomNow,
   cellMerged,
+  cellEffects,
   onSetCellImage,
   onClearCellImage,
   onSetCellZoom,
+  cellTransitionIn,
+  cellTransitionOut,
+  onSetCellTransition,
   onSetGridConstrain,
+  lineWidth,
+  lineColor,
+  onSetGridLineWidth,
+  onSetGridLineColor,
+  onClearGridLineColor,
   onMergeCell,
   onSplitCell,
+  onAddCellEffect,
+  onRemoveCellEffect,
+  onKeyCellEffect,
+  onSetCellWipeStatic,
+  gridLinked,
+  onLinkEffect,
+  onAddLinkedEffect,
+  onRemoveLinkedEffectItem,
+  onKeyLinkedEffect,
+  onSetLinkedWipeStatic,
+  onRemoveLinkedGroup,
+  onSetLinkedMember,
+  onUnlinkCell,
 }: Props) {
   const decalControls = layer && (layer.kind.kind === "image" || layer.kind.kind === "text") && (
     <DecalControls
@@ -1780,13 +2208,35 @@ export default function Inspector({
           selectedCell={selectedCell}
           cellZoomNow={cellZoomNow}
           cellMerged={cellMerged}
+          cellEffects={cellEffects}
           constrain={layer.kind.constrain}
+          lineWidth={lineWidth}
+          lineColor={lineColor}
+          cellTransitionIn={cellTransitionIn}
+          cellTransitionOut={cellTransitionOut}
           onSetCellImage={onSetCellImage}
           onClearCellImage={onClearCellImage}
           onSetCellZoom={onSetCellZoom}
+          onSetCellTransition={onSetCellTransition}
           onSetGridConstrain={onSetGridConstrain}
+          onSetGridLineWidth={onSetGridLineWidth}
+          onSetGridLineColor={onSetGridLineColor}
+          onClearGridLineColor={onClearGridLineColor}
           onMergeCell={onMergeCell}
           onSplitCell={onSplitCell}
+          onAddCellEffect={onAddCellEffect}
+          onRemoveCellEffect={onRemoveCellEffect}
+          onKeyCellEffect={onKeyCellEffect}
+          onSetCellWipeStatic={onSetCellWipeStatic}
+          gridLinked={gridLinked}
+          onLinkEffect={onLinkEffect}
+          onAddLinkedEffect={onAddLinkedEffect}
+          onRemoveLinkedEffectItem={onRemoveLinkedEffectItem}
+          onKeyLinkedEffect={onKeyLinkedEffect}
+          onSetLinkedWipeStatic={onSetLinkedWipeStatic}
+          onRemoveLinkedGroup={onRemoveLinkedGroup}
+          onSetLinkedMember={onSetLinkedMember}
+          onUnlinkCell={onUnlinkCell}
         />
       )}
       {layer && <TransitionsSection layer={layer} onSet={onSetLayerTransition} />}

@@ -18,14 +18,20 @@ use tauri::{Manager, State};
 use eval::ResolvedLayer;
 use model::{
     ColorKey, ConstrainMode, Decal, Easing, Effect, FrameCell, GridVertex, Keyframe, Layer,
-    LayerKind, LetterAnimation, LetterOverride, Project, Rgba, SurfaceShape, Track, Transform,
-    TransformEdit, Transition, TransitionKind,
+    LayerKind, LetterAnimation, LetterOverride, LinkedEffectGroup, Project, Rgba, SurfaceShape,
+    Track, Transform, TransformEdit, Transition, TransitionKind,
 };
 use text::{Font, ShapedText};
 
 /// Shortest play range a layer is allowed to have, and the floor for the comp
 /// duration (ms). Keeps a trimmed block from collapsing to nothing.
 const MIN_SPAN_MS: u32 = 50;
+
+/// Default end time for a freshly added layer: a quarter of the comp length, so
+/// new layers don't span the whole timeline (the user then trims/extends them).
+fn default_new_layer_end(duration_ms: u32) -> u32 {
+    (duration_ms / 4).max(MIN_SPAN_MS).min(duration_ms.max(MIN_SPAN_MS))
+}
 
 /// Undo/redo stacks of whole-project snapshots. Each user-level mutation pushes
 /// the pre-change project onto `undo`.
@@ -154,7 +160,7 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
     state.snapshot(&project);
     let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
-    let end_ms = project.duration_ms;
+    let end_ms = default_new_layer_end(project.duration_ms);
     let font = Font("Vazirmatn".into());
     let shaped = text::shape(&content, size, &font);
     project.layers.push(Layer {
@@ -469,7 +475,7 @@ fn add_image_layer(state: State<AppState>, path: String) -> Project {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Image".into());
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
-    let end_ms = project.duration_ms;
+    let end_ms = default_new_layer_end(project.duration_ms);
 
     // Read the image header for its natural size, then scale it to *contain*
     // within the comp so big photos don't overflow the frame.
@@ -488,6 +494,84 @@ fn add_image_layer(state: State<AppState>, path: String) -> Project {
         end_ms,
         kind: LayerKind::Image { src: path, width: iw, height: ih },
         transform,
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+    project.clone()
+}
+
+/// Add a video layer. The frontend reads the video's natural size + duration
+/// (via an `HTMLVideoElement`) and passes them in, so Rust can scale-to-fit like
+/// an image without needing a media decoder. Undoable.
+#[tauri::command]
+fn add_video_layer(
+    state: State<AppState>,
+    path: String,
+    width: u32,
+    height: u32,
+    duration_ms: u32,
+) -> Project {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Video".into());
+    let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
+    // Trim to the video's own length when known, else the standard 25% default.
+    let end_ms = if duration_ms > 0 {
+        duration_ms.clamp(MIN_SPAN_MS, project.duration_ms.max(MIN_SPAN_MS))
+    } else {
+        default_new_layer_end(project.duration_ms)
+    };
+    let (iw, ih) = (width.max(1), height.max(1));
+    let fit = (project.width as f32 / iw as f32).min(project.height as f32 / ih as f32);
+    let mut transform = Transform::at(cx, cy);
+    transform.scale_x = Track::constant(fit);
+    transform.scale_y = Track::constant(fit);
+    project.layers.push(Layer {
+        id: next_id,
+        name,
+        start_ms: 0,
+        end_ms,
+        kind: LayerKind::Video { src: path, width: iw, height: ih, duration_ms },
+        transform,
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+    project.clone()
+}
+
+/// Add an audio layer (no visual). `duration_ms` is read on the frontend. Undoable.
+#[tauri::command]
+fn add_audio_layer(state: State<AppState>, path: String, duration_ms: u32) -> Project {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Audio".into());
+    let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
+    let end_ms = if duration_ms > 0 {
+        duration_ms.clamp(MIN_SPAN_MS, project.duration_ms.max(MIN_SPAN_MS))
+    } else {
+        default_new_layer_end(project.duration_ms)
+    };
+    project.layers.push(Layer {
+        id: next_id,
+        name,
+        start_ms: 0,
+        end_ms,
+        kind: LayerKind::Audio { src: path, duration_ms },
+        transform: Transform::at(cx, cy),
         hidden: false,
         attach: None,
         effects: vec![],
@@ -959,7 +1043,7 @@ fn add_shape_layer(state: State<AppState>, shape: SurfaceShape) -> Project {
     state.snapshot(&project);
     let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
-    let end_ms = project.duration_ms;
+    let end_ms = default_new_layer_end(project.duration_ms);
     // A comfortable default size relative to the comp.
     let w = project.width as f32 * 0.4;
     let h = project.height as f32 * 0.4;
@@ -1005,7 +1089,7 @@ fn add_frame_grid(state: State<AppState>, rows: u32, cols: u32) -> Project {
     let cols = cols.clamp(1, 32);
     let next_id = project.layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
-    let end_ms = project.duration_ms;
+    let end_ms = default_new_layer_end(project.duration_ms);
     // Fill ~70% of the comp, keeping cells as square as the aspect allows.
     let grid_w = project.width as f32 * 0.7;
     let grid_h = project.height as f32 * 0.7;
@@ -1018,7 +1102,19 @@ fn add_frame_grid(state: State<AppState>, rows: u32, cols: u32) -> Project {
         name: format!("Grid {cols}×{rows}"),
         start_ms: 0,
         end_ms,
-        kind: LayerKind::FrameGrid { rows, cols, cell_w, cell_h, vertices, constrain: ConstrainMode::FreeForm, cells },
+        kind: LayerKind::FrameGrid {
+            rows,
+            cols,
+            cell_w,
+            cell_h,
+            vertices,
+            constrain: ConstrainMode::FreeForm,
+            cells,
+            linked: vec![],
+            line_width: 2.0,
+            line_color: Rgba { r: 255, g: 255, b: 255, a: 255 },
+            line_color_keys: vec![],
+        },
         transform: Transform::at(cx, cy),
         hidden: false,
         attach: None,
@@ -1118,6 +1214,60 @@ fn set_grid_constrain(state: State<AppState>, layer_id: u32, mode: ConstrainMode
     Ok(project.clone())
 }
 
+/// Set a `FrameGrid`'s grid-line thickness (layer-local px; 0 = hidden). Not
+/// keyframed. Undoable.
+#[tauri::command]
+fn set_grid_line_width(state: State<AppState>, layer_id: u32, width: f32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { line_width, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    *line_width = width.clamp(0.0, 200.0);
+    Ok(project.clone())
+}
+
+/// Keyframe a `FrameGrid`'s line colour at `t_ms` (so the gridline colour can
+/// animate over the clip). Mirrors `set_text_color`. Undoable.
+#[tauri::command]
+fn set_grid_line_color(
+    state: State<AppState>,
+    layer_id: u32,
+    color: Rgba,
+    t_ms: u32,
+    seed_start: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let start = project.layers.iter().find(|l| l.id == layer_id).map(|l| l.start_ms).unwrap_or(0);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { line_color, line_color_keys, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    let prev = eval::sample_color(line_color_keys, *line_color, t_ms);
+    upsert_color_key(line_color_keys, t_ms, color, prev, seed_start, start);
+    // Keep the static base in sync so a single (unkeyed) colour reads immediately.
+    if line_color_keys.len() <= 1 {
+        *line_color = color;
+    }
+    Ok(project.clone())
+}
+
+/// Clear a `FrameGrid`'s line-colour keyframes, freezing it at `color`. Undoable.
+#[tauri::command]
+fn clear_grid_line_color(state: State<AppState>, layer_id: u32, color: Rgba) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { line_color, line_color_keys, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    line_color_keys.clear();
+    *line_color = color;
+    Ok(project.clone())
+}
+
 /// Keyframe a grid cell's image zoom at `t_ms` (1 = fit, >1 = zoomed in). Drops a
 /// keyframe at the playhead so the zoom can animate. Undoable.
 #[tauri::command]
@@ -1194,6 +1344,38 @@ fn merge_cell(state: State<AppState>, layer_id: u32, cell: u32, dir: String) -> 
     }
     for &t in &targets {
         cells[t as usize].src = None;
+    }
+    Ok(project.clone())
+}
+
+/// Set (or clear) a grid cell's in/out transition. `engine` = the transition id
+/// (None/empty clears the slot). Played over the grid layer's start/end. Undoable.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn set_cell_transition(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    slot: String,
+    dur_ms: u32,
+    direction: u8,
+    engine: Option<String>,
+    params: Option<String>,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    let c = cells.get_mut(cell as usize).ok_or("cell out of range")?;
+    let transition = engine
+        .filter(|s| !s.is_empty())
+        .map(|id| Transition { kind: TransitionKind::Dissolve, dur_ms, direction, engine: Some(id), params });
+    match slot.as_str() {
+        "in" => c.transition_in = transition,
+        "out" => c.transition_out = transition,
+        _ => return Err("slot must be \"in\" or \"out\"".into()),
     }
     Ok(project.clone())
 }
@@ -1524,6 +1706,238 @@ fn set_wipe_static(
     Ok(project.clone())
 }
 
+/// Borrow one grid cell's effect stack mutably (errors if not a grid / bad cell).
+fn cell_effects_mut(layer: &mut Layer, cell: u32) -> Result<&mut Vec<Effect>, String> {
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    Ok(&mut cells.get_mut(cell as usize).ok_or("cell out of range")?.effects)
+}
+
+/// Append a default effect of `kind` to a grid cell's own effect stack. Undoable.
+#[tauri::command]
+fn add_cell_effect(state: State<AppState>, layer_id: u32, cell: u32, kind: String) -> Result<Project, String> {
+    let effect = Effect::default_of(&kind).ok_or("unknown effect kind")?;
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    cell_effects_mut(layer, cell)?.push(effect);
+    Ok(project.clone())
+}
+
+/// Remove the effect at `index` from a grid cell's stack. Undoable.
+#[tauri::command]
+fn remove_cell_effect(state: State<AppState>, layer_id: u32, cell: u32, index: usize) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let fx = cell_effects_mut(layer, cell)?;
+    if index < fx.len() {
+        fx.remove(index);
+    }
+    Ok(project.clone())
+}
+
+/// Key one parameter of a grid cell's effect at `index`, at `t_ms`. Undoable.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn key_cell_effect(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    index: usize,
+    param: String,
+    t_ms: u32,
+    value: f32,
+    seed_start: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let start = layer.start_ms;
+    let fx = cell_effects_mut(layer, cell)?;
+    let effect = fx.get_mut(index).ok_or("effect index out of range")?;
+    let track = effect_track_mut(effect, &param).ok_or("effect has no such parameter")?;
+    upsert_key(track, t_ms, Some(value), seed_start, start);
+    Ok(project.clone())
+}
+
+/// Set a grid cell's wipe-effect static fields (`angle`, `invert`). Undoable.
+#[tauri::command]
+fn set_cell_wipe_static(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    index: usize,
+    angle: f32,
+    invert: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    match cell_effects_mut(layer, cell)?.get_mut(index) {
+        Some(Effect::Wipe { angle: a, invert: inv, .. }) => {
+            *a = angle;
+            *inv = invert;
+        }
+        _ => return Err("not a wipe effect".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Borrow a grid's linked-effect groups mutably.
+fn grid_linked_mut(layer: &mut Layer) -> Result<&mut Vec<LinkedEffectGroup>, String> {
+    let LayerKind::FrameGrid { linked, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    Ok(linked)
+}
+
+/// Borrow one linked group's shared effect stack mutably.
+fn linked_effects_mut(layer: &mut Layer, group_id: u32) -> Result<&mut Vec<Effect>, String> {
+    let g = grid_linked_mut(layer)?
+        .iter_mut()
+        .find(|g| g.id == group_id)
+        .ok_or("linked group not found")?;
+    Ok(&mut g.effects)
+}
+
+/// Create a linked effect group: a shared stack (one default effect of `kind`)
+/// applied across `cells`. Editing it later updates every member. Undoable.
+#[tauri::command]
+fn link_effect(state: State<AppState>, layer_id: u32, kind: String, cells: Vec<u32>) -> Result<Project, String> {
+    let effect = Effect::default_of(&kind).ok_or("unknown effect kind")?;
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let linked = grid_linked_mut(layer)?;
+    let id = linked.iter().map(|g| g.id).max().unwrap_or(0) + 1;
+    linked.push(LinkedEffectGroup { id, effects: vec![effect], members: cells });
+    Ok(project.clone())
+}
+
+/// Append a default effect of `kind` to a linked group's shared stack. Undoable.
+#[tauri::command]
+fn add_linked_effect(state: State<AppState>, layer_id: u32, group_id: u32, kind: String) -> Result<Project, String> {
+    let effect = Effect::default_of(&kind).ok_or("unknown effect kind")?;
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    linked_effects_mut(layer, group_id)?.push(effect);
+    Ok(project.clone())
+}
+
+/// Remove the effect at `index` from a linked group's stack. Undoable.
+#[tauri::command]
+fn remove_linked_effect_item(state: State<AppState>, layer_id: u32, group_id: u32, index: usize) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let fx = linked_effects_mut(layer, group_id)?;
+    if index < fx.len() {
+        fx.remove(index);
+    }
+    Ok(project.clone())
+}
+
+/// Key one parameter of a linked group's effect at `index`, at `t_ms`. Undoable.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn key_linked_effect(
+    state: State<AppState>,
+    layer_id: u32,
+    group_id: u32,
+    index: usize,
+    param: String,
+    t_ms: u32,
+    value: f32,
+    seed_start: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let start = layer.start_ms;
+    let fx = linked_effects_mut(layer, group_id)?;
+    let effect = fx.get_mut(index).ok_or("effect index out of range")?;
+    let track = effect_track_mut(effect, &param).ok_or("effect has no such parameter")?;
+    upsert_key(track, t_ms, Some(value), seed_start, start);
+    Ok(project.clone())
+}
+
+/// Set a linked group's wipe-effect static fields. Undoable.
+#[tauri::command]
+fn set_linked_wipe_static(
+    state: State<AppState>,
+    layer_id: u32,
+    group_id: u32,
+    index: usize,
+    angle: f32,
+    invert: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    match linked_effects_mut(layer, group_id)?.get_mut(index) {
+        Some(Effect::Wipe { angle: a, invert: inv, .. }) => {
+            *a = angle;
+            *inv = invert;
+        }
+        _ => return Err("not a wipe effect".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Delete a linked group entirely (its effects vanish from all members). Undoable.
+#[tauri::command]
+fn remove_linked_group(state: State<AppState>, layer_id: u32, group_id: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    grid_linked_mut(layer)?.retain(|g| g.id != group_id);
+    Ok(project.clone())
+}
+
+/// Add or remove a cell from a linked group's membership. Undoable.
+#[tauri::command]
+fn set_linked_member(state: State<AppState>, layer_id: u32, group_id: u32, cell: u32, member: bool) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let g = grid_linked_mut(layer)?.iter_mut().find(|g| g.id == group_id).ok_or("linked group not found")?;
+    if member {
+        if !g.members.contains(&cell) {
+            g.members.push(cell);
+        }
+    } else {
+        g.members.retain(|&c| c != cell);
+    }
+    Ok(project.clone())
+}
+
+/// Unlink a cell from a group: remove it from the members AND copy the group's
+/// effects into the cell's own stack, so it keeps the look but can now diverge.
+/// Undoable.
+#[tauri::command]
+fn unlink_cell(state: State<AppState>, layer_id: u32, group_id: u32, cell: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    // Snapshot the group's effects, then drop the cell from its members.
+    let effects = {
+        let g = grid_linked_mut(layer)?.iter_mut().find(|g| g.id == group_id).ok_or("linked group not found")?;
+        if !g.members.contains(&cell) {
+            return Ok(project.clone());
+        }
+        g.members.retain(|&c| c != cell);
+        g.effects.clone()
+    };
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else { unreachable!() };
+    if let Some(c) = cells.get_mut(cell as usize) {
+        c.effects.extend(effects);
+    }
+    Ok(project.clone())
+}
+
 /// Write raw bytes (base64-encoded over IPC) to an absolute path — used to save
 /// the exported video file.
 #[tauri::command]
@@ -1702,7 +2116,7 @@ fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
             f(rotation_y);
             f(rotation_z);
         }
-        LayerKind::FrameGrid { vertices, cells, .. } => {
+        LayerKind::FrameGrid { vertices, cells, linked, .. } => {
             for v in vertices.iter_mut() {
                 f(&mut v.dx);
                 f(&mut v.dy);
@@ -1710,6 +2124,11 @@ fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
             for cell in cells.iter_mut() {
                 f(&mut cell.zoom);
                 for e in cell.effects.iter_mut() {
+                    walk_effect_tracks(e, &mut f);
+                }
+            }
+            for g in linked.iter_mut() {
+                for e in g.effects.iter_mut() {
                     walk_effect_tracks(e, &mut f);
                 }
             }
@@ -1919,6 +2338,8 @@ pub fn run() {
             set_project,
             evaluate_at,
             add_image_layer,
+            add_video_layer,
+            add_audio_layer,
             edit_keyframes,
             set_layer_hidden,
             set_letter_override,
@@ -1934,8 +2355,24 @@ pub fn run() {
             set_cell_zoom,
             set_grid_vertices,
             set_grid_constrain,
+            set_grid_line_width,
+            set_grid_line_color,
+            clear_grid_line_color,
             merge_cell,
             split_cell,
+            set_cell_transition,
+            add_cell_effect,
+            remove_cell_effect,
+            key_cell_effect,
+            set_cell_wipe_static,
+            link_effect,
+            add_linked_effect,
+            remove_linked_effect_item,
+            key_linked_effect,
+            set_linked_wipe_static,
+            remove_linked_group,
+            set_linked_member,
+            unlink_cell,
             set_shape_params,
             set_shape_rotation_key,
             attach_to_shape,
