@@ -21,13 +21,14 @@ import RecorderPanel from "./components/RecorderPanel";
 import ContextMenu from "./components/ContextMenu";
 import MenuBar, { type MenuDef } from "./components/MenuBar";
 import CompSettings from "./components/CompSettings";
+import UiSizeDialog from "./components/UiSizeDialog";
 import EffectEditor from "./components/EffectEditor";
 import ExportDialog from "./components/ExportDialog";
 import TransitionsDemo from "./components/TransitionsDemo";
 import {
   addEffect,
   addFrameGrid,
-  filterExistingFiles,
+  setMedia as apiSetMedia,
   addImageLayer,
   addVideoLayer,
   addAudioLayer,
@@ -186,8 +187,37 @@ const SEFX_FILTER = [{ name: "Simple Effects Project", extensions: ["sefx"] }];
 /** Box faces, in `box_face_basis` order (index = the `face` value). */
 const FACE_LABELS = ["Front", "Back", "Left", "Right", "Top", "Bottom"];
 
-/** localStorage key for the persisted media-bin path list. */
-const MEDIA_BIN_KEY = "sefx.mediaBin";
+// Resizable-panel layout: the built-in defaults, the persistence key, and the
+// clamp bounds for each panel. The user drags the splitters to resize live, then
+// saves the current sizes as the default via Window → UI size.
+const UI_LAYOUT_KEY = "sefx.uiLayout";
+type UiLayout = { mediaW: number; inspectorW: number; timelineH: number; labelsW: number };
+const DEFAULT_LAYOUT: UiLayout = { mediaW: 180, inspectorW: 300, timelineH: 224, labelsW: 160 };
+const LAYOUT_BOUNDS = {
+  mediaW: [120, 420] as const,
+  inspectorW: [200, 760] as const,
+  timelineH: [120, 900] as const,
+  labelsW: [100, 480] as const,
+};
+function clampLayout(key: keyof UiLayout, v: unknown): number {
+  const [lo, hi] = LAYOUT_BOUNDS[key];
+  return typeof v === "number" && Number.isFinite(v)
+    ? Math.max(lo, Math.min(hi, v))
+    : DEFAULT_LAYOUT[key];
+}
+function loadUiLayout(): UiLayout {
+  try {
+    const v = JSON.parse(localStorage.getItem(UI_LAYOUT_KEY) || "{}") as Partial<UiLayout>;
+    return {
+      mediaW: clampLayout("mediaW", v.mediaW),
+      inspectorW: clampLayout("inspectorW", v.inspectorW),
+      timelineH: clampLayout("timelineH", v.timelineH),
+      labelsW: clampLayout("labelsW", v.labelsW),
+    };
+  } catch {
+    return { ...DEFAULT_LAYOUT };
+  }
+}
 
 /**
  * A pleasant 3/4 view `[rotationX, rotationY]` (degrees) that brings each box
@@ -224,11 +254,15 @@ export default function App() {
   const [fonts, setFonts] = useState<string[]>([]);
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
-  // Resizable panels: inspector width + timeline height (px), dragged via the
-  // splitters between the preview / inspector / timeline.
-  const [inspectorW, setInspectorW] = useState(300);
-  const [mediaW, setMediaW] = useState(180);
-  const [timelineH, setTimelineH] = useState(224);
+  // Resizable panels: media-bin width, inspector width, timeline height, and the
+  // timeline's layers-column width (px). Dragged live via splitters; the default
+  // (loaded here) is saved via Window → UI size.
+  const savedLayout = useRef(loadUiLayout()).current;
+  const [inspectorW, setInspectorW] = useState(savedLayout.inspectorW);
+  const [mediaW, setMediaW] = useState(savedLayout.mediaW);
+  const [timelineH, setTimelineH] = useState(savedLayout.timelineH);
+  const [labelsW, setLabelsW] = useState(savedLayout.labelsW);
+  const [showUiSize, setShowUiSize] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // Multi-selection of layers (timeline area): every selected id, with
   // `selectedId` as the primary (drives the inspector / preview transformer).
@@ -237,16 +271,9 @@ export default function App() {
   // empty). The Rust side swaps the editing scope; this is the UI trail.
   const [groupPath, setGroupPath] = useState<{ id: number; name: string }[]>([]);
   // The media bin (imported image/video/audio paths, not necessarily placed yet).
-  // Seeded synchronously from localStorage so the bin survives app restarts; a
-  // startup effect then prunes any files that no longer exist and loads thumbs.
-  const [media, setMedia] = useState<string[]>(() => {
-    try {
-      const v = JSON.parse(localStorage.getItem(MEDIA_BIN_KEY) || "[]");
-      return Array.isArray(v) ? (v as string[]).filter((p) => typeof p === "string") : [];
-    } catch {
-      return [];
-    }
-  });
+  // It belongs to the project: saved into the .sefx file and restored on open, so
+  // a new project starts empty while a saved file reopens with its media.
+  const [media, setMedia] = useState<string[]>([]);
   // Thumbnails for non-image media (video poster frames), path → data URL.
   const [mediaThumbs, setMediaThumbs] = useState<Record<string, string>>({});
   // True while an OS file drag is hovering the window (shows the drop overlay).
@@ -401,6 +428,7 @@ export default function App() {
       setProject(p);
       durationRef.current = p.durationMs;
       await resolveImages(p);
+      await loadProjectMedia(p);
       await applyTime(0);
     })();
     // Load installed font families for the picker (built-ins first).
@@ -508,6 +536,37 @@ export default function App() {
     document.body.style.cursor = "row-resize";
     document.body.style.userSelect = "none";
   };
+
+  // Save the current panel sizes as the default layout (persisted). Reset restores
+  // the built-in defaults. Both apply immediately.
+  const saveUiLayout = useCallback(() => {
+    const layout: UiLayout = { mediaW, inspectorW, timelineH, labelsW };
+    try {
+      localStorage.setItem(UI_LAYOUT_KEY, JSON.stringify(layout));
+    } catch {
+      /* ignore quota / unavailable */
+    }
+  }, [mediaW, inspectorW, timelineH, labelsW]);
+
+  const resetUiLayout = useCallback(() => {
+    setMediaW(DEFAULT_LAYOUT.mediaW);
+    setInspectorW(DEFAULT_LAYOUT.inspectorW);
+    setTimelineH(DEFAULT_LAYOUT.timelineH);
+    setLabelsW(DEFAULT_LAYOUT.labelsW);
+    try {
+      localStorage.removeItem(UI_LAYOUT_KEY);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const setLayoutValue = useCallback((key: keyof UiLayout, v: number) => {
+    const val = clampLayout(key, v);
+    if (key === "mediaW") setMediaW(val);
+    else if (key === "inspectorW") setInspectorW(val);
+    else if (key === "timelineH") setTimelineH(val);
+    else setLabelsW(val);
+  }, []);
 
   const seek = useCallback(
     (t: number) => {
@@ -621,52 +680,37 @@ export default function App() {
   }, []);
 
   // Add image/video/audio files to the bin (dedup) and load their thumbnails.
-  // Accepts dialog or OS-drop paths.
+  // Load a project's saved media bin into the display state (+ thumbnails). Used
+  // on initial load and when opening a file, so a saved project reopens with its
+  // media and a new/blank project shows an empty bin.
+  const loadProjectMedia = useCallback(
+    async (p: Project) => {
+      const list = p.media ?? [];
+      setMedia(list);
+      setMediaThumbs({});
+      if (list.length) await loadMediaThumbs(list);
+    },
+    [loadMediaThumbs]
+  );
+
+  // Accepts dialog or OS-drop paths. Adds to the bin (dedup) and persists the new
+  // list onto the project (so it's saved with the file) — the project is the
+  // single source of truth for the bin.
   const addMediaPaths = useCallback(async (paths: string[]) => {
     const supported = paths.filter((p) => mediaKind(p) != null);
     if (!supported.length) return;
-    setMedia((cur) => {
-      const seen = new Set(cur);
-      return [...cur, ...supported.filter((p) => !seen.has(p))];
-    });
+    const cur = projectRef.current?.media ?? [];
+    const seen = new Set(cur);
+    const additions = supported.filter((p) => !seen.has(p));
+    if (additions.length) {
+      const next = [...cur, ...additions];
+      const proj = await apiSetMedia(next);
+      setProject(proj);
+      setMedia(next);
+    }
     await loadMediaThumbs(supported);
     recordAction("media_import", { count: supported.length });
   }, [loadMediaThumbs, recordAction]);
-
-  // Persist the media bin (path list) so it survives app restarts.
-  useEffect(() => {
-    try {
-      localStorage.setItem(MEDIA_BIN_KEY, JSON.stringify(media));
-    } catch {
-      /* ignore quota / unavailable */
-    }
-  }, [media]);
-
-  // On startup, prune any persisted media whose file no longer exists on disk,
-  // then load thumbnails for what remains. Runs once.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const saved = (() => {
-        try {
-          const v = JSON.parse(localStorage.getItem(MEDIA_BIN_KEY) || "[]");
-          return Array.isArray(v) ? (v as string[]) : [];
-        } catch {
-          return [];
-        }
-      })();
-      if (!saved.length) return;
-      const existing = await filterExistingFiles(saved).catch(() => saved);
-      if (cancelled) return;
-      const keep = new Set(existing);
-      setMedia((cur) => cur.filter((p) => keep.has(p)));
-      await loadMediaThumbs(existing);
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const onImportMedia = useCallback(async () => {
     const selected = await open({
@@ -704,8 +748,11 @@ export default function App() {
     recordAction("add_media", { layerId: newId, path, kind });
   }, [resolveImages, applyTime, recordAction]);
 
-  const onRemoveMedia = useCallback((path: string) => {
-    setMedia((cur) => cur.filter((p) => p !== path));
+  const onRemoveMedia = useCallback(async (path: string) => {
+    const next = (projectRef.current?.media ?? []).filter((p) => p !== path);
+    const proj = await apiSetMedia(next);
+    setProject(proj);
+    setMedia(next);
   }, []);
 
   // OS file drag-and-drop: WebView2 hands file drops to Tauri (not the DOM), so
@@ -1793,13 +1840,14 @@ export default function App() {
         setSelectedId(null);
         setDecomposeId(null);
         await resolveImages(p);
+        await loadProjectMedia(p);
         seek(0);
         recordAction("open_project", { path });
       } catch (e) {
         alert(`Open failed: ${e}`);
       }
     },
-    [stop, resolveImages, seek, recordAction],
+    [stop, resolveImages, seek, recordAction, loadProjectMedia],
   );
 
   // Open a .sefx project, replacing the current one and loading its images.
@@ -1824,6 +1872,10 @@ export default function App() {
     setSelectedIds([]);
     setDecomposeId(null);
     setGroupPath([]);
+    // A brand-new project starts with an empty media bin (the backend's blank
+    // project has no media either).
+    setMedia([]);
+    setMediaThumbs({});
     await resolveImages(p);
     seek(0);
     recordAction("new_project", {});
@@ -2082,9 +2134,27 @@ export default function App() {
           record("render_probe", lastProbeReport());
         }
 
-        setExportMsg(format === "mp4" ? "Encoding MP4 (ffmpeg)…" : "Saving…");
+        // Collect the comp's audio clips so ffmpeg can mux them into the output:
+        // each plays from its start at its comp offset, for its trimmed length.
+        const audioTracks = p.layers
+          .filter((l) => l.kind.kind === "audio" && !l.hidden && l.startMs < p.durationMs)
+          .map((l) => {
+            const durMs = l.kind.kind === "audio" ? l.kind.durationMs : 0;
+            const span = Math.max(0, Math.min(l.endMs, p.durationMs) - l.startMs);
+            const playMs = durMs > 0 ? Math.min(span, durMs) : span;
+            return { path: l.kind.kind === "audio" ? l.kind.src : "", startMs: l.startMs, playMs };
+          })
+          .filter((a) => a.path && a.playMs > 0);
+
+        setExportMsg(
+          audioTracks.length
+            ? "Muxing audio (ffmpeg)…"
+            : format === "mp4"
+              ? "Encoding MP4 (ffmpeg)…"
+              : "Saving…"
+        );
         const base64 = await blobToBase64(blob);
-        await exportVideo(base64, path, format, level);
+        await exportVideo(base64, path, format, level, audioTracks, p.durationMs);
         // Calibrate the render-time estimate: record how long this export took
         // per frame so the dialog can predict the next one more accurately.
         const msPerFrame = (performance.now() - renderStartedAt) / totalFrames;
@@ -2884,6 +2954,11 @@ export default function App() {
       title: "Window",
       items: [
         {
+          label: "UI size…",
+          onClick: () => setShowUiSize(true),
+        },
+        { separator: true },
+        {
           label: (showRecorder ? "Hide" : "Show") + " Session Recorder",
           onClick: () => setShowRecorder((s) => !s),
         },
@@ -3186,6 +3261,8 @@ export default function App() {
         razor={razor}
         onSplitLayer={onSplitLayer}
         onEnterGroup={onEnterGroup}
+        labelsW={labelsW}
+        onResizeLabels={(w) => setLayoutValue("labelsW", w)}
       />
 
       {showRecorder && (
@@ -3327,6 +3404,17 @@ export default function App() {
           durationMs={project.durationMs}
           onApply={onApplyComp}
           onClose={() => setShowCompSettings(false)}
+        />
+      )}
+
+      {showUiSize && (
+        <UiSizeDialog
+          values={{ mediaW, inspectorW, timelineH, labelsW }}
+          bounds={LAYOUT_BOUNDS}
+          onSet={setLayoutValue}
+          onSave={saveUiLayout}
+          onReset={resetUiLayout}
+          onClose={() => setShowUiSize(false)}
         />
       )}
 

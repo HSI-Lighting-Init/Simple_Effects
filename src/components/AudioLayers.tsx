@@ -1,8 +1,8 @@
 // Headless audio playback controller. Renders nothing; it owns one
 // <HTMLAudioElement> per audio layer and keeps them synced to the playhead:
 // during playback each plays over its [start, end] range at the right offset,
-// and scrubbing/pausing pauses them. (Export audio muxing is out of scope — this
-// is preview playback only.)
+// and scrubbing/pausing pauses them. (This is preview playback only; the export
+// muxes the same clips into the output file via ffmpeg — see `export_video`.)
 import { useEffect, useRef } from "react";
 import type { Project } from "../bindings/Project";
 import { getMediaUrl } from "../lib/media";

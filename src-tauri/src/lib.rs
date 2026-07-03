@@ -119,6 +119,16 @@ fn set_project(state: State<AppState>, project: Project) {
     *current = project;
 }
 
+/// Replace the project's media bin (imported file paths). Held on the project so
+/// it's saved with the file — reopening restores the bin; a new project is empty.
+/// Not undoable (bin management isn't part of the edit history).
+#[tauri::command]
+fn set_media(state: State<AppState>, media: Vec<String>) -> Project {
+    let mut project = state.project.lock().unwrap();
+    project.media = media;
+    project.clone()
+}
+
 /// Start a fresh, blank project: clear the timeline and reset undo/redo and the
 /// group-navigation stack. Returns the new empty project. Not undoable (it's a
 /// deliberate "start over"), matching how the app boots.
@@ -2637,27 +2647,88 @@ fn install_ffmpeg() -> Result<String, String> {
     }
 }
 
-/// Save the exported video. `webm_base64` is the recorded WebM. `format` "webm"
-/// writes it as-is; "mp4" transcodes to H.264 via ffmpeg. `level` 1..5 sets the
+/// One audio clip to mux into the exported video: its file `path`, when it
+/// starts in the comp (`start_ms`), and how long it plays (`play_ms`, already
+/// clamped to the clip's own length and its timeline trim).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AudioTrack {
+    pub path: String,
+    #[serde(rename = "startMs")]
+    pub start_ms: u32,
+    #[serde(rename = "playMs")]
+    pub play_ms: u32,
+}
+
+/// Build the ffmpeg `-filter_complex` graph that trims each audio clip to its
+/// play length, delays it to its comp start, and mixes them into one `[aout]`
+/// stream capped at the comp duration. Audio inputs are ffmpeg inputs 1..=N (0 is
+/// the video). Returns None if there are no usable tracks.
+fn audio_filter_complex(audio: &[AudioTrack], duration_ms: u32) -> Option<String> {
+    if audio.is_empty() {
+        return None;
+    }
+    let dur = duration_ms as f64 / 1000.0;
+    let mut fc = String::new();
+    for (i, a) in audio.iter().enumerate() {
+        let inp = i + 1; // input 0 is the video
+        let play = a.play_ms as f64 / 1000.0;
+        // Trim from the clip start, restamp to zero, then delay to the comp start.
+        fc.push_str(&format!(
+            "[{inp}:a]atrim=0:{play:.3},asetpts=PTS-STARTPTS,adelay={delay}:all=1[a{i}];",
+            delay = a.start_ms
+        ));
+    }
+    let n = audio.len();
+    if n == 1 {
+        fc.push_str(&format!("[a0]atrim=0:{dur:.3}[aout]"));
+    } else {
+        for i in 0..n {
+            fc.push_str(&format!("[a{i}]"));
+        }
+        fc.push_str(&format!("amix=inputs={n}:normalize=0,atrim=0:{dur:.3}[aout]"));
+    }
+    Some(fc)
+}
+
+/// Save the exported video. `webm_base64` is the recorded (video-only) WebM.
+/// `format` "webm" writes it as-is when there's no audio, else remuxes with an
+/// Opus track; "mp4" transcodes to H.264 (+ AAC audio). `level` 1..5 sets the
 /// compression (1 = near-original / largest, 5 = highest compression / smallest).
+/// `audio` are the comp's audio clips to mix in; muxing needs ffmpeg.
 #[tauri::command]
 fn export_video(
     webm_base64: String,
     path: String,
     format: String,
     level: u8,
+    audio: Vec<AudioTrack>,
+    duration_ms: u32,
 ) -> Result<(), String> {
     let bytes = STANDARD
         .decode(webm_base64.as_bytes())
         .map_err(|e| format!("decode: {e}"))?;
-    if format == "webm" {
+
+    let ffmpeg = find_ffmpeg();
+    let filter = audio_filter_complex(&audio, duration_ms);
+    let has_audio = filter.is_some() && ffmpeg.is_some();
+
+    // Fast path: WebM with no audio to mux → write the recorded bytes as-is.
+    if format == "webm" && !has_audio {
+        if filter.is_some() && ffmpeg.is_none() {
+            // There WAS audio but we can't mux it — save video-only rather than fail.
+            eprintln!("export: ffmpeg not found; saving WebM without its audio track");
+        }
         return std::fs::write(&path, &bytes).map_err(|e| format!("write {path}: {e}"));
     }
-    // MP4 (H.264) via ffmpeg.
-    let ffmpeg = find_ffmpeg().ok_or(
-        "MP4 needs ffmpeg, which isn't installed. Install it from the export dialog, \
-         or choose WebM.",
+
+    let ffmpeg = ffmpeg.ok_or(
+        "MP4 (and audio) need ffmpeg, which isn't installed. Install it from the export \
+         dialog, or choose WebM.",
     )?;
+
+    let tmp = std::env::temp_dir().join(format!("simple_effects_export_{}.webm", std::process::id()));
+    std::fs::write(&tmp, &bytes).map_err(|e| format!("temp write: {e}"))?;
+
     let crf = match level {
         1 => "16",
         2 => "20",
@@ -2665,17 +2736,35 @@ fn export_video(
         4 => "27",
         _ => "32",
     };
-    let tmp = std::env::temp_dir().join(format!("simple_effects_export_{}.webm", std::process::id()));
-    std::fs::write(&tmp, &bytes).map_err(|e| format!("temp write: {e}"))?;
-    let result = std::process::Command::new(&ffmpeg)
-        .args(["-y", "-i"])
-        .arg(&tmp)
-        .args([
+
+    let mut cmd = std::process::Command::new(&ffmpeg);
+    cmd.args(["-y", "-i"]).arg(&tmp);
+    // Audio inputs (1..=N).
+    for a in &audio {
+        cmd.args(["-i"]).arg(&a.path);
+    }
+    if let Some(fc) = &filter {
+        cmd.args(["-filter_complex", fc, "-map", "0:v:0", "-map", "[aout]"]);
+    } else {
+        cmd.args(["-map", "0:v:0"]);
+    }
+    // Video codec: keep VP9 for WebM (fast copy), transcode to H.264 for MP4.
+    if format == "webm" {
+        cmd.args(["-c:v", "copy"]);
+        if filter.is_some() {
+            cmd.args(["-c:a", "libopus", "-b:a", "192k"]);
+        }
+    } else {
+        cmd.args([
             "-c:v", "libx264", "-crf", crf, "-preset", "medium", "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
-        ])
-        .arg(&path)
-        .output();
+        ]);
+        if filter.is_some() {
+            cmd.args(["-c:a", "aac", "-b:a", "192k"]);
+        }
+    }
+    let result = cmd.arg(&path).output();
+
     let _ = std::fs::remove_file(&tmp);
     let out = result.map_err(|e| format!("run ffmpeg: {e}"))?;
     if !out.status.success() {
@@ -2959,6 +3048,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_project,
             set_project,
+            set_media,
             new_project,
             take_launch_file,
             evaluate_at,

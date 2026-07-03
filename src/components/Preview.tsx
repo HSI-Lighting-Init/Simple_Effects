@@ -2118,6 +2118,12 @@ export default function Preview({
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
+  // User zoom (1 = fit-to-window) and pan offset (px), driven by the scroll wheel.
+  // Applied on top of the fit scale via the Konva layer origin, so the stage stays
+  // the size of the viewport (no scrollbars) and the Fit button resets the view.
+  const [userZoom, setUserZoom] = useState(1);
+  const [panX, setPanX] = useState(0);
+  const [panY, setPanY] = useState(0);
   const nodeRefs = useRef<Record<number, Konva.Node>>({});
   const trRef = useRef<Konva.Transformer>(null);
 
@@ -2136,24 +2142,80 @@ export default function Preview({
     box.w > 0 && box.h > 0
       ? Math.min((box.w - pad) / project.width, (box.h - pad) / project.height)
       : 0;
-  // During export render at full comp resolution (1:1) for a crisp video.
-  const scale = exporting ? 1 : fitScale;
+  // During export render at full comp resolution (1:1) for a crisp video; in the
+  // editor the fit scale is multiplied by the user's wheel zoom.
+  const scale = exporting ? 1 : fitScale * userZoom;
   const compW = project.width * scale;
   const compH = project.height * scale;
-  // In the editor the Stage fills the whole viewport (a "pasteboard") and the
-  // comp is centred inside it, so a layer dragged past the frame stays visible
-  // and grab-able instead of being clipped to the canvas edge. On export the
-  // Stage is exactly the comp so nothing outside the frame is rendered.
-  const stageW = exporting ? compW : Math.max(box.w, compW);
-  const stageH = exporting ? compH : Math.max(box.h, compH);
-  const originX = exporting ? 0 : Math.round((stageW - compW) / 2);
-  const originY = exporting ? 0 : Math.round((stageH - compH) / 2);
+  // In the editor the Stage is the size of the viewport; the comp is centred in
+  // it and shifted by the (clamped) pan, so zooming/panning happens via the layer
+  // origin and off-viewport content is simply clipped. On export the Stage is
+  // exactly the comp so nothing outside the frame is rendered.
+  const stageW = exporting ? compW : box.w || compW;
+  const stageH = exporting ? compH : box.h || compH;
+  // Clamp the pan so a zoomed-in comp can't be dragged off past its own edges,
+  // and a zoomed-out comp stays centred.
+  const overX = Math.max(0, (compW - stageW) / 2);
+  const overY = Math.max(0, (compH - stageH) / 2);
+  const panXc = Math.max(-overX, Math.min(overX, panX));
+  const panYc = Math.max(-overY, Math.min(overY, panY));
+  const originX = exporting ? 0 : Math.round((stageW - compW) / 2 + panXc);
+  const originY = exporting ? 0 : Math.round((stageH - compH) / 2 + panYc);
   // Comp bounds expressed in the (scaled) layer's own coordinate space — used to
   // draw the pasteboard dimming around the frame.
   const pbL = -originX / (scale || 1);
   const pbT = -originY / (scale || 1);
   const pbR = (stageW - originX) / (scale || 1);
   const pbB = (stageH - originY) / (scale || 1);
+
+  // Latest view geometry the wheel handler needs (a ref so the native listener,
+  // attached once, always reads current values without re-subscribing).
+  const zoomRef = useRef({ scale, originX, originY, fitScale, userZoom, stageW, stageH, cw: project.width, ch: project.height, exporting });
+  zoomRef.current = { scale, originX, originY, fitScale, userZoom, stageW, stageH, cw: project.width, ch: project.height, exporting };
+
+  // Scroll-wheel zoom, anchored to the cursor (the comp point under the pointer
+  // stays put). Native non-passive listener so we can preventDefault the page/OS
+  // scroll. Runs once; reads live geometry from `zoomRef`.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const ZMIN = 0.1, ZMAX = 12;
+    const onWheel = (e: WheelEvent) => {
+      const z = zoomRef.current;
+      if (z.exporting || z.fitScale <= 0) return;
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+      const nz = Math.max(ZMIN, Math.min(ZMAX, z.userZoom * factor));
+      if (nz === z.userZoom) return;
+      const newScale = z.fitScale * nz;
+      // Comp-space point under the cursor now; solve the pan that keeps it there.
+      const compX = (cx - z.originX) / (z.scale || 1);
+      const compY = (cy - z.originY) / (z.scale || 1);
+      const newCompW = z.cw * newScale;
+      const newCompH = z.ch * newScale;
+      setUserZoom(nz);
+      setPanX(cx - compX * newScale - (z.stageW - newCompW) / 2);
+      setPanY(cy - compY * newScale - (z.stageH - newCompH) / 2);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // Reset zoom/pan back to fit.
+  const fitView = () => {
+    setUserZoom(1);
+    setPanX(0);
+    setPanY(0);
+  };
+
+  // Reset the view when the composition size changes (new comp / settings).
+  useEffect(() => {
+    fitView();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.width, project.height]);
 
   const register = (id: number): NodeRef => (n) => {
     if (n) nodeRefs.current[id] = n;
@@ -2510,6 +2572,16 @@ export default function Preview({
             )}
           </KLayer>
         </Stage>
+      )}
+      {!exporting && scale > 0 && (
+        <button
+          className="preview-zoom"
+          onClick={fitView}
+          title="Fit to window (reset zoom) · scroll to zoom"
+        >
+          <span className="preview-zoom-pct">{Math.round(userZoom * 100)}%</span>
+          <span className="preview-zoom-fit">⤢ Fit</span>
+        </button>
       )}
     </div>
   );

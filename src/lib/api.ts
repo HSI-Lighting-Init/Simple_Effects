@@ -234,6 +234,9 @@ export const addFrameGrid = (rows: number, cols: number) =>
 export const filterExistingFiles = (paths: string[]) =>
   invoke<string[]>("filter_existing_files", { paths });
 
+/** Set the project's media bin (imported file paths). Saved with the project. */
+export const setMedia = (media: string[]) => invoke<Project>("set_media", { media });
+
 /** Set (or replace) the image in one grid cell (row-major index). */
 export const setCellImage = (layerId: number, cell: number, path: string) =>
   invoke<Project>("set_cell_image", { layerId, cell, path });
@@ -539,12 +542,29 @@ export const installFfmpeg = () => invoke<string>("install_ffmpeg");
  * ffmpeg H.264). `level` 1..5 = compression (1 near-original/largest,
  * 5 highest-compression/smallest).
  */
+/** One audio clip to mux into the export: source path, comp start, play length. */
+export interface AudioTrackSpec {
+  path: string;
+  startMs: number;
+  playMs: number;
+}
+
 export const exportVideo = (
   base64: string,
   path: string,
   format: "mp4" | "webm",
-  level: number
-) => invoke<void>("export_video", { webmBase64: base64, path, format, level });
+  level: number,
+  audio: AudioTrackSpec[],
+  durationMs: number
+) =>
+  invoke<void>("export_video", {
+    webmBase64: base64,
+    path,
+    format,
+    level,
+    audio,
+    durationMs,
+  });
 
 /** Delete a layer (object). Shapes detach any layers pinned to them. */
 export const deleteLayer = (layerId: number) =>

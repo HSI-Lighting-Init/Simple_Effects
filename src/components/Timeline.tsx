@@ -125,6 +125,10 @@ interface Props {
   onSplitLayer: (id: number, tMs: number) => void;
   /** Double-click a group layer to enter it and edit its children. */
   onEnterGroup: (id: number) => void;
+  /** Width (px) of the layers/names column. */
+  labelsW: number;
+  /** Commit a new layers-column width (dragged the divider). */
+  onResizeLabels: (w: number) => void;
 }
 
 export default function Timeline({
@@ -150,6 +154,8 @@ export default function Timeline({
   razor,
   onSplitLayer,
   onEnterGroup,
+  labelsW,
+  onResizeLabels,
 }: Props) {
   const tracksRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -616,9 +622,33 @@ export default function Timeline({
   const minorTicks: number[] = [];
   if (showMinors) for (let t = 0; t <= dur + 0.5; t += frameMs) minorTicks.push(t);
 
+  // Drag the divider between the layers column and the tracks to resize it.
+  const startLabelsResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = labelsW;
+    const move = (ev: MouseEvent) => onResizeLabels(startW + (ev.clientX - startX));
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+
   return (
     <div className="timeline">
-      <div className="tl-grid">
+      <div
+        className="tl-labels-resizer"
+        style={{ left: labelsW - 3 }}
+        title="Drag to resize the layers column"
+        onMouseDown={startLabelsResize}
+      />
+      <div className="tl-grid" style={{ gridTemplateColumns: `${labelsW}px 1fr` }}>
         <div className="tl-corner">
           <span className="tl-corner-label">Layers</span>
           <span className="tl-zoom">

@@ -22,6 +22,11 @@ pub struct Project {
     pub duration_ms: u32,
     /// Drawn back-to-front: index 0 is the bottom layer.
     pub layers: Vec<Layer>,
+    /// The media bin: imported image/video/audio file paths staged for this
+    /// project (not necessarily placed on the timeline). Saved with the project
+    /// so reopening a file restores its bin; a new project starts empty.
+    #[serde(default)]
+    pub media: Vec<String>,
 }
 
 /// One item on the timeline.
@@ -1071,6 +1076,7 @@ impl Project {
             fps: 30,
             duration_ms: 4000,
             layers: vec![],
+            media: vec![],
         }
     }
 
@@ -1166,6 +1172,7 @@ impl Project {
             fps: 30,
             duration_ms: 4000,
             layers: vec![backdrop, accent, title],
+            media: vec![],
         }
     }
 }

@@ -1517,6 +1517,35 @@ body {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
 
+/* Zoom readout / fit-to-window button, bottom-left of the preview. */
+.preview-zoom {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(18, 18, 28, 0.78);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.preview-zoom:hover {
+  background: rgba(40, 40, 58, 0.92);
+}
+.preview-zoom-pct {
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: right;
+}
+.preview-zoom-fit {
+  color: var(--muted);
+}
+
 /* Transitions demo */
 .tr-demo {
   max-height: 88vh;
@@ -1536,6 +1565,7 @@ body {
   background: var(--panel);
   border-top: 1px solid var(--line);
   overflow: hidden;
+  position: relative;
 }
 
 .tl-grid {
@@ -1543,6 +1573,19 @@ body {
   grid-template-columns: 160px 1fr;
   grid-template-rows: 26px 1fr;
   height: 100%;
+}
+
+/* Draggable divider between the layers column and the tracks. */
+.tl-labels-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 5;
+  cursor: col-resize;
+}
+.tl-labels-resizer:hover {
+  background: rgba(91, 140, 255, 0.35);
 }
 
 .tl-corner {
@@ -1763,19 +1806,18 @@ body {
   font-size: 11px;
 }
 .ss-pop {
-  position: absolute;
+  /* Portalled to <body>; positioned (left/top/width/max-height) via inline style
+     so it's never clipped by the inspector scroll area or a section's overflow. */
+  position: fixed;
   z-index: 1200;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
   padding: 6px;
-  max-height: 320px;
   display: flex;
   flex-direction: column;
+  min-width: 160px;
 }
 .ss-search {
   width: 100%;
@@ -1790,6 +1832,8 @@ body {
   margin-bottom: 6px;
 }
 .ss-list {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
 }
 .ss-group-title {

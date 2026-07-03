@@ -9,4 +9,10 @@ export type Project = { width: number, height: number, fps: number, durationMs: 
 /**
  * Drawn back-to-front: index 0 is the bottom layer.
  */
-layers: Array<Layer>, };
+layers: Array<Layer>, 
+/**
+ * The media bin: imported image/video/audio file paths staged for this
+ * project (not necessarily placed on the timeline). Saved with the project
+ * so reopening a file restores its bin; a new project starts empty.
+ */
+media: Array<string>, };
