@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="100%" height="100%">
+    <defs>
+        <radialGradient id="bgGrad" cx="50%" cy="40%" r="80%">
+            <stop offset="0%" stop-color="#1e3a8a" />
+            <stop offset="100%" stop-color="#020617" />
+        </radialGradient>
+
+        <linearGradient id="pinkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#a855f7" />
+            <stop offset="100%" stop-color="#ec4899" />
+        </linearGradient>
+
+        <linearGradient id="cyanGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#3b82f6" />
+            <stop offset="100%" stop-color="#22d3ee" />
+        </linearGradient>
+
+        <filter id="glowPink" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur1" />
+            <feGaussianBlur in="SourceGraphic" stdDeviation="12" result="blur2" />
+            <feMerge>
+                <feMergeNode in="blur2" />
+                <feMergeNode in="blur1" />
+                <feMergeNode in="SourceGraphic" />
+            </feMerge>
+        </filter>
+
+        <filter id="glowCyan" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur1" />
+            <feGaussianBlur in="SourceGraphic" stdDeviation="10" result="blur2" />
+            <feMerge>
+                <feMergeNode in="blur2" />
+                <feMergeNode in="blur1" />
+                <feMergeNode in="SourceGraphic" />
+            </feMerge>
+        </filter>
+
+        <radialGradient id="aura" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#c084fc" stop-opacity="0.25" />
+            <stop offset="100%" stop-color="#c084fc" stop-opacity="0" />
+        </radialGradient>
+    </defs>
+
+    <rect width="256" height="256" rx="56" fill="url(#bgGrad)" />
+
+    <rect width="252" height="252" x="2" y="2" rx="54" fill="none" stroke="#60a5fa" stroke-width="2" stroke-opacity="0.2" />
+
+    <circle cx="128" cy="128" r="110" fill="url(#aura)" />
+
+    <g filter="url(#glowPink)">
+        <path d="M 130 45 L 200 185 L 170 185 L 130 100 L 90 185 L 60 185 Z"
+              fill="url(#pinkGrad)"
+              stroke="url(#pinkGrad)"
+              stroke-width="8"
+              stroke-linejoin="round"
+              stroke-linecap="round" />
+
+        <path d="M 130 45 L 200 185 L 170 185 L 130 100 L 90 185 L 60 185 Z"
+              fill="none"
+              stroke="#fdf4ff"
+              stroke-width="2"
+              stroke-opacity="0.5"
+              stroke-linejoin="round" />
+    </g>
+
+    <g transform="rotate(-18 130 160)">
+        <rect x="86" y="154" width="32" height="14" rx="7" fill="#22d3ee" filter="url(#glowCyan)" />
+        <rect x="126" y="154" width="16" height="14" rx="7" fill="#f472b6" filter="url(#glowPink)" />
+        <rect x="150" y="154" width="16" height="14" rx="7" fill="#f472b6" filter="url(#glowPink)" />
+
+        <rect x="86" y="154" width="32" height="14" rx="7" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.6" />
+        <rect x="126" y="154" width="16" height="14" rx="7" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.6" />
+        <rect x="150" y="154" width="16" height="14" rx="7" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.6" />
+    </g>
+
+    <g filter="url(#glowCyan)">
+        <path d="M 45 160 Q 130 100 200 125"
+              fill="none"
+              stroke="url(#cyanGrad)"
+              stroke-width="20"
+              stroke-linecap="round" />
+
+        <path d="M 190 95 L 240 125 L 185 155 Q 195 140 200 125 Q 195 110 190 95 Z"
+              fill="url(#cyanGrad)" />
+
+        <path d="M 45 160 Q 130 100 200 125"
+              fill="none"
+              stroke="#ffffff"
+              stroke-width="2"
+              stroke-opacity="0.6"
+              stroke-linecap="round" />
+        <path d="M 190 95 L 240 125 L 185 155"
+              fill="none"
+              stroke="#ffffff"
+              stroke-width="2"
+              stroke-opacity="0.6"
+              stroke-linejoin="round" />
+    </g>
+
+    <rect width="256" height="256" rx="56" fill="url(#cyanGrad)" opacity="0.05" style="mix-blend-mode: overlay;" />
+</svg>
