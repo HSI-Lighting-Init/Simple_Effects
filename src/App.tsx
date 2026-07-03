@@ -52,6 +52,7 @@ import {
   removeCellEffect,
   keyCellEffect,
   setCellWipeStatic,
+  setCellShineStatic,
   linkEffect,
   addLinkedEffect,
   removeLinkedEffectItem,
@@ -61,6 +62,7 @@ import {
   setLinkedMember,
   unlinkCell,
   addTextLayer,
+  addAdjustmentLayer,
   setCompSize,
   setCompDuration,
   setCompFps,
@@ -70,6 +72,7 @@ import {
   reorderLayers,
   saveProjectFile,
   openProjectFile,
+  newProject,
   takeLaunchFile,
   attachToShape,
   clearKeyframes,
@@ -94,6 +97,7 @@ import {
   setShapeParams,
   setShapeRotationKey,
   setWipeStatic,
+  setShineStatic,
   evaluateAt,
   getProject,
   loadImageDataUrl,
@@ -112,6 +116,7 @@ import {
   setTextPerChar3d,
   undo,
 } from "./lib/api";
+import type { EffectParam } from "./lib/api";
 import {
   clearRecording,
   describeTarget,
@@ -668,6 +673,17 @@ export default function App() {
     recordAction("add_text", { layerId: newId });
   }, [applyTime, recordAction]);
 
+  // Add a whole-comp adjustment layer (seeded with a shiny-clouds effect).
+  const onAddAdjustment = useCallback(async () => {
+    const p = await addAdjustmentLayer();
+    setProject(p);
+    const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
+    if (newId != null) setSelectedId(newId);
+    durationRef.current = p.durationMs;
+    await applyTime(timeRef.current);
+    recordAction("add_adjustment", { layerId: newId });
+  }, [applyTime, recordAction]);
+
   // Edit a text layer's content/size; re-shapes on the Rust side.
   const onSetContent = useCallback(
     async (layerId: number, content: string, size: number) => {
@@ -1157,7 +1173,7 @@ export default function App() {
     async (
       layerId: number,
       index: number,
-      param: "amount" | "radius" | "degrees" | "position" | "softness",
+      param: EffectParam,
       value: number,
       seedStart: boolean
     ) => {
@@ -1176,6 +1192,16 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("wipe_static", { layerId, index, angle, invert });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onSetShineStatic = useCallback(
+    async (layerId: number, index: number, tint: Rgba, blend: number) => {
+      const p = await setShineStatic(layerId, index, tint, blend);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("shine_static", { layerId, index, blend });
     },
     [applyTime, recordAction]
   );
@@ -1205,7 +1231,7 @@ export default function App() {
       layerId: number,
       cell: number,
       index: number,
-      param: "amount" | "radius" | "degrees" | "position" | "softness",
+      param: EffectParam,
       value: number,
       seedStart: boolean
     ) => {
@@ -1222,6 +1248,15 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("cell_wipe_static", { layerId, cell, index, angle, invert });
+    },
+    [applyTime, recordAction]
+  );
+  const onSetCellShineStatic = useCallback(
+    async (layerId: number, cell: number, index: number, tint: Rgba, blend: number) => {
+      const p = await setCellShineStatic(layerId, cell, index, tint, blend);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("cell_shine_static", { layerId, cell, index, blend });
     },
     [applyTime, recordAction]
   );
@@ -1257,7 +1292,7 @@ export default function App() {
       layerId: number,
       groupId: number,
       index: number,
-      param: "amount" | "radius" | "degrees" | "position" | "softness",
+      param: EffectParam,
       value: number,
       seedStart: boolean
     ) =>
@@ -1547,6 +1582,26 @@ export default function App() {
     if (typeof selected !== "string") return;
     await loadProjectPath(selected);
   }, [loadProjectPath]);
+
+  // Start a fresh, blank project. Warns first if there are unsaved changes.
+  const doNewProject = useCallback(async () => {
+    if (dirty && !window.confirm("Discard unsaved changes and start a new project?")) return;
+    stop();
+    const p = await newProject();
+    pristineRef.current = true; // a brand-new project isn't "unsaved" yet
+    setProject(p);
+    setDirty(false);
+    durationRef.current = p.durationMs;
+    filePathRef.current = null; // unbound from any file → next Save prompts
+    setFileName(null);
+    setSelectedId(null);
+    setSelectedIds([]);
+    setDecomposeId(null);
+    setGroupPath([]);
+    await resolveImages(p);
+    seek(0);
+    recordAction("new_project", {});
+  }, [dirty, stop, resolveImages, seek, recordAction]);
 
   // If the app was launched by double-clicking a .sefx file, open it on startup
   // instead of showing the blank default project. Runs exactly once.
@@ -2242,6 +2297,11 @@ export default function App() {
         void doOpenProject();
         return;
       }
+      if (mod && (e.key === "n" || e.key === "N")) {
+        e.preventDefault();
+        void doNewProject();
+        return;
+      }
       // Layer copy/paste/duplicate — only outside text fields (so inputs keep
       // their native clipboard behaviour).
       if (mod && (e.key === "c" || e.key === "C")) {
@@ -2289,6 +2349,7 @@ export default function App() {
     doSave,
     doSaveAs,
     doOpenProject,
+    doNewProject,
     onCopyLayer,
     onPasteLayer,
     onDuplicateLayer,
@@ -2442,6 +2503,8 @@ export default function App() {
     {
       title: "File",
       items: [
+        { label: "New", onClick: () => void doNewProject(), shortcut: "Ctrl+N" },
+        { separator: true },
         { label: "Open…", onClick: () => void doOpenProject(), shortcut: "Ctrl+O" },
         { label: "Save", onClick: () => void doSave(), shortcut: "Ctrl+S" },
         { label: "Save As…", onClick: () => void doSaveAs(), shortcut: "Ctrl+Shift+S" },
@@ -2532,6 +2595,8 @@ export default function App() {
         { label: "3D Cylinder", onClick: () => onAddShape("cylinder") },
         { separator: true },
         { label: "Multi-Frame Grid…", onClick: () => setGridDialog({ rows: 2, cols: 2 }) },
+        { separator: true },
+        { label: "Adjustment Layer (Shiny Clouds)", onClick: onAddAdjustment },
       ],
     },
     {
@@ -2768,6 +2833,7 @@ export default function App() {
           onRemoveEffect={onRemoveEffect}
           onKeyEffect={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
+          onSetShineStatic={onSetShineStatic}
           onShapeParams={onShapeParams}
           onShapeRotKey={onShapeRotKey}
           onAttachToShape={onAttachToShape}
@@ -2818,6 +2884,7 @@ export default function App() {
           onRemoveCellEffect={onRemoveCellEffect}
           onKeyCellEffect={onKeyCellEffect}
           onSetCellWipeStatic={onSetCellWipeStatic}
+          onSetCellShineStatic={onSetCellShineStatic}
           gridLinked={gridLinked}
           onLinkEffect={onLinkEffect}
           onAddLinkedEffect={onAddLinkedEffect}
@@ -2997,6 +3064,7 @@ export default function App() {
           onRemoveEffect={onRemoveEffect}
           onKeyEffect={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
+          onSetShineStatic={onSetShineStatic}
           onClose={() => setFxEditorId(null)}
         />
       )}

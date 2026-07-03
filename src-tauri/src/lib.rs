@@ -119,6 +119,21 @@ fn set_project(state: State<AppState>, project: Project) {
     *current = project;
 }
 
+/// Start a fresh, blank project: clear the timeline and reset undo/redo and the
+/// group-navigation stack. Returns the new empty project. Not undoable (it's a
+/// deliberate "start over"), matching how the app boots.
+#[tauri::command]
+fn new_project(state: State<AppState>) -> Project {
+    let project = Project::empty();
+    let mut current = state.project.lock().unwrap();
+    let mut shaped = state.shaped.lock().unwrap();
+    reshape_all(&project, &mut shaped);
+    *current = project;
+    *state.history.lock().unwrap() = History::default();
+    state.nav.lock().unwrap().clear();
+    current.clone()
+}
+
 /// Undo the last mutation; returns the restored project (or `None` if nothing to
 /// undo). Rebuilds the shaping cache so text layers stay consistent.
 #[tauri::command]
@@ -219,6 +234,30 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
         transition_out: None,
     });
     state.shaped.lock().unwrap().insert(next_id, shaped);
+    project.clone()
+}
+
+/// Add an adjustment layer spanning the whole comp, seeded with one "shiny
+/// clouds" effect. Its effect stack (layer.effects) lights every layer below it.
+#[tauri::command]
+fn add_adjustment_layer(state: State<AppState>) -> Project {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let next_id = max_layer_id(&project.layers) + 1;
+    let dur = project.duration_ms;
+    project.layers.push(Layer {
+        id: next_id,
+        name: "Adjustment".into(),
+        start_ms: 0,
+        end_ms: dur,
+        kind: LayerKind::Adjustment {},
+        transform: Transform::at(0.0, 0.0),
+        hidden: false,
+        attach: None,
+        effects: vec![Effect::default_of("shinyclouds").unwrap()],
+        transition_in: None,
+        transition_out: None,
+    });
     project.clone()
 }
 
@@ -751,8 +790,10 @@ fn set_layer_range(
         s = e.saturating_sub(MIN_SPAN_MS);
     }
     // Keyframes stick to the layer: a pure MOVE (span preserved) shifts every
-    // keyframe — and the per-letter animation start — by the same delta, so the
-    // animation travels with the block. A trim (span changed) leaves them put.
+    // keyframe by the same delta, so they travel with the block. A trim (span
+    // changed) leaves them put. The per-letter animation start is now anchored
+    // to the layer's start (see eval::letter_at), so it moves automatically and
+    // must NOT be shifted here — doing so would double-count the offset.
     let delta = s as i64 - old_start as i64;
     let span_preserved = (e as i64 - s as i64) == (old_end as i64 - old_start as i64);
     if span_preserved && delta != 0 {
@@ -761,9 +802,6 @@ fn set_layer_range(
                 k.time_ms = (k.time_ms as i64 + delta).max(0) as u32;
             }
         });
-        if let LayerKind::Text { anim: Some(a), .. } = &mut layer.kind {
-            a.start_ms = (a.start_ms as i64 + delta).max(0) as u32;
-        }
     }
     layer.start_ms = s;
     layer.end_ms = e;
@@ -1874,6 +1912,13 @@ fn effect_track_mut<'a>(e: &'a mut Effect, param: &str) -> Option<&'a mut Track>
         (Effect::Invert { amount }, "amount") => Some(amount),
         (Effect::Wipe { position, .. }, "position") => Some(position),
         (Effect::Wipe { softness, .. }, "softness") => Some(softness),
+        (Effect::ShinyClouds { intensity, .. }, "intensity") => Some(intensity),
+        (Effect::ShinyClouds { scale, .. }, "scale") => Some(scale),
+        (Effect::ShinyClouds { speed, .. }, "speed") => Some(speed),
+        (Effect::ShinyClouds { complexity, .. }, "complexity") => Some(complexity),
+        (Effect::ShinyClouds { contrast, .. }, "contrast") => Some(contrast),
+        (Effect::ShinyClouds { brightness, .. }, "brightness") => Some(brightness),
+        (Effect::ShinyClouds { opacity, .. }, "opacity") => Some(opacity),
         _ => None,
     }
 }
@@ -1961,6 +2006,33 @@ fn set_wipe_static(
     Ok(project.clone())
 }
 
+/// Set a shiny-clouds effect's static fields: `tint` (shine colour) and `blend`
+/// mode (0 Add · 1 Screen · 2 Overlay · 3 Soft Light). Undoable.
+#[tauri::command]
+fn set_shine_static(
+    state: State<AppState>,
+    layer_id: u32,
+    index: usize,
+    tint: Rgba,
+    blend: u8,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match layer.effects.get_mut(index) {
+        Some(Effect::ShinyClouds { tint: t, blend: b, .. }) => {
+            *t = tint;
+            *b = blend;
+        }
+        _ => return Err("not a shiny clouds effect".into()),
+    }
+    Ok(project.clone())
+}
+
 /// Borrow one grid cell's effect stack mutably (errors if not a grid / bad cell).
 fn cell_effects_mut(layer: &mut Layer, cell: u32) -> Result<&mut Vec<Effect>, String> {
     let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
@@ -2036,6 +2108,29 @@ fn set_cell_wipe_static(
             *inv = invert;
         }
         _ => return Err("not a wipe effect".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Set a grid cell's shiny-clouds effect static fields (tint + blend). Undoable.
+#[tauri::command]
+fn set_cell_shine_static(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    index: usize,
+    tint: Rgba,
+    blend: u8,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    match cell_effects_mut(layer, cell)?.get_mut(index) {
+        Some(Effect::ShinyClouds { tint: t, blend: b, .. }) => {
+            *t = tint;
+            *b = blend;
+        }
+        _ => return Err("not a shiny clouds effect".into()),
     }
     Ok(project.clone())
 }
@@ -2416,6 +2511,17 @@ fn walk_effect_tracks(e: &mut Effect, f: &mut dyn FnMut(&mut Track)) {
             f(position);
             f(softness);
         }
+        Effect::ShinyClouds {
+            intensity, scale, speed, complexity, contrast, brightness, opacity, ..
+        } => {
+            f(intensity);
+            f(scale);
+            f(speed);
+            f(complexity);
+            f(contrast);
+            f(brightness);
+            f(opacity);
+        }
     }
 }
 
@@ -2593,6 +2699,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_project,
             set_project,
+            new_project,
             take_launch_file,
             evaluate_at,
             add_image_layer,
@@ -2630,6 +2737,7 @@ pub fn run() {
             remove_cell_effect,
             key_cell_effect,
             set_cell_wipe_static,
+            set_cell_shine_static,
             link_effect,
             add_linked_effect,
             remove_linked_effect_item,
@@ -2648,6 +2756,7 @@ pub fn run() {
             remove_effect,
             key_effect,
             set_wipe_static,
+            set_shine_static,
             save_binary_file,
             delete_layer,
             delete_keyframes_at,
@@ -2667,6 +2776,7 @@ pub fn run() {
             install_ffmpeg,
             export_video,
             add_text_layer,
+            add_adjustment_layer,
             set_text_content,
             set_text_color,
             clear_text_color_keys,

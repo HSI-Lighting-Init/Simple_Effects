@@ -4,15 +4,29 @@
 // the main scene. Reuses the same EffectsSection as the inspector.
 import { useEffect, useRef, useState } from "react";
 import { EffectsSection } from "./Inspector";
-import { buildFilter, wipeEffects, applyWipe } from "../lib/effects";
+import { applyEffects } from "../lib/effects";
 import type { ResolvedEffect } from "../bindings/ResolvedEffect";
+import type { Rgba } from "../bindings/Rgba";
 
-type EffectParam = "amount" | "radius" | "degrees" | "position" | "softness";
+type EffectParam =
+  | "amount"
+  | "radius"
+  | "degrees"
+  | "position"
+  | "softness"
+  | "intensity"
+  | "scale"
+  | "speed"
+  | "complexity"
+  | "contrast"
+  | "brightness"
+  | "opacity";
 
 // Draws the image with its effect stack onto a canvas (guaranteed-correct
-// preview — same filter + wipe pipeline the scene uses).
+// preview — the exact same filter + wipe + shine pipeline the scene uses).
 function EffectPreviewCanvas({ src, effects }: { src?: string; effects: ResolvedEffect[] }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const scratchRef = useRef<HTMLCanvasElement | null>(null);
   const [img, setImg] = useState<HTMLImageElement | null>(null);
 
   useEffect(() => {
@@ -37,11 +51,10 @@ function EffectPreviewCanvas({ src, effects }: { src?: string; effects: Resolved
     cv.height = h;
     const ctx = cv.getContext("2d");
     if (!ctx) return;
+    const scratch = scratchRef.current ?? (scratchRef.current = document.createElement("canvas"));
+    const tex = applyEffects(scratch, img, w, h, effects);
     ctx.clearRect(0, 0, w, h);
-    ctx.filter = buildFilter(effects);
-    ctx.drawImage(img, 0, 0, w, h);
-    ctx.filter = "none";
-    for (const wp of wipeEffects(effects)) applyWipe(ctx, w, h, wp);
+    ctx.drawImage(tex, 0, 0, w, h);
   }, [img, effects]);
 
   return <canvas ref={canvasRef} className="fx-preview-canvas" />;
@@ -56,6 +69,7 @@ export default function EffectEditor({
   onRemoveEffect,
   onKeyEffect,
   onSetWipeStatic,
+  onSetShineStatic,
   onClose,
 }: {
   layerId: number;
@@ -72,6 +86,7 @@ export default function EffectEditor({
     seedStart: boolean
   ) => void;
   onSetWipeStatic: (layerId: number, index: number, angle: number, invert: boolean) => void;
+  onSetShineStatic: (layerId: number, index: number, tint: Rgba, blend: number) => void;
   onClose: () => void;
 }) {
   return (
@@ -95,6 +110,7 @@ export default function EffectEditor({
               onRemoveEffect={onRemoveEffect}
               onKeyEffect={onKeyEffect}
               onSetWipeStatic={onSetWipeStatic}
+              onSetShineStatic={onSetShineStatic}
             />
             <p className="insp-hint">
               Stack as many effects as you want — they composite top-to-bottom and

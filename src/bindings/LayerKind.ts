@@ -112,4 +112,4 @@ line_color: Rgba,
 /**
  * Keyframeable grid line colour. Empty = the static `line_color`.
  */
-lineColorKeys: Array<ColorKey>, } | { "kind": "video", src: string, width: number, height: number, durationMs: number, } | { "kind": "audio", src: string, durationMs: number, } | { "kind": "group", children: Array<Layer>, };
+lineColorKeys: Array<ColorKey>, } | { "kind": "video", src: string, width: number, height: number, durationMs: number, } | { "kind": "audio", src: string, durationMs: number, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", };

@@ -4,8 +4,42 @@
 // canvas so a wipe masks only this layer, not the whole scene.
 import type { ResolvedEffect } from "../bindings/ResolvedEffect";
 import type { Texture } from "./surface3d";
+import { renderShine } from "./shinyClouds";
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
+
+type Shine = Extract<ResolvedEffect, { kind: "shinyclouds" }>;
+export function shineEffects(effects: ResolvedEffect[]): Shine[] {
+  return effects.filter((e): e is Shine => e.kind === "shinyclouds");
+}
+
+/**
+ * Run each shiny-clouds effect as a GPU pass over the current 2D result held in
+ * `off`, drawing the composited output back into `off`. Falls back to leaving
+ * `off` untouched if WebGL is unavailable. Applied after the CSS-filter + wipe
+ * passes (shine reads as a final light overlay).
+ */
+function applyShine(off: HTMLCanvasElement, w: number, h: number, shines: Shine[]) {
+  const oc = off.getContext("2d");
+  if (!oc) return;
+  for (const s of shines) {
+    const out = renderShine(off, w, h, {
+      time: s.time,
+      intensity: s.intensity,
+      scale: s.scale,
+      speed: s.speed,
+      complexity: s.complexity,
+      contrast: s.contrast,
+      brightness: s.brightness,
+      tint: [s.tint.r / 255, s.tint.g / 255, s.tint.b / 255],
+      blend: s.blend,
+      opacity: s.opacity,
+    });
+    if (!out) continue; // GPU unavailable → skip the shine, keep the base image
+    oc.clearRect(0, 0, w, h);
+    oc.drawImage(out, 0, 0, w, h);
+  }
+}
 
 /**
  * Render a source texture (image or canvas) through its effect stack into the
@@ -32,6 +66,8 @@ export function applyEffects(
   oc.drawImage(src, 0, 0, srcW, srcH);
   oc.filter = "none";
   for (const wp of wipeEffects(effects)) applyWipe(oc, srcW, srcH, wp);
+  const shines = shineEffects(effects);
+  if (shines.length) applyShine(off, srcW, srcH, shines);
   return off;
 }
 

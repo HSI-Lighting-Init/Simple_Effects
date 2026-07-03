@@ -390,6 +390,20 @@ pub enum ResolvedEffect {
     Hue { degrees: f32 },
     Invert { amount: f32 },
     Wipe { angle: f32, position: f32, softness: f32, invert: bool },
+    /// `time` is the comp playhead in seconds (drives the drift/morph on the GPU,
+    /// so the animation is fully determined by the timeline → export-accurate).
+    ShinyClouds {
+        time: f32,
+        intensity: f32,
+        scale: f32,
+        speed: f32,
+        complexity: f32,
+        contrast: f32,
+        brightness: f32,
+        opacity: f32,
+        tint: Rgba,
+        blend: u8,
+    },
 }
 
 /// Resolve one effect's keyframed parameters at `t_ms`.
@@ -417,6 +431,20 @@ fn resolve_effect(effect: &Effect, t_ms: u32) -> ResolvedEffect {
             position: sample_track(position, t_ms),
             softness: sample_track(softness, t_ms),
             invert: *invert,
+        },
+        Effect::ShinyClouds {
+            intensity, scale, speed, complexity, contrast, brightness, opacity, tint, blend,
+        } => ResolvedEffect::ShinyClouds {
+            time: t_ms as f32 / 1000.0,
+            intensity: sample_track(intensity, t_ms),
+            scale: sample_track(scale, t_ms),
+            speed: sample_track(speed, t_ms),
+            complexity: sample_track(complexity, t_ms),
+            contrast: sample_track(contrast, t_ms),
+            brightness: sample_track(brightness, t_ms),
+            opacity: sample_track(opacity, t_ms),
+            tint: *tint,
+            blend: *blend,
         },
     }
 }
@@ -653,7 +681,7 @@ fn resolve_layers(
                     let count = letter_counts.get(&layer.id).copied().unwrap_or(0);
                     // Base per-letter transforms from the preset (or identity).
                     let mut base = match anim {
-                        Some(a) => eval_letters(a, count, *size, t_ms),
+                        Some(a) => eval_letters(a, count, *size, t_ms, layer.start_ms),
                         None if parts.is_empty() && animators.is_empty() => Vec::new(),
                         None => vec![LetterTransform::IDENTITY; count],
                     };
@@ -808,12 +836,27 @@ pub fn eval_letters(
     count: usize,
     size: f32,
     t_ms: u32,
+    layer_start_ms: u32,
 ) -> Vec<LetterTransform> {
-    (0..count).map(|i| letter_at(anim, i, size, t_ms)).collect()
+    (0..count)
+        .map(|i| letter_at(anim, i, size, t_ms, layer_start_ms))
+        .collect()
 }
 
-fn letter_at(anim: &LetterAnimation, i: usize, size: f32, t_ms: u32) -> LetterTransform {
-    let start = anim.start_ms as f32 + i as f32 * anim.stagger_ms as f32;
+fn letter_at(
+    anim: &LetterAnimation,
+    i: usize,
+    size: f32,
+    t_ms: u32,
+    layer_start_ms: u32,
+) -> LetterTransform {
+    // The animation is anchored to the LAYER'S start, with `anim.start_ms` an
+    // offset from there — so applying a preset animates over the layer's own
+    // intro regardless of where the block sits on the timeline. (If it were
+    // anchored to absolute comp time, a layer starting after the animation
+    // window would show its letters already at rest — i.e. no visible effect.)
+    let start =
+        layer_start_ms as f32 + anim.start_ms as f32 + i as f32 * anim.stagger_ms as f32;
     let dur = anim.duration_ms.max(1) as f32;
     let local = ((t_ms as f32 - start) / dur).clamp(0.0, 1.0);
     let e = 1.0 - (1.0 - local) * (1.0 - local); // ease-out

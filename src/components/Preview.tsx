@@ -27,6 +27,7 @@ import { sampleTrack, sampleColor } from "../lib/track";
 import { drawSurface, drawTexturedQuad } from "../lib/surface3d";
 import type { Texture } from "../lib/surface3d";
 import { applyEffects } from "../lib/effects";
+import { renderShine } from "../lib/shinyClouds";
 import { getMediaUrl, registerVideoEl } from "../lib/media";
 import { createTransition, getTransitionMeta } from "../lib/transitions";
 import type { Clip } from "../lib/transitions";
@@ -1871,6 +1872,71 @@ interface Props {
   stageRef?: Ref<Konva.Stage>;
 }
 
+// Canvas blend mode per shine blend index (0 Add · 1 Screen · 2 Overlay · 3 Soft).
+const SHINE_GCO = ["lighter", "screen", "overlay", "soft-light"] as const;
+
+// An adjustment layer: renders its shiny-clouds effect(s) as full-frame overlays
+// that composite (via the canvas blend mode) over EVERY layer already drawn
+// beneath it in this Konva layer. `listening={false}` so it never intercepts
+// clicks meant for the content below — select it from the timeline instead.
+function AdjustmentNode({
+  r,
+  width,
+  height,
+}: {
+  r: ResolvedLayer;
+  width: number;
+  height: number;
+}) {
+  const offRef = useRef<HTMLCanvasElement | null>(null);
+  const shines = r.effects.filter((e) => e.kind === "shinyclouds");
+  if (shines.length === 0) return null;
+  return (
+    <>
+      {shines.map((s, i) => {
+        if (s.kind !== "shinyclouds") return null;
+        return (
+          <Shape
+            key={i}
+            listening={false}
+            opacity={r.opacity}
+            globalCompositeOperation={SHINE_GCO[s.blend] ?? "screen"}
+            perfectDrawEnabled={false}
+            sceneFunc={(ctx) => {
+              const pat = renderShine(null, width, height, {
+                time: s.time,
+                intensity: s.intensity,
+                scale: s.scale,
+                speed: s.speed,
+                complexity: s.complexity,
+                contrast: s.contrast,
+                brightness: s.brightness,
+                tint: [s.tint.r / 255, s.tint.g / 255, s.tint.b / 255],
+                blend: s.blend,
+                opacity: s.opacity,
+                adjustment: true,
+              });
+              if (!pat) return;
+              // Copy the shared GL canvas into a per-node scratch so a second
+              // adjustment layer's render can't overwrite it before this draws.
+              const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
+              if (off.width !== pat.width || off.height !== pat.height) {
+                off.width = pat.width;
+                off.height = pat.height;
+              }
+              const oc = off.getContext("2d");
+              if (!oc) return;
+              oc.clearRect(0, 0, off.width, off.height);
+              oc.drawImage(pat, 0, 0);
+              (ctx as unknown as CanvasRenderingContext2D).drawImage(off, 0, 0, width, height);
+            }}
+          />
+        );
+      })}
+    </>
+  );
+}
+
 export default function Preview({
   project,
   resolved,
@@ -2124,6 +2190,12 @@ export default function Preview({
       );
     } else if (k.kind === "audio") {
       return null; // no visual
+    } else if (k.kind === "adjustment") {
+      return (
+        <Group key={layer.id}>
+          <AdjustmentNode r={r} width={project.width} height={project.height} />
+        </Group>
+      );
     } else if (k.kind === "group") {
       node = (
         <GroupNode

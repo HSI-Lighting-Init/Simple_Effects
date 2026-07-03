@@ -1119,9 +1119,22 @@ const EFFECT_TYPES: { kind: string; label: string }[] = [
   { kind: "hue", label: "Hue shift" },
   { kind: "invert", label: "Invert" },
   { kind: "wipe", label: "Wipe / fade" },
+  { kind: "shinyclouds", label: "Shiny clouds (GPU)" },
 ];
 
-type EffectParam = "amount" | "radius" | "degrees" | "position" | "softness";
+type EffectParam =
+  | "amount"
+  | "radius"
+  | "degrees"
+  | "position"
+  | "softness"
+  | "intensity"
+  | "scale"
+  | "speed"
+  | "complexity"
+  | "contrast"
+  | "brightness"
+  | "opacity";
 type KeyEffect = (
   layerId: number,
   index: number,
@@ -1130,6 +1143,7 @@ type KeyEffect = (
   seedStart: boolean
 ) => void;
 type SetWipeStatic = (layerId: number, index: number, angle: number, invert: boolean) => void;
+type SetShineStatic = (layerId: number, index: number, tint: Rgba, blend: number) => void;
 
 function effSlider(
   label: string,
@@ -1164,6 +1178,7 @@ function EffectRow({
   onRemove,
   onKey,
   onSetWipeStatic,
+  onSetShineStatic,
 }: {
   layerId: number;
   index: number;
@@ -1171,6 +1186,7 @@ function EffectRow({
   onRemove: (layerId: number, index: number) => void;
   onKey: KeyEffect;
   onSetWipeStatic: SetWipeStatic;
+  onSetShineStatic?: SetShineStatic;
 }) {
   const label = EFFECT_TYPES.find((t) => t.kind === eff.kind)?.label ?? eff.kind;
   const key = (param: EffectParam, value: number) => onKey(layerId, index, param, value, false);
@@ -1217,6 +1233,53 @@ function EffectRow({
         </>
       );
       break;
+    case "shinyclouds":
+      body = (
+        <>
+          {effSlider("Intensity", eff.intensity, 0, 2, 0.01, (v) => key("intensity", v))}
+          {effSlider("Scale", eff.scale, 0.5, 5, 0.01, (v) => key("scale", v))}
+          {effSlider("Speed", eff.speed, 0, 3, 0.01, (v) => key("speed", v))}
+          {effSlider("Complexity", eff.complexity, 1, 8, 1, (v) => key("complexity", v))}
+          {effSlider("Contrast", eff.contrast, 1, 4, 0.01, (v) => key("contrast", v))}
+          {effSlider("Brightness", eff.brightness, -0.5, 0.5, 0.01, (v) => key("brightness", v))}
+          {effSlider("Opacity", eff.opacity, 0, 1, 0.01, (v) => key("opacity", v))}
+          {onSetShineStatic && (
+            <>
+              <label className="insp-field">
+                Blend
+                <select
+                  value={eff.blend}
+                  onChange={(e) =>
+                    onSetShineStatic(layerId, index, eff.tint, Number(e.target.value))
+                  }
+                >
+                  <option value={0}>Add</option>
+                  <option value={1}>Screen</option>
+                  <option value={2}>Overlay</option>
+                  <option value={3}>Soft light</option>
+                </select>
+              </label>
+              <label className="insp-field">
+                Tint
+                <input
+                  type="color"
+                  value={rgbaToHex(eff.tint)}
+                  onChange={(e) => {
+                    const c = hexToRgba(e.target.value);
+                    onSetShineStatic(layerId, index, { r: c.r, g: c.g, b: c.b, a: 255 }, eff.blend);
+                  }}
+                />
+              </label>
+            </>
+          )}
+          <p className="insp-hint">
+            A GPU (WebGL) light-leak overlay. The clouds drift with the playhead — keyframe{" "}
+            <b>Intensity</b> / <b>Speed</b> to animate. Runs on the timeline clock, so it's
+            export-accurate (static while paused).
+          </p>
+        </>
+      );
+      break;
   }
   return (
     <div className="effect-row">
@@ -1244,6 +1307,7 @@ export function EffectsSection({
   onRemoveEffect,
   onKeyEffect,
   onSetWipeStatic,
+  onSetShineStatic,
 }: {
   layerId: number;
   effects: ResolvedEffect[];
@@ -1251,6 +1315,7 @@ export function EffectsSection({
   onRemoveEffect: (layerId: number, index: number) => void;
   onKeyEffect: KeyEffect;
   onSetWipeStatic: SetWipeStatic;
+  onSetShineStatic?: SetShineStatic;
 }) {
   return (
     <div className="insp-body">
@@ -1285,6 +1350,7 @@ export function EffectsSection({
           onRemove={onRemoveEffect}
           onKey={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
+          onSetShineStatic={onSetShineStatic}
         />
       ))}
     </div>
@@ -1480,6 +1546,7 @@ interface Props {
   onRemoveEffect: (layerId: number, index: number) => void;
   onKeyEffect: KeyEffect;
   onSetWipeStatic: SetWipeStatic;
+  onSetShineStatic: SetShineStatic;
   onShapeParams: (layerId: number, p: ShapeParams) => void;
   onShapeRotKey: (
     layerId: number,
@@ -1566,6 +1633,7 @@ interface Props {
     seedStart: boolean
   ) => void;
   onSetCellWipeStatic: (layerId: number, cell: number, index: number, angle: number, invert: boolean) => void;
+  onSetCellShineStatic: (layerId: number, cell: number, index: number, tint: Rgba, blend: number) => void;
   gridLinked: ResolvedLinkedEffect[];
   onLinkEffect: (layerId: number, kind: string, cells: number[]) => void;
   onAddLinkedEffect: (layerId: number, groupId: number, kind: string) => void;
@@ -1616,6 +1684,7 @@ function FrameGridSection({
   onRemoveCellEffect,
   onKeyCellEffect,
   onSetCellWipeStatic,
+  onSetCellShineStatic,
   gridLinked,
   onLinkEffect,
   onAddLinkedEffect,
@@ -1678,6 +1747,7 @@ function FrameGridSection({
     seedStart: boolean
   ) => void;
   onSetCellWipeStatic: (layerId: number, cell: number, index: number, angle: number, invert: boolean) => void;
+  onSetCellShineStatic: (layerId: number, cell: number, index: number, tint: Rgba, blend: number) => void;
   gridLinked: ResolvedLinkedEffect[];
   onLinkEffect: (layerId: number, kind: string, cells: number[]) => void;
   onAddLinkedEffect: (layerId: number, groupId: number, kind: string) => void;
@@ -1808,6 +1878,7 @@ function FrameGridSection({
               onRemoveEffect={(lid, idx) => onRemoveCellEffect(lid, selectedCell, idx)}
               onKeyEffect={(lid, idx, param, value, seed) => onKeyCellEffect(lid, selectedCell, idx, param, value, seed)}
               onSetWipeStatic={(lid, idx, angle, invert) => onSetCellWipeStatic(lid, selectedCell, idx, angle, invert)}
+              onSetShineStatic={(lid, idx, tint, blend) => onSetCellShineStatic(lid, selectedCell, idx, tint, blend)}
             />
           )}
           {hasImage && (
@@ -2177,6 +2248,7 @@ export default function Inspector({
   onRemoveEffect,
   onKeyEffect,
   onSetWipeStatic,
+  onSetShineStatic,
   onShapeParams,
   onShapeRotKey,
   onAttachToShape,
@@ -2227,6 +2299,7 @@ export default function Inspector({
   onRemoveCellEffect,
   onKeyCellEffect,
   onSetCellWipeStatic,
+  onSetCellShineStatic,
   gridLinked,
   onLinkEffect,
   onAddLinkedEffect,
@@ -2319,7 +2392,29 @@ export default function Inspector({
           onRemoveEffect={onRemoveEffect}
           onKeyEffect={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
+          onSetShineStatic={onSetShineStatic}
         />
+      )}
+      {layer && layer.kind.kind === "adjustment" && (
+        <>
+          <div className="insp-body">
+            <div className="insp-sep">Adjustment layer</div>
+            <p className="insp-hint">
+              Lights every layer <b>below</b> this one in the stack, over its time span.
+              Reorder it in the timeline to change what it affects. Only the{" "}
+              <b>Shiny clouds</b> effect renders on adjustment layers.
+            </p>
+          </div>
+          <EffectsSection
+            layerId={layer.id}
+            effects={resolvedEffects}
+            onAddEffect={onAddEffect}
+            onRemoveEffect={onRemoveEffect}
+            onKeyEffect={onKeyEffect}
+            onSetWipeStatic={onSetWipeStatic}
+            onSetShineStatic={onSetShineStatic}
+          />
+        </>
       )}
       {layer && layer.kind.kind === "colorpatch" && (
         <span className="muted">
@@ -2358,6 +2453,7 @@ export default function Inspector({
           onRemoveCellEffect={onRemoveCellEffect}
           onKeyCellEffect={onKeyCellEffect}
           onSetCellWipeStatic={onSetCellWipeStatic}
+          onSetCellShineStatic={onSetCellShineStatic}
           gridLinked={gridLinked}
           onLinkEffect={onLinkEffect}
           onAddLinkedEffect={onAddLinkedEffect}

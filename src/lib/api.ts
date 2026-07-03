@@ -19,6 +19,9 @@ export const getProject = () => invoke<Project>("get_project");
 export const setProject = (project: Project) =>
   invoke<void>("set_project", { project });
 
+/** Start a fresh, blank project (clears the timeline and undo/redo history). */
+export const newProject = () => invoke<Project>("new_project");
+
 /** Set the composition resolution (workspace size / orientation). */
 export const setCompSize = (width: number, height: number) =>
   invoke<Project>("set_comp_size", { width, height });
@@ -122,6 +125,9 @@ export const setLayerHidden = (layerId: number, hidden: boolean) =>
 
 export const addTextLayer = (content: string, size: number) =>
   invoke<Project>("add_text_layer", { content, size });
+
+/** Add a whole-comp adjustment layer (seeded with a shiny-clouds effect). */
+export const addAdjustmentLayer = () => invoke<Project>("add_adjustment_layer");
 
 export const setTextContent = (layerId: number, content: string, size: number) =>
   invoke<Project>("set_text_content", { layerId, content, size });
@@ -350,11 +356,26 @@ export const addEffect = (layerId: number, kind: string) =>
 export const removeEffect = (layerId: number, index: number) =>
   invoke<Project>("remove_effect", { layerId, index });
 
+/** All keyframeable effect-parameter names across every effect kind. */
+export type EffectParam =
+  | "amount"
+  | "radius"
+  | "degrees"
+  | "position"
+  | "softness"
+  | "intensity"
+  | "scale"
+  | "speed"
+  | "complexity"
+  | "contrast"
+  | "brightness"
+  | "opacity";
+
 /** Key one effect parameter at a time (animates the effect). */
 export const keyEffect = (
   layerId: number,
   index: number,
-  param: "amount" | "radius" | "degrees" | "position" | "softness",
+  param: EffectParam,
   tMs: number,
   value: number,
   seedStart: boolean
@@ -363,6 +384,10 @@ export const keyEffect = (
 /** Set a wipe effect's static fields (angle + invert). */
 export const setWipeStatic = (layerId: number, index: number, angle: number, invert: boolean) =>
   invoke<Project>("set_wipe_static", { layerId, index, angle, invert });
+
+/** Set a shiny-clouds effect's static fields (tint + blend mode). */
+export const setShineStatic = (layerId: number, index: number, tint: Rgba, blend: number) =>
+  invoke<Project>("set_shine_static", { layerId, index, tint, blend });
 
 // --- Per-cell effects (multi-frame grid) ---
 export const addCellEffect = (layerId: number, cell: number, kind: string) =>
@@ -375,7 +400,7 @@ export const keyCellEffect = (
   layerId: number,
   cell: number,
   index: number,
-  param: "amount" | "radius" | "degrees" | "position" | "softness",
+  param: EffectParam,
   tMs: number,
   value: number,
   seedStart: boolean
@@ -388,6 +413,14 @@ export const setCellWipeStatic = (
   angle: number,
   invert: boolean
 ) => invoke<Project>("set_cell_wipe_static", { layerId, cell, index, angle, invert });
+
+export const setCellShineStatic = (
+  layerId: number,
+  cell: number,
+  index: number,
+  tint: Rgba,
+  blend: number
+) => invoke<Project>("set_cell_shine_static", { layerId, cell, index, tint, blend });
 
 // --- Linked (shared) effect groups (multi-frame grid) ---
 export const linkEffect = (layerId: number, kind: string, cells: number[]) =>
@@ -403,7 +436,7 @@ export const keyLinkedEffect = (
   layerId: number,
   groupId: number,
   index: number,
-  param: "amount" | "radius" | "degrees" | "position" | "softness",
+  param: EffectParam,
   tMs: number,
   value: number,
   seedStart: boolean

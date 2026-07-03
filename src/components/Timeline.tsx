@@ -42,6 +42,7 @@ function kindColor(l: Layer): string {
   if (k.kind === "video") return "#e08a3c";
   if (k.kind === "audio") return "#3ca0e0";
   if (k.kind === "group") return "#c9a227";
+  if (k.kind === "adjustment") return "#9a6cff";
   return "#3bb6a6"; // image
 }
 
@@ -58,6 +59,8 @@ function keyframeTimes(l: Layer): number[] {
     if (e.kind === "blur") tracks.push(e.radius);
     else if (e.kind === "hue") tracks.push(e.degrees);
     else if (e.kind === "wipe") tracks.push(e.position, e.softness);
+    else if (e.kind === "shinyclouds")
+      tracks.push(e.intensity, e.scale, e.speed, e.complexity, e.contrast, e.brightness, e.opacity);
     else tracks.push(e.amount);
   }
   const set = new Set<number>();

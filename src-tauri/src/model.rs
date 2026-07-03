@@ -238,6 +238,11 @@ pub enum LayerKind {
     /// Children share the comp's time base. You "enter" the group to edit its
     /// children on their own timeline, and can "explode" it to lift them back out.
     Group { children: Vec<Layer> },
+    /// An adjustment layer: it has no visual content of its own — instead its
+    /// effect stack (`layer.effects`) is applied to the whole comp beneath it,
+    /// over the layer's time span. Currently drives the GPU "shiny clouds"
+    /// overlay; the frontend composites it over the layers below.
+    Adjustment {},
 }
 
 fn default_line_width() -> f32 {
@@ -849,6 +854,21 @@ pub enum Effect {
         softness: Track,
         invert: bool,
     },
+    /// Animated procedural "shiny clouds" — a drifting/morphing fBm caustic /
+    /// light-leak pattern composited over the image on the GPU (WebGL). Every
+    /// numeric knob is a keyframeable Track; `tint` (shine colour) and `blend`
+    /// (0 Add · 1 Screen · 2 Overlay · 3 Soft Light) are static.
+    ShinyClouds {
+        intensity: Track,
+        scale: Track,
+        speed: Track,
+        complexity: Track,
+        contrast: Track,
+        brightness: Track,
+        opacity: Track,
+        tint: Rgba,
+        blend: u8,
+    },
 }
 
 impl Effect {
@@ -867,6 +887,17 @@ impl Effect {
                 position: Track::ramp(0.0, 0, 1.0, 1000, Easing::EaseInOut),
                 softness: Track::constant(0.15),
                 invert: false,
+            },
+            "shinyclouds" => Effect::ShinyClouds {
+                intensity: Track::constant(1.0),
+                scale: Track::constant(1.0),
+                speed: Track::constant(0.5),
+                complexity: Track::constant(5.0),
+                contrast: Track::constant(2.0),
+                brightness: Track::constant(0.0),
+                opacity: Track::constant(0.6),
+                tint: Rgba { r: 255, g: 255, b: 255, a: 255 },
+                blend: 1, // Screen — pleasant light-leak default
             },
             _ => return None,
         })
