@@ -1120,7 +1120,88 @@ const EFFECT_TYPES: { kind: string; label: string }[] = [
   { kind: "invert", label: "Invert" },
   { kind: "wipe", label: "Wipe / fade" },
   { kind: "shinyclouds", label: "Shiny clouds (GPU)" },
+  { kind: "caustics", label: "Caustics (GPU)" },
+  { kind: "lensflare", label: "Lens flare (GPU)" },
+  { kind: "sparkle", label: "Sparkle (GPU)" },
+  { kind: "heathaze", label: "Heat haze (GPU)" },
+  { kind: "filmgrain", label: "Film grain (GPU)" },
+  { kind: "vignette", label: "Vignette (GPU)" },
+  { kind: "shimmer", label: "Shimmer (GPU)" },
+  { kind: "aurora", label: "Aurora (GPU)" },
+  { kind: "fog", label: "Fog / smoke (GPU)" },
 ];
+
+// Per-GPU-effect UI schema: how the seven generic slots + colours + position map
+// to named, labelled sliders for each `effect` index (keyed to gpuOverlay.frag).
+type GpuKey = "intensity" | "scale" | "speed" | "detail" | "softness" | "extra" | "opacity";
+type GpuSlider = { key: GpuKey; label: string; min: number; max: number; step: number };
+type GpuSchema = { name: string; sliders: GpuSlider[]; colors: 0 | 1 | 2; pos: boolean };
+const GPU_FX: Record<number, GpuSchema> = {
+  1: { name: "Caustics", colors: 1, pos: false, sliders: [
+    { key: "intensity", label: "Intensity", min: 0, max: 2, step: 0.01 },
+    { key: "scale", label: "Scale", min: 0.5, max: 5, step: 0.01 },
+    { key: "speed", label: "Speed", min: 0, max: 2, step: 0.01 },
+    { key: "detail", label: "Sharpness", min: 1, max: 10, step: 0.1 },
+    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
+  ] },
+  2: { name: "Lens flare", colors: 1, pos: true, sliders: [
+    { key: "intensity", label: "Intensity", min: 0, max: 2, step: 0.01 },
+    { key: "extra", label: "Size", min: 0.1, max: 1, step: 0.01 },
+    { key: "speed", label: "Drift speed", min: 0, max: 2, step: 0.01 },
+    { key: "softness", label: "Streak", min: 0, max: 1, step: 0.01 },
+    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
+  ] },
+  3: { name: "Sparkle", colors: 1, pos: false, sliders: [
+    { key: "intensity", label: "Intensity", min: 0, max: 2, step: 0.01 },
+    { key: "detail", label: "Density", min: 5, max: 120, step: 1 },
+    { key: "extra", label: "Size", min: 0.02, max: 0.4, step: 0.005 },
+    { key: "speed", label: "Twinkle speed", min: 0, max: 5, step: 0.01 },
+    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
+  ] },
+  4: { name: "Heat haze", colors: 0, pos: false, sliders: [
+    { key: "extra", label: "Strength", min: 0, max: 0.1, step: 0.001 },
+    { key: "scale", label: "Scale", min: 1, max: 20, step: 0.1 },
+    { key: "speed", label: "Speed", min: 0, max: 3, step: 0.01 },
+    { key: "detail", label: "Detail", min: 1, max: 5, step: 1 },
+    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
+  ] },
+  5: { name: "Film grain", colors: 1, pos: false, sliders: [
+    { key: "intensity", label: "Intensity", min: 0, max: 0.5, step: 0.005 },
+    { key: "extra", label: "Grain size", min: 1, max: 10, step: 0.1 },
+    { key: "speed", label: "Speed", min: 0, max: 1, step: 0.01 },
+    { key: "softness", label: "Monochrome", min: 0, max: 1, step: 0.01 },
+    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
+  ] },
+  6: { name: "Vignette", colors: 1, pos: false, sliders: [
+    { key: "intensity", label: "Intensity", min: 0, max: 1, step: 0.01 },
+    { key: "softness", label: "Radius", min: 0.5, max: 1.5, step: 0.01 },
+    { key: "extra", label: "Edge softness", min: 0.05, max: 1, step: 0.01 },
+    { key: "detail", label: "Pulse", min: 0, max: 0.3, step: 0.005 },
+    { key: "speed", label: "Pulse speed", min: 0, max: 2, step: 0.01 },
+  ] },
+  7: { name: "Shimmer", colors: 2, pos: false, sliders: [
+    { key: "intensity", label: "Intensity", min: 0, max: 2, step: 0.01 },
+    { key: "speed", label: "Speed", min: 0, max: 2, step: 0.01 },
+    { key: "detail", label: "Frequency", min: 1, max: 10, step: 0.1 },
+    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
+  ] },
+  8: { name: "Aurora", colors: 2, pos: false, sliders: [
+    { key: "intensity", label: "Intensity", min: 0, max: 2, step: 0.01 },
+    { key: "scale", label: "Scale", min: 0.5, max: 5, step: 0.01 },
+    { key: "speed", label: "Speed", min: 0, max: 2, step: 0.01 },
+    { key: "extra", label: "Width", min: 0.05, max: 1, step: 0.01 },
+    { key: "detail", label: "Complexity", min: 1, max: 5, step: 1 },
+    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
+  ] },
+  9: { name: "Fog / smoke", colors: 1, pos: false, sliders: [
+    { key: "intensity", label: "Intensity", min: 0, max: 2, step: 0.01 },
+    { key: "scale", label: "Scale", min: 0.5, max: 5, step: 0.01 },
+    { key: "speed", label: "Speed", min: 0, max: 2, step: 0.01 },
+    { key: "softness", label: "Density", min: 0, max: 1, step: 0.01 },
+    { key: "detail", label: "Complexity", min: 2, max: 6, step: 1 },
+    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
+  ] },
+};
 
 type EffectParam =
   | "amount"
@@ -1134,7 +1215,9 @@ type EffectParam =
   | "complexity"
   | "contrast"
   | "brightness"
-  | "opacity";
+  | "opacity"
+  | "detail"
+  | "extra";
 type KeyEffect = (
   layerId: number,
   index: number,
@@ -1144,6 +1227,16 @@ type KeyEffect = (
 ) => void;
 type SetWipeStatic = (layerId: number, index: number, angle: number, invert: boolean) => void;
 type SetShineStatic = (layerId: number, index: number, tint: Rgba, blend: number) => void;
+type SetGpuFxStatic = (
+  layerId: number,
+  index: number,
+  effect: number,
+  tint: Rgba,
+  tint2: Rgba,
+  posX: number,
+  posY: number,
+  blend: number
+) => void;
 
 function effSlider(
   label: string,
@@ -1179,6 +1272,7 @@ function EffectRow({
   onKey,
   onSetWipeStatic,
   onSetShineStatic,
+  onSetGpuFxStatic,
 }: {
   layerId: number;
   index: number;
@@ -1187,8 +1281,14 @@ function EffectRow({
   onKey: KeyEffect;
   onSetWipeStatic: SetWipeStatic;
   onSetShineStatic?: SetShineStatic;
+  onSetGpuFxStatic?: SetGpuFxStatic;
 }) {
-  const label = EFFECT_TYPES.find((t) => t.kind === eff.kind)?.label ?? eff.kind;
+  // The 9 GPU-overlay effects all share the resolved kind "gpuoverlay", so the
+  // name comes from the per-effect schema; everything else looks up EFFECT_TYPES.
+  const label =
+    eff.kind === "gpuoverlay"
+      ? GPU_FX[eff.effect]?.name ?? "GPU overlay"
+      : EFFECT_TYPES.find((t) => t.kind === eff.kind)?.label ?? eff.kind;
   const key = (param: EffectParam, value: number) => onKey(layerId, index, param, value, false);
   let body: ReactNode = null;
   switch (eff.kind) {
@@ -1280,6 +1380,75 @@ function EffectRow({
         </>
       );
       break;
+    case "gpuoverlay": {
+      const schema = GPU_FX[eff.effect];
+      const setStatic = (patch: { tint?: Rgba; tint2?: Rgba; posX?: number; posY?: number; blend?: number }) =>
+        onSetGpuFxStatic?.(
+          layerId,
+          index,
+          eff.effect,
+          patch.tint ?? eff.tint,
+          patch.tint2 ?? eff.tint2,
+          patch.posX ?? eff.posX,
+          patch.posY ?? eff.posY,
+          patch.blend ?? eff.blend
+        );
+      body = schema ? (
+        <>
+          {schema.sliders.map((sl) =>
+            effSlider(sl.label, eff[sl.key], sl.min, sl.max, sl.step, (v) => key(sl.key, v))
+          )}
+          {onSetGpuFxStatic && schema.colors >= 1 && (
+            <label className="insp-field">
+              {schema.colors === 2 ? "Colour A" : "Colour"}
+              <input
+                type="color"
+                value={rgbaToHex(eff.tint)}
+                onChange={(e) => {
+                  const c = hexToRgba(e.target.value);
+                  setStatic({ tint: { r: c.r, g: c.g, b: c.b, a: 255 } });
+                }}
+              />
+            </label>
+          )}
+          {onSetGpuFxStatic && schema.colors === 2 && (
+            <label className="insp-field">
+              Colour B
+              <input
+                type="color"
+                value={rgbaToHex(eff.tint2)}
+                onChange={(e) => {
+                  const c = hexToRgba(e.target.value);
+                  setStatic({ tint2: { r: c.r, g: c.g, b: c.b, a: 255 } });
+                }}
+              />
+            </label>
+          )}
+          {onSetGpuFxStatic && schema.pos && (
+            <>
+              {effSlider("Position X", eff.posX, 0, 1, 0.01, (v) => setStatic({ posX: v }))}
+              {effSlider("Position Y", eff.posY, 0, 1, 0.01, (v) => setStatic({ posY: v }))}
+            </>
+          )}
+          {onSetGpuFxStatic && eff.effect !== 4 && eff.effect !== 6 && (
+            <label className="insp-field">
+              Blend
+              <select value={eff.blend} onChange={(e) => setStatic({ blend: Number(e.target.value) })}>
+                <option value={0}>Add</option>
+                <option value={1}>Screen</option>
+                <option value={2}>Overlay</option>
+                <option value={3}>Soft light</option>
+              </select>
+            </label>
+          )}
+          <p className="insp-hint">
+            GPU (WebGL) {schema.name.toLowerCase()} overlay. Runs on the timeline clock —
+            keyframe the sliders to animate; static while paused (export-accurate).
+          </p>
+        </>
+      ) : null;
+      break;
+    }
   }
   return (
     <div className="effect-row">
@@ -1308,6 +1477,7 @@ export function EffectsSection({
   onKeyEffect,
   onSetWipeStatic,
   onSetShineStatic,
+  onSetGpuFxStatic,
 }: {
   layerId: number;
   effects: ResolvedEffect[];
@@ -1316,6 +1486,7 @@ export function EffectsSection({
   onKeyEffect: KeyEffect;
   onSetWipeStatic: SetWipeStatic;
   onSetShineStatic?: SetShineStatic;
+  onSetGpuFxStatic?: SetGpuFxStatic;
 }) {
   return (
     <div className="insp-body">
@@ -1351,6 +1522,7 @@ export function EffectsSection({
           onKey={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
           onSetShineStatic={onSetShineStatic}
+          onSetGpuFxStatic={onSetGpuFxStatic}
         />
       ))}
     </div>
@@ -1547,6 +1719,7 @@ interface Props {
   onKeyEffect: KeyEffect;
   onSetWipeStatic: SetWipeStatic;
   onSetShineStatic: SetShineStatic;
+  onSetGpuFxStatic: SetGpuFxStatic;
   onShapeParams: (layerId: number, p: ShapeParams) => void;
   onShapeRotKey: (
     layerId: number,
@@ -1617,6 +1790,9 @@ interface Props {
   onSetGridConstrain: (layerId: number, mode: "freeform" | "rails") => void;
   lineWidth: number;
   lineColor: Rgba;
+  hasBackground: boolean;
+  onSetGridBackground: (layerId: number) => void;
+  onClearGridBackground: (layerId: number) => void;
   onSetGridLineWidth: (layerId: number, width: number) => void;
   onSetGridLineColor: (layerId: number, color: Rgba) => void;
   onClearGridLineColor: (layerId: number, color: Rgba) => void;
@@ -1634,6 +1810,7 @@ interface Props {
   ) => void;
   onSetCellWipeStatic: (layerId: number, cell: number, index: number, angle: number, invert: boolean) => void;
   onSetCellShineStatic: (layerId: number, cell: number, index: number, tint: Rgba, blend: number) => void;
+  onSetCellGpuFxStatic: (layerId: number, cell: number, index: number, effect: number, tint: Rgba, tint2: Rgba, posX: number, posY: number, blend: number) => void;
   gridLinked: ResolvedLinkedEffect[];
   onLinkEffect: (layerId: number, kind: string, cells: number[]) => void;
   onAddLinkedEffect: (layerId: number, groupId: number, kind: string) => void;
@@ -1678,6 +1855,9 @@ function FrameGridSection({
   onSetGridLineWidth,
   onSetGridLineColor,
   onClearGridLineColor,
+  hasBackground,
+  onSetGridBackground,
+  onClearGridBackground,
   onMergeCell,
   onSplitCell,
   onAddCellEffect,
@@ -1685,6 +1865,7 @@ function FrameGridSection({
   onKeyCellEffect,
   onSetCellWipeStatic,
   onSetCellShineStatic,
+  onSetCellGpuFxStatic,
   gridLinked,
   onLinkEffect,
   onAddLinkedEffect,
@@ -1731,6 +1912,9 @@ function FrameGridSection({
   onSetGridConstrain: (layerId: number, mode: "freeform" | "rails") => void;
   lineWidth: number;
   lineColor: Rgba;
+  hasBackground: boolean;
+  onSetGridBackground: (layerId: number) => void;
+  onClearGridBackground: (layerId: number) => void;
   onSetGridLineWidth: (layerId: number, width: number) => void;
   onSetGridLineColor: (layerId: number, color: Rgba) => void;
   onClearGridLineColor: (layerId: number, color: Rgba) => void;
@@ -1748,6 +1932,7 @@ function FrameGridSection({
   ) => void;
   onSetCellWipeStatic: (layerId: number, cell: number, index: number, angle: number, invert: boolean) => void;
   onSetCellShineStatic: (layerId: number, cell: number, index: number, tint: Rgba, blend: number) => void;
+  onSetCellGpuFxStatic: (layerId: number, cell: number, index: number, effect: number, tint: Rgba, tint2: Rgba, posX: number, posY: number, blend: number) => void;
   gridLinked: ResolvedLinkedEffect[];
   onLinkEffect: (layerId: number, kind: string, cells: number[]) => void;
   onAddLinkedEffect: (layerId: number, groupId: number, kind: string) => void;
@@ -1821,6 +2006,24 @@ function FrameGridSection({
           </button>
         </div>
       </div>
+      <div className="insp-field">
+        <label>Background image</label>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button className="insp-btn" onClick={() => onSetGridBackground(layerId)}>
+            {hasBackground ? "Replace…" : "Set image…"}
+          </button>
+          {hasBackground && (
+            <button className="insp-btn" onClick={() => onClearGridBackground(layerId)}>
+              Clear
+            </button>
+          )}
+        </div>
+        <p className="insp-hint">
+          {hasBackground
+            ? "Each cell shows its aligned slice of this one image — give any cell its own effect to treat that window individually."
+            : "Set one image spanning the whole grid; each cell (window) reveals its slice and can take its own effect."}
+        </p>
+      </div>
       <AllCellsTransitionsSection
         layerId={layerId}
         tin={allCellsTransitionIn}
@@ -1870,7 +2073,7 @@ function FrameGridSection({
               </button>
             )}
           </div>
-          {hasImage && (
+          {(hasImage || hasBackground) && (
             <EffectsSection
               layerId={layerId}
               effects={cellEffects}
@@ -1879,9 +2082,12 @@ function FrameGridSection({
               onKeyEffect={(lid, idx, param, value, seed) => onKeyCellEffect(lid, selectedCell, idx, param, value, seed)}
               onSetWipeStatic={(lid, idx, angle, invert) => onSetCellWipeStatic(lid, selectedCell, idx, angle, invert)}
               onSetShineStatic={(lid, idx, tint, blend) => onSetCellShineStatic(lid, selectedCell, idx, tint, blend)}
+              onSetGpuFxStatic={(lid, idx, effect, tint, tint2, posX, posY, blend) =>
+                onSetCellGpuFxStatic(lid, selectedCell, idx, effect, tint, tint2, posX, posY, blend)
+              }
             />
           )}
-          {hasImage && (
+          {(hasImage || hasBackground) && (
             <CellTransitionsSection
               layerId={layerId}
               cell={selectedCell}
@@ -2249,6 +2455,7 @@ export default function Inspector({
   onKeyEffect,
   onSetWipeStatic,
   onSetShineStatic,
+  onSetGpuFxStatic,
   onShapeParams,
   onShapeRotKey,
   onAttachToShape,
@@ -2293,6 +2500,9 @@ export default function Inspector({
   onSetGridLineWidth,
   onSetGridLineColor,
   onClearGridLineColor,
+  hasBackground,
+  onSetGridBackground,
+  onClearGridBackground,
   onMergeCell,
   onSplitCell,
   onAddCellEffect,
@@ -2300,6 +2510,7 @@ export default function Inspector({
   onKeyCellEffect,
   onSetCellWipeStatic,
   onSetCellShineStatic,
+  onSetCellGpuFxStatic,
   gridLinked,
   onLinkEffect,
   onAddLinkedEffect,
@@ -2393,6 +2604,7 @@ export default function Inspector({
           onKeyEffect={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
           onSetShineStatic={onSetShineStatic}
+          onSetGpuFxStatic={onSetGpuFxStatic}
         />
       )}
       {layer && layer.kind.kind === "adjustment" && (
@@ -2413,6 +2625,7 @@ export default function Inspector({
             onKeyEffect={onKeyEffect}
             onSetWipeStatic={onSetWipeStatic}
             onSetShineStatic={onSetShineStatic}
+            onSetGpuFxStatic={onSetGpuFxStatic}
           />
         </>
       )}
@@ -2427,6 +2640,7 @@ export default function Inspector({
           rows={layer.kind.rows}
           cols={layer.kind.cols}
           hasImage={selectedCell != null ? !!layer.kind.cells[selectedCell]?.src : false}
+          hasBackground={hasBackground}
           selectedCell={selectedCell}
           cellZoomNow={cellZoomNow}
           cellMerged={cellMerged}
@@ -2447,6 +2661,8 @@ export default function Inspector({
           onSetGridLineWidth={onSetGridLineWidth}
           onSetGridLineColor={onSetGridLineColor}
           onClearGridLineColor={onClearGridLineColor}
+          onSetGridBackground={onSetGridBackground}
+          onClearGridBackground={onClearGridBackground}
           onMergeCell={onMergeCell}
           onSplitCell={onSplitCell}
           onAddCellEffect={onAddCellEffect}
@@ -2454,6 +2670,7 @@ export default function Inspector({
           onKeyCellEffect={onKeyCellEffect}
           onSetCellWipeStatic={onSetCellWipeStatic}
           onSetCellShineStatic={onSetCellShineStatic}
+          onSetCellGpuFxStatic={onSetCellGpuFxStatic}
           gridLinked={gridLinked}
           onLinkEffect={onLinkEffect}
           onAddLinkedEffect={onAddLinkedEffect}

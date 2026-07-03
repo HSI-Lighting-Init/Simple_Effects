@@ -86,6 +86,8 @@ pub struct ResolvedFrameGrid {
     /// Grid line thickness (layer-local px) and colour sampled at this time.
     pub line_width: f32,
     pub line_color: Rgba,
+    /// Shared background image spanning the grid (each cell shows its slice).
+    pub background: Option<String>,
 }
 
 /// A linked effect group resolved at this time (its shared stack + members).
@@ -142,6 +144,7 @@ fn resolve_frame_grid(
     line_width: f32,
     line_color: Rgba,
     line_color_keys: &[ColorKey],
+    background: &Option<String>,
     layer_start: u32,
     layer_end: u32,
     t_ms: u32,
@@ -263,6 +266,7 @@ fn resolve_frame_grid(
         linked: resolved_linked,
         line_width,
         line_color,
+        background: background.clone(),
     }
 }
 
@@ -404,6 +408,26 @@ pub enum ResolvedEffect {
         tint: Rgba,
         blend: u8,
     },
+    /// A GPU-overlay effect resolved at `time` (comp seconds). `effect` picks the
+    /// algorithm in gpuOverlay.frag; the float slots are its generic knobs.
+    GpuOverlay {
+        effect: u8,
+        time: f32,
+        intensity: f32,
+        scale: f32,
+        speed: f32,
+        detail: f32,
+        softness: f32,
+        extra: f32,
+        opacity: f32,
+        tint: Rgba,
+        tint2: Rgba,
+        #[serde(rename = "posX")]
+        pos_x: f32,
+        #[serde(rename = "posY")]
+        pos_y: f32,
+        blend: u8,
+    },
 }
 
 /// Resolve one effect's keyframed parameters at `t_ms`.
@@ -444,6 +468,25 @@ fn resolve_effect(effect: &Effect, t_ms: u32) -> ResolvedEffect {
             brightness: sample_track(brightness, t_ms),
             opacity: sample_track(opacity, t_ms),
             tint: *tint,
+            blend: *blend,
+        },
+        Effect::GpuOverlay {
+            effect, intensity, scale, speed, detail, softness, extra, opacity, tint, tint2,
+            pos_x, pos_y, blend,
+        } => ResolvedEffect::GpuOverlay {
+            effect: *effect,
+            time: t_ms as f32 / 1000.0,
+            intensity: sample_track(intensity, t_ms),
+            scale: sample_track(scale, t_ms),
+            speed: sample_track(speed, t_ms),
+            detail: sample_track(detail, t_ms),
+            softness: sample_track(softness, t_ms),
+            extra: sample_track(extra, t_ms),
+            opacity: sample_track(opacity, t_ms),
+            tint: *tint,
+            tint2: *tint2,
+            pos_x: *pos_x,
+            pos_y: *pos_y,
             blend: *blend,
         },
     }
@@ -777,6 +820,7 @@ fn resolve_layers(
                     line_width,
                     line_color,
                     line_color_keys,
+                    background,
                     ..
                 } => Some(resolve_frame_grid(
                     *rows,
@@ -789,6 +833,7 @@ fn resolve_layers(
                     *line_width,
                     *line_color,
                     line_color_keys,
+                    background,
                     layer.start_ms,
                     layer.end_ms,
                     t_ms,

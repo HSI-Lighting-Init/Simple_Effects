@@ -213,6 +213,12 @@ pub enum LayerKind {
         /// Keyframeable grid line colour. Empty = the static `line_color`.
         #[serde(default, rename = "lineColorKeys")]
         line_color_keys: Vec<ColorKey>,
+        /// Optional shared BACKGROUND image spanning the whole grid. When set,
+        /// every cell reveals its aligned slice of this one image (a mask over a
+        /// single photo) instead of its own `src`, and each cell's effect stack
+        /// applies to that slice. `None` = per-cell images (the classic mode).
+        #[serde(default)]
+        background: Option<String>,
     },
     /// A video loaded from disk. Renders like an `Image` but the displayed frame
     /// tracks the playhead (comp time since the layer start → source time). The
@@ -869,9 +875,55 @@ pub enum Effect {
         tint: Rgba,
         blend: u8,
     },
+    /// A GPU overlay effect from the shared mega-shader (gpuOverlay.frag), picked
+    /// by `effect` (1 Caustics · 2 Lens Flare · 3 Sparkle · 4 Heat Haze ·
+    /// 5 Film Grain · 6 Vignette · 7 Shimmer · 8 Aurora · 9 Fog). The seven float
+    /// slots are generic keyframeable knobs whose meaning depends on `effect`
+    /// (see gpuOverlay.frag / the inspector). `tint`/`tint2`/`pos`/`blend` are
+    /// static.
+    GpuOverlay {
+        effect: u8,
+        intensity: Track,
+        scale: Track,
+        speed: Track,
+        detail: Track,
+        softness: Track,
+        extra: Track,
+        opacity: Track,
+        tint: Rgba,
+        tint2: Rgba,
+        #[serde(default, rename = "posX")]
+        pos_x: f32,
+        #[serde(default, rename = "posY")]
+        pos_y: f32,
+        blend: u8,
+    },
 }
 
+/// Opaque white — the default tint for most GPU-overlay effects.
+const WHITE: Rgba = Rgba { r: 255, g: 255, b: 255, a: 255 };
+
 impl Effect {
+    /// Build a `GpuOverlay` effect. `p` is the seven float slots in order:
+    /// [intensity, scale, speed, detail, softness, extra, opacity].
+    fn gpu_overlay(effect: u8, p: [f32; 7], tint: Rgba, tint2: Rgba, pos_x: f32, pos_y: f32, blend: u8) -> Effect {
+        Effect::GpuOverlay {
+            effect,
+            intensity: Track::constant(p[0]),
+            scale: Track::constant(p[1]),
+            speed: Track::constant(p[2]),
+            detail: Track::constant(p[3]),
+            softness: Track::constant(p[4]),
+            extra: Track::constant(p[5]),
+            opacity: Track::constant(p[6]),
+            tint,
+            tint2,
+            pos_x,
+            pos_y,
+            blend,
+        }
+    }
+
     /// A new effect of the named kind with sensible default tracks.
     pub fn default_of(kind: &str) -> Option<Effect> {
         Some(match kind {
@@ -899,6 +951,26 @@ impl Effect {
                 tint: Rgba { r: 255, g: 255, b: 255, a: 255 },
                 blend: 1, // Screen — pleasant light-leak default
             },
+            // GPU-overlay effects (shared mega-shader). Each is its own named
+            // entry so it shows up individually in the Add-effect menu.
+            "caustics" => Effect::gpu_overlay(1, [1.0, 1.5, 1.0, 3.0, 1.0, 0.0, 0.7],
+                Rgba { r: 180, g: 230, b: 255, a: 255 }, WHITE, 0.5, 0.5, 1),
+            "lensflare" => Effect::gpu_overlay(2, [1.0, 1.0, 0.5, 1.0, 0.5, 0.4, 0.9],
+                Rgba { r: 255, g: 240, b: 210, a: 255 }, WHITE, 0.5, 0.4, 0),
+            "sparkle" => Effect::gpu_overlay(3, [1.0, 1.0, 1.5, 40.0, 1.0, 0.12, 0.85],
+                WHITE, WHITE, 0.5, 0.5, 0),
+            "heathaze" => Effect::gpu_overlay(4, [1.0, 8.0, 1.0, 3.0, 1.0, 0.02, 0.85],
+                WHITE, WHITE, 0.5, 0.5, 0),
+            "filmgrain" => Effect::gpu_overlay(5, [0.25, 1.0, 1.0, 1.0, 1.0, 2.0, 0.8],
+                WHITE, WHITE, 0.5, 0.5, 0),
+            "vignette" => Effect::gpu_overlay(6, [0.8, 1.0, 0.5, 0.05, 1.0, 0.4, 1.0],
+                Rgba { r: 0, g: 0, b: 0, a: 255 }, WHITE, 0.5, 0.5, 0),
+            "shimmer" => Effect::gpu_overlay(7, [0.6, 1.0, 1.0, 4.0, 1.0, 0.0, 0.6],
+                Rgba { r: 255, g: 120, b: 200, a: 255 }, Rgba { r: 120, g: 200, b: 255, a: 255 }, 0.5, 0.5, 1),
+            "aurora" => Effect::gpu_overlay(8, [1.0, 2.0, 0.6, 3.0, 1.0, 0.15, 0.8],
+                Rgba { r: 120, g: 255, b: 180, a: 255 }, Rgba { r: 120, g: 140, b: 255, a: 255 }, 0.5, 0.5, 1),
+            "fog" => Effect::gpu_overlay(9, [1.0, 1.5, 0.5, 4.0, 0.45, 0.0, 0.6],
+                Rgba { r: 200, g: 205, b: 215, a: 255 }, WHITE, 0.5, 0.5, 1),
             _ => return None,
         })
     }

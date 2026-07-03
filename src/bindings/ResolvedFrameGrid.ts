@@ -23,4 +23,8 @@ linked: Array<ResolvedLinkedEffect>,
 /**
  * Grid line thickness (layer-local px) and colour sampled at this time.
  */
-lineWidth: number, lineColor: Rgba, };
+lineWidth: number, lineColor: Rgba, 
+/**
+ * Shared background image spanning the grid (each cell shows its slice).
+ */
+background: string | null, };

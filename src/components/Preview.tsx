@@ -28,12 +28,14 @@ import { drawSurface, drawTexturedQuad } from "../lib/surface3d";
 import type { Texture } from "../lib/surface3d";
 import { applyEffects } from "../lib/effects";
 import { renderShine } from "../lib/shinyClouds";
+import { renderGpuFx, gpuFxIsOverlay } from "../lib/gpuFx";
 import { getMediaUrl, registerVideoEl } from "../lib/media";
 import { createTransition, getTransitionMeta } from "../lib/transitions";
 import type { Clip } from "../lib/transitions";
 import type { Project } from "../bindings/Project";
 import type { Layer } from "../bindings/Layer";
 import type { ResolvedLayer } from "../bindings/ResolvedLayer";
+import type { ResolvedEffect } from "../bindings/ResolvedEffect";
 import type { ResolvedTransition } from "../bindings/ResolvedTransition";
 import type { Rgba } from "../bindings/Rgba";
 import type { BlendMode } from "../bindings/BlendMode";
@@ -1077,10 +1079,14 @@ function FrameGridNode({
   onMoveVertices: (layerId: number, updates: { index: number; x: number; y: number }[]) => Promise<void>;
 }) {
   const grid = r.frameGrid;
+  const bgUrl = grid?.background ? images[grid.background] : "";
   const cellUrls = (grid?.cells ?? []).map((c) => (c.src ? images[c.src] : "")).filter(Boolean);
+  if (bgUrl) cellUrls.push(bgUrl);
   const loaded = useImageMap(cellUrls);
   const fxRefs = useRef<HTMLCanvasElement[]>([]);
   const trRefs = useRef<HTMLCanvasElement[]>([]);
+  // Per-cell crop of the shared background image (its aligned slice).
+  const cropRefs = useRef<HTMLCanvasElement[]>([]);
   // Offscreen canvases for a whole-grid transition: the grid rasterised into one
   // texture, and the transition engine's output.
   const gridRasterRef = useRef<HTMLCanvasElement | null>(null);
@@ -1187,13 +1193,48 @@ function FrameGridNode({
           // grid transitions as a single image instead of falling back to a fade.
           const gridTransition = r.transition?.engine ? r.transition : null;
 
-          // Compute a cell's texture (effects baked; optionally its own transition).
-          const cellTex = (i: number, img: HTMLImageElement, withCellTr: boolean): Texture => {
+          // The shared background image (if any) — each cell shows its slice.
+          const bgImg = bgUrl ? loaded.get(bgUrl) : undefined;
+
+          // Crop the background to a cell's aligned slice (its grid region). The
+          // regular grid subdivision maps the whole photo across the cells, so it
+          // reads as one continuous image behind the frame.
+          const bgSlice = (i: number): HTMLCanvasElement | null => {
+            if (!bgImg) return null;
             const cell = grid.cells[i];
-            const iw = img.naturalWidth || img.width;
-            const ih = img.naturalHeight || img.height;
+            const bw = bgImg.naturalWidth || bgImg.width;
+            const bh = bgImg.naturalHeight || bgImg.height;
+            const sx = (cell.col / grid.cols) * bw;
+            const sy = (cell.row / grid.rows) * bh;
+            const sw = Math.max(1, (cell.colSpan / grid.cols) * bw);
+            const sh = Math.max(1, (cell.rowSpan / grid.rows) * bh);
+            const crop = cropRefs.current[i] ?? (cropRefs.current[i] = document.createElement("canvas"));
+            const cw = Math.max(1, Math.round(sw));
+            const ch = Math.max(1, Math.round(sh));
+            if (crop.width !== cw) crop.width = cw;
+            if (crop.height !== ch) crop.height = ch;
+            const cc = crop.getContext("2d");
+            if (!cc) return null;
+            cc.clearRect(0, 0, cw, ch);
+            cc.drawImage(bgImg, sx, sy, sw, sh, 0, 0, cw, ch);
+            return crop;
+          };
+
+          // A cell's final texture: its background slice (if a background is set)
+          // or its own image, with effects baked and optionally its transition.
+          // Returns null if the cell has no source to draw.
+          const cellTex = (i: number, withCellTr: boolean): Texture | null => {
+            const cell = grid.cells[i];
+            let src: Texture | null = grid.background ? bgSlice(i) : null;
+            if (!src) {
+              const url = cell.src ? images[cell.src] : undefined;
+              src = (url ? loaded.get(url) : undefined) ?? null;
+            }
+            if (!src) return null;
+            const iw = src instanceof HTMLImageElement ? src.naturalWidth || src.width : src.width;
+            const ih = src instanceof HTMLImageElement ? src.naturalHeight || src.height : src.height;
             const off = fxRefs.current[i] ?? (fxRefs.current[i] = document.createElement("canvas"));
-            let tex: Texture = cell.effects.length > 0 ? applyEffects(off, img, iw, ih, cell.effects) : img;
+            let tex: Texture = cell.effects.length > 0 ? applyEffects(off, src, iw, ih, cell.effects) : src;
             if (withCellTr && cell.transition?.engine) {
               const trc = trRefs.current[i] ?? (trRefs.current[i] = document.createElement("canvas"));
               tex = cellTransitionTexture(trc, tex, iw, ih, cell.transition);
@@ -1232,9 +1273,8 @@ function FrameGridNode({
               rctx.setTransform(sx, 0, 0, sy, -minX * sx, -minY * sy);
               grid.cells.forEach((cell, i) => {
                 if (cell.covered) return;
-                const url = cell.src ? images[cell.src] : undefined;
-                const img = url ? loaded.get(url) : undefined;
-                if (img) drawTexturedQuad(rctx as unknown as DrawCtx, cellTex(i, img, false), liveQuad(i), 1);
+                const tex = cellTex(i, false);
+                if (tex) drawTexturedQuad(rctx as unknown as DrawCtx, tex, liveQuad(i), 1);
               });
               rctx.setTransform(1, 0, 0, 1, 0, 0);
               const outCanvas = gridTransRef.current ?? (gridTransRef.current = document.createElement("canvas"));
@@ -1255,11 +1295,10 @@ function FrameGridNode({
           } else {
             grid.cells.forEach((cell, i) => {
               if (cell.covered) return; // absorbed into a merged block
-              const url = cell.src ? images[cell.src] : undefined;
-              const img = url ? loaded.get(url) : undefined;
               const quad = liveQuad(i);
-              if (img) {
-                drawTexturedQuad(ctx as DrawCtx, cellTex(i, img, true), quad, 1);
+              const tex = cellTex(i, true);
+              if (tex) {
+                drawTexturedQuad(ctx as DrawCtx, tex, quad, 1);
               } else if (selected) {
                 c.save();
                 strokePoly(ctx as DrawCtx, quadPts(quad));
@@ -1889,12 +1928,18 @@ function AdjustmentNode({
   height: number;
 }) {
   const offRef = useRef<HTMLCanvasElement | null>(null);
-  const shines = r.effects.filter((e) => e.kind === "shinyclouds");
-  if (shines.length === 0) return null;
+  // Overlay-type effects usable as whole-comp adjustments: shiny clouds + the
+  // GPU-overlay effects that emit a compositable pattern (not haze/vignette).
+  type Overlay = Extract<ResolvedEffect, { kind: "shinyclouds" | "gpuoverlay" }>;
+  const overlays = r.effects.filter(
+    (e): e is Overlay =>
+      e.kind === "shinyclouds" ||
+      (e.kind === "gpuoverlay" && gpuFxIsOverlay(e.effect))
+  );
+  if (overlays.length === 0) return null;
   return (
     <>
-      {shines.map((s, i) => {
-        if (s.kind !== "shinyclouds") return null;
+      {overlays.map((s, i) => {
         return (
           <Shape
             key={i}
@@ -1903,19 +1948,39 @@ function AdjustmentNode({
             globalCompositeOperation={SHINE_GCO[s.blend] ?? "screen"}
             perfectDrawEnabled={false}
             sceneFunc={(ctx) => {
-              const pat = renderShine(null, width, height, {
-                time: s.time,
-                intensity: s.intensity,
-                scale: s.scale,
-                speed: s.speed,
-                complexity: s.complexity,
-                contrast: s.contrast,
-                brightness: s.brightness,
-                tint: [s.tint.r / 255, s.tint.g / 255, s.tint.b / 255],
-                blend: s.blend,
-                opacity: s.opacity,
-                adjustment: true,
-              });
+              const pat =
+                s.kind === "shinyclouds"
+                  ? renderShine(null, width, height, {
+                      time: s.time,
+                      intensity: s.intensity,
+                      scale: s.scale,
+                      speed: s.speed,
+                      complexity: s.complexity,
+                      contrast: s.contrast,
+                      brightness: s.brightness,
+                      tint: [s.tint.r / 255, s.tint.g / 255, s.tint.b / 255],
+                      blend: s.blend,
+                      opacity: s.opacity,
+                      adjustment: true,
+                    })
+                  : s.kind === "gpuoverlay"
+                    ? renderGpuFx(null, width, height, {
+                        effect: s.effect,
+                        time: s.time,
+                        intensity: s.intensity,
+                        scale: s.scale,
+                        speed: s.speed,
+                        detail: s.detail,
+                        softness: s.softness,
+                        extra: s.extra,
+                        opacity: s.opacity,
+                        tint: [s.tint.r / 255, s.tint.g / 255, s.tint.b / 255],
+                        tint2: [s.tint2.r / 255, s.tint2.g / 255, s.tint2.b / 255],
+                        pos: [s.posX, s.posY],
+                        blend: s.blend,
+                        adjustment: true,
+                      })
+                    : null;
               if (!pat) return;
               // Copy the shared GL canvas into a per-node scratch so a second
               // adjustment layer's render can't overwrite it before this draws.

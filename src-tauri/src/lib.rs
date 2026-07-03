@@ -1369,6 +1369,7 @@ fn add_frame_grid(state: State<AppState>, rows: u32, cols: u32) -> Project {
             line_width: 2.0,
             line_color: Rgba { r: 255, g: 255, b: 255, a: 255 },
             line_color_keys: vec![],
+            background: None,
         },
         transform: Transform::at(cx, cy),
         hidden: false,
@@ -1395,6 +1396,33 @@ fn set_cell_image(state: State<AppState>, layer_id: u32, cell: u32, path: String
     c.src = Some(path);
     c.img_w = iw;
     c.img_h = ih;
+    Ok(project.clone())
+}
+
+/// Set the shared background image of a frame grid (each cell then shows its
+/// aligned slice of it). Undoable.
+#[tauri::command]
+fn set_grid_background(state: State<AppState>, layer_id: u32, path: String) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { background, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    *background = Some(path);
+    Ok(project.clone())
+}
+
+/// Clear a frame grid's shared background image (cells revert to their own). Undoable.
+#[tauri::command]
+fn clear_grid_background(state: State<AppState>, layer_id: u32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { background, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    *background = None;
     Ok(project.clone())
 }
 
@@ -1919,6 +1947,13 @@ fn effect_track_mut<'a>(e: &'a mut Effect, param: &str) -> Option<&'a mut Track>
         (Effect::ShinyClouds { contrast, .. }, "contrast") => Some(contrast),
         (Effect::ShinyClouds { brightness, .. }, "brightness") => Some(brightness),
         (Effect::ShinyClouds { opacity, .. }, "opacity") => Some(opacity),
+        (Effect::GpuOverlay { intensity, .. }, "intensity") => Some(intensity),
+        (Effect::GpuOverlay { scale, .. }, "scale") => Some(scale),
+        (Effect::GpuOverlay { speed, .. }, "speed") => Some(speed),
+        (Effect::GpuOverlay { detail, .. }, "detail") => Some(detail),
+        (Effect::GpuOverlay { softness, .. }, "softness") => Some(softness),
+        (Effect::GpuOverlay { extra, .. }, "extra") => Some(extra),
+        (Effect::GpuOverlay { opacity, .. }, "opacity") => Some(opacity),
         _ => None,
     }
 }
@@ -2033,6 +2068,42 @@ fn set_shine_static(
     Ok(project.clone())
 }
 
+/// Set a GPU-overlay effect's static fields: which `effect`, `tint`/`tint2`,
+/// flare `pos`, and `blend` mode. Undoable.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn set_gpufx_static(
+    state: State<AppState>,
+    layer_id: u32,
+    index: usize,
+    effect: u8,
+    tint: Rgba,
+    tint2: Rgba,
+    pos_x: f32,
+    pos_y: f32,
+    blend: u8,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match layer.effects.get_mut(index) {
+        Some(Effect::GpuOverlay { effect: e, tint: t, tint2: t2, pos_x: px, pos_y: py, blend: b, .. }) => {
+            *e = effect;
+            *t = tint;
+            *t2 = tint2;
+            *px = pos_x;
+            *py = pos_y;
+            *b = blend;
+        }
+        _ => return Err("not a gpu overlay effect".into()),
+    }
+    Ok(project.clone())
+}
+
 /// Borrow one grid cell's effect stack mutably (errors if not a grid / bad cell).
 fn cell_effects_mut(layer: &mut Layer, cell: u32) -> Result<&mut Vec<Effect>, String> {
     let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
@@ -2131,6 +2202,38 @@ fn set_cell_shine_static(
             *b = blend;
         }
         _ => return Err("not a shiny clouds effect".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Set a grid cell's GPU-overlay effect static fields. Undoable.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn set_cell_gpufx_static(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    index: usize,
+    effect: u8,
+    tint: Rgba,
+    tint2: Rgba,
+    pos_x: f32,
+    pos_y: f32,
+    blend: u8,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    match cell_effects_mut(layer, cell)?.get_mut(index) {
+        Some(Effect::GpuOverlay { effect: e, tint: t, tint2: t2, pos_x: px, pos_y: py, blend: b, .. }) => {
+            *e = effect;
+            *t = tint;
+            *t2 = tint2;
+            *px = pos_x;
+            *py = pos_y;
+            *b = blend;
+        }
+        _ => return Err("not a gpu overlay effect".into()),
     }
     Ok(project.clone())
 }
@@ -2522,6 +2625,17 @@ fn walk_effect_tracks(e: &mut Effect, f: &mut dyn FnMut(&mut Track)) {
             f(brightness);
             f(opacity);
         }
+        Effect::GpuOverlay {
+            intensity, scale, speed, detail, softness, extra, opacity, ..
+        } => {
+            f(intensity);
+            f(scale);
+            f(speed);
+            f(detail);
+            f(softness);
+            f(extra);
+            f(opacity);
+        }
     }
 }
 
@@ -2722,6 +2836,8 @@ pub fn run() {
             add_shape_layer,
             add_frame_grid,
             set_cell_image,
+            set_grid_background,
+            clear_grid_background,
             clear_cell_image,
             set_cell_zoom,
             set_grid_vertices,
@@ -2738,6 +2854,7 @@ pub fn run() {
             key_cell_effect,
             set_cell_wipe_static,
             set_cell_shine_static,
+            set_cell_gpufx_static,
             link_effect,
             add_linked_effect,
             remove_linked_effect_item,
@@ -2757,6 +2874,7 @@ pub fn run() {
             key_effect,
             set_wipe_static,
             set_shine_static,
+            set_gpufx_static,
             save_binary_file,
             delete_layer,
             delete_keyframes_at,

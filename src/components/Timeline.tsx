@@ -61,6 +61,8 @@ function keyframeTimes(l: Layer): number[] {
     else if (e.kind === "wipe") tracks.push(e.position, e.softness);
     else if (e.kind === "shinyclouds")
       tracks.push(e.intensity, e.scale, e.speed, e.complexity, e.contrast, e.brightness, e.opacity);
+    else if (e.kind === "gpuoverlay")
+      tracks.push(e.intensity, e.scale, e.speed, e.detail, e.softness, e.extra, e.opacity);
     else tracks.push(e.amount);
   }
   const set = new Set<number>();
@@ -76,6 +78,8 @@ interface Props {
   selectedIds: number[];
   /** Select a layer. `additive` (Ctrl/⌘/Shift-click) toggles it in a multi-select. */
   onSelect: (id: number | null, additive?: boolean) => void;
+  /** Replace the whole multi-selection at once (used by drag/marquee select). */
+  onSelectMany: (ids: number[]) => void;
   onToggleHidden: (id: number) => void;
   onSeek: (t: number) => void;
   onDeleteLayer: (id: number) => void;
@@ -100,6 +104,7 @@ export default function Timeline({
   selectedId,
   selectedIds,
   onSelect,
+  onSelectMany,
   onToggleHidden,
   onSeek,
   onDeleteLayer,
@@ -119,6 +124,9 @@ export default function Timeline({
   const [rowOverId, setRowOverId] = useState<number | null>(null);
   // Keyframe-diamond drag (retime). `fromMs` identifies which diamond is moving.
   const [kfDrag, setKfDrag] = useState<{ id: number; fromMs: number; toMs: number } | null>(null);
+  // Rubber-band (marquee) selection box, in tracks-inner content px. Non-null
+  // only while dragging across empty track space.
+  const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   // Horizontal zoom: content is `zoom * 100%` wide; the tracks area scrolls and
   // the ruler is kept in sync via transform.
   const [zoom, setZoom] = useState(1);
@@ -430,6 +438,44 @@ export default function Timeline({
     window.addEventListener("mouseup", up);
   };
 
+  // Rubber-band select: drag across empty track space to draw a box; every layer
+  // whose block it touches becomes selected. Uses client-rect intersection so it
+  // works regardless of zoom/scroll.
+  const startMarquee = (e: React.MouseEvent) => {
+    const inner = tracksRef.current;
+    if (!inner || e.button !== 0) return;
+    e.preventDefault(); // stop the native text selection
+    const rect0 = inner.getBoundingClientRect();
+    const start = { cx: e.clientX, cy: e.clientY, rx: e.clientX - rect0.left, ry: e.clientY - rect0.top };
+    setMarquee({ x: start.rx, y: start.ry, w: 0, h: 0 });
+    let moved = false;
+    const move = (ev: MouseEvent) => {
+      moved = true;
+      const rect = inner.getBoundingClientRect();
+      const rx = ev.clientX - rect.left;
+      const ry = ev.clientY - rect.top;
+      setMarquee({ x: Math.min(start.rx, rx), y: Math.min(start.ry, ry), w: Math.abs(rx - start.rx), h: Math.abs(ry - start.ry) });
+      const l = Math.min(start.cx, ev.clientX), r = Math.max(start.cx, ev.clientX);
+      const t = Math.min(start.cy, ev.clientY), b = Math.max(start.cy, ev.clientY);
+      const hits: number[] = [];
+      inner.querySelectorAll<HTMLElement>(".tl-block[data-lid]").forEach((el) => {
+        const bb = el.getBoundingClientRect();
+        if (bb.right >= l && bb.left <= r && bb.bottom >= t && bb.top <= b) {
+          hits.push(Number(el.dataset.lid));
+        }
+      });
+      onSelectMany(hits);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      setMarquee(null);
+      if (!moved) onSelect(null); // a plain click on empty space clears selection
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
   // Adaptive ruler: pick a labelled interval that keeps ticks ~64px apart at the
   // current zoom, snapping to a "nice" value (frame multiples when zoomed right
   // in, then seconds/minutes as you zoom out). When frames are wide enough, draw
@@ -553,9 +599,10 @@ export default function Timeline({
             ref={tracksRef}
             style={{ width: `${zoom * 100}%` }}
             onMouseDown={(e) => {
-              // Clicking empty track space clears the selection — it never scrubs
-              // the playhead (that's the ruler's job).
-              if (e.target === e.currentTarget) onSelect(null);
+              // A press on empty track space (not on a block) starts a rubber-band
+              // selection; a plain click there clears the selection. It never
+              // scrubs the playhead (that's the ruler's job).
+              if (!(e.target as HTMLElement).closest(".tl-block")) startMarquee(e);
             }}
           >
           {layers.map((l) => {
@@ -578,6 +625,7 @@ export default function Timeline({
             return (
               <div key={l.id} className={"tl-track" + (l.hidden ? " hidden" : "")}>
                 <div
+                  data-lid={l.id}
                   className={"tl-block" + (selectedIds.includes(l.id) ? " selected" : "")}
                   style={{ left: `${left}%`, width: `${width}%`, background: kindColor(l) }}
                   title={`${(sMs / 1000).toFixed(2)}s – ${(eMs / 1000).toFixed(2)}s · drag to move, edges to trim · right-click for effects`}
@@ -622,6 +670,12 @@ export default function Timeline({
             );
           })}
             <div className="tl-playhead" style={{ left: `${(time / dur) * 100}%` }} />
+            {marquee && (
+              <div
+                className="tl-marquee"
+                style={{ left: marquee.x, top: marquee.y, width: marquee.w, height: marquee.h }}
+              />
+            )}
           </div>
         </div>
       </div>

@@ -5,6 +5,7 @@
 import type { ResolvedEffect } from "../bindings/ResolvedEffect";
 import type { Texture } from "./surface3d";
 import { renderShine } from "./shinyClouds";
+import { renderGpuFx } from "./gpuFx";
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 
@@ -41,6 +42,37 @@ function applyShine(off: HTMLCanvasElement, w: number, h: number, shines: Shine[
   }
 }
 
+type GpuFx = Extract<ResolvedEffect, { kind: "gpuoverlay" }>;
+export function gpuFxEffects(effects: ResolvedEffect[]): GpuFx[] {
+  return effects.filter((e): e is GpuFx => e.kind === "gpuoverlay");
+}
+
+/** Run each GPU-overlay effect over the current 2D result (same seam as shine). */
+function applyGpuFx(off: HTMLCanvasElement, w: number, h: number, fx: GpuFx[]) {
+  const oc = off.getContext("2d");
+  if (!oc) return;
+  for (const e of fx) {
+    const out = renderGpuFx(off, w, h, {
+      effect: e.effect,
+      time: e.time,
+      intensity: e.intensity,
+      scale: e.scale,
+      speed: e.speed,
+      detail: e.detail,
+      softness: e.softness,
+      extra: e.extra,
+      opacity: e.opacity,
+      tint: [e.tint.r / 255, e.tint.g / 255, e.tint.b / 255],
+      tint2: [e.tint2.r / 255, e.tint2.g / 255, e.tint2.b / 255],
+      pos: [e.posX, e.posY],
+      blend: e.blend,
+    });
+    if (!out) continue;
+    oc.clearRect(0, 0, w, h);
+    oc.drawImage(out, 0, 0, w, h);
+  }
+}
+
 /**
  * Render a source texture (image or canvas) through its effect stack into the
  * scratch canvas `off` and return it. With no effects, returns `src` unchanged
@@ -68,6 +100,8 @@ export function applyEffects(
   for (const wp of wipeEffects(effects)) applyWipe(oc, srcW, srcH, wp);
   const shines = shineEffects(effects);
   if (shines.length) applyShine(off, srcW, srcH, shines);
+  const fx = gpuFxEffects(effects);
+  if (fx.length) applyGpuFx(off, srcW, srcH, fx);
   return off;
 }
 

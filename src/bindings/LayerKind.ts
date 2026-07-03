@@ -112,4 +112,11 @@ line_color: Rgba,
 /**
  * Keyframeable grid line colour. Empty = the static `line_color`.
  */
-lineColorKeys: Array<ColorKey>, } | { "kind": "video", src: string, width: number, height: number, durationMs: number, } | { "kind": "audio", src: string, durationMs: number, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", };
+lineColorKeys: Array<ColorKey>, 
+/**
+ * Optional shared BACKGROUND image spanning the whole grid. When set,
+ * every cell reveals its aligned slice of this one image (a mask over a
+ * single photo) instead of its own `src`, and each cell's effect stack
+ * applies to that slice. `None` = per-cell images (the classic mode).
+ */
+background: string | null, } | { "kind": "video", src: string, width: number, height: number, durationMs: number, } | { "kind": "audio", src: string, durationMs: number, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", };

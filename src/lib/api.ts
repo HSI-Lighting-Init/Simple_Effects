@@ -233,6 +233,14 @@ export const addFrameGrid = (rows: number, cols: number) =>
 export const setCellImage = (layerId: number, cell: number, path: string) =>
   invoke<Project>("set_cell_image", { layerId, cell, path });
 
+/** Set a frame grid's shared background image (each cell shows its slice). */
+export const setGridBackground = (layerId: number, path: string) =>
+  invoke<Project>("set_grid_background", { layerId, path });
+
+/** Clear a frame grid's shared background (cells revert to their own images). */
+export const clearGridBackground = (layerId: number) =>
+  invoke<Project>("clear_grid_background", { layerId });
+
 /** Clear the image from one grid cell. */
 export const clearCellImage = (layerId: number, cell: number) =>
   invoke<Project>("clear_cell_image", { layerId, cell });
@@ -369,7 +377,9 @@ export type EffectParam =
   | "complexity"
   | "contrast"
   | "brightness"
-  | "opacity";
+  | "opacity"
+  | "detail"
+  | "extra";
 
 /** Key one effect parameter at a time (animates the effect). */
 export const keyEffect = (
@@ -388,6 +398,18 @@ export const setWipeStatic = (layerId: number, index: number, angle: number, inv
 /** Set a shiny-clouds effect's static fields (tint + blend mode). */
 export const setShineStatic = (layerId: number, index: number, tint: Rgba, blend: number) =>
   invoke<Project>("set_shine_static", { layerId, index, tint, blend });
+
+/** Set a GPU-overlay effect's static fields (effect, tints, flare pos, blend). */
+export const setGpuFxStatic = (
+  layerId: number,
+  index: number,
+  effect: number,
+  tint: Rgba,
+  tint2: Rgba,
+  posX: number,
+  posY: number,
+  blend: number
+) => invoke<Project>("set_gpufx_static", { layerId, index, effect, tint, tint2, posX, posY, blend });
 
 // --- Per-cell effects (multi-frame grid) ---
 export const addCellEffect = (layerId: number, cell: number, kind: string) =>
@@ -421,6 +443,18 @@ export const setCellShineStatic = (
   tint: Rgba,
   blend: number
 ) => invoke<Project>("set_cell_shine_static", { layerId, cell, index, tint, blend });
+
+export const setCellGpuFxStatic = (
+  layerId: number,
+  cell: number,
+  index: number,
+  effect: number,
+  tint: Rgba,
+  tint2: Rgba,
+  posX: number,
+  posY: number,
+  blend: number
+) => invoke<Project>("set_cell_gpufx_static", { layerId, cell, index, effect, tint, tint2, posX, posY, blend });
 
 // --- Linked (shared) effect groups (multi-frame grid) ---
 export const linkEffect = (layerId: number, kind: string, cells: number[]) =>

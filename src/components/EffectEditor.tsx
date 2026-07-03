@@ -20,7 +20,9 @@ type EffectParam =
   | "complexity"
   | "contrast"
   | "brightness"
-  | "opacity";
+  | "opacity"
+  | "detail"
+  | "extra";
 
 // Draws the image with its effect stack onto a canvas (guaranteed-correct
 // preview — the exact same filter + wipe + shine pipeline the scene uses).
@@ -70,6 +72,7 @@ export default function EffectEditor({
   onKeyEffect,
   onSetWipeStatic,
   onSetShineStatic,
+  onSetGpuFxStatic,
   onClose,
 }: {
   layerId: number;
@@ -87,6 +90,16 @@ export default function EffectEditor({
   ) => void;
   onSetWipeStatic: (layerId: number, index: number, angle: number, invert: boolean) => void;
   onSetShineStatic: (layerId: number, index: number, tint: Rgba, blend: number) => void;
+  onSetGpuFxStatic: (
+    layerId: number,
+    index: number,
+    effect: number,
+    tint: Rgba,
+    tint2: Rgba,
+    posX: number,
+    posY: number,
+    blend: number
+  ) => void;
   onClose: () => void;
 }) {
   return (
@@ -111,6 +124,7 @@ export default function EffectEditor({
               onKeyEffect={onKeyEffect}
               onSetWipeStatic={onSetWipeStatic}
               onSetShineStatic={onSetShineStatic}
+              onSetGpuFxStatic={onSetGpuFxStatic}
             />
             <p className="insp-hint">
               Stack as many effects as you want — they composite top-to-bottom and

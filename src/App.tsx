@@ -38,6 +38,8 @@ import {
   addShapeLayer,
   setCellImage,
   clearCellImage,
+  setGridBackground,
+  clearGridBackground,
   setCellTransition,
   setAllCellsTransition,
   setCellZoom,
@@ -53,6 +55,7 @@ import {
   keyCellEffect,
   setCellWipeStatic,
   setCellShineStatic,
+  setCellGpuFxStatic,
   linkEffect,
   addLinkedEffect,
   removeLinkedEffectItem,
@@ -98,6 +101,7 @@ import {
   setShapeRotationKey,
   setWipeStatic,
   setShineStatic,
+  setGpuFxStatic,
   evaluateAt,
   getProject,
   loadImageDataUrl,
@@ -346,6 +350,7 @@ export default function App() {
         if (layer.kind.kind === "image") srcs.push(layer.kind.src);
         else if (layer.kind.kind === "framegrid") {
           for (const cell of layer.kind.cells) if (cell.src) srcs.push(cell.src);
+          if (layer.kind.background) srcs.push(layer.kind.background);
         }
       }
       for (const src of srcs) {
@@ -824,6 +829,32 @@ export default function App() {
     [applyTime, recordAction]
   );
 
+  // Set / clear the grid's shared background image (each cell shows its slice).
+  const onSetGridBackground = useCallback(
+    async (layerId: number) => {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
+      });
+      if (typeof selected !== "string") return;
+      const p = await setGridBackground(layerId, selected);
+      setProject(p);
+      await resolveImages(p);
+      await applyTime(timeRef.current);
+      recordAction("set_grid_background", { layerId, path: selected });
+    },
+    [resolveImages, applyTime, recordAction]
+  );
+  const onClearGridBackground = useCallback(
+    async (layerId: number) => {
+      const p = await clearGridBackground(layerId);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("clear_grid_background", { layerId });
+    },
+    [applyTime, recordAction]
+  );
+
   // Commit dragged grid vertices (keyframed at the playhead).
   const onMoveVertices = useCallback(
     async (layerId: number, updates: { index: number; x: number; y: number }[]) => {
@@ -1206,6 +1237,25 @@ export default function App() {
     [applyTime, recordAction]
   );
 
+  const onSetGpuFxStatic = useCallback(
+    async (
+      layerId: number,
+      index: number,
+      effect: number,
+      tint: Rgba,
+      tint2: Rgba,
+      posX: number,
+      posY: number,
+      blend: number
+    ) => {
+      const p = await setGpuFxStatic(layerId, index, effect, tint, tint2, posX, posY, blend);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("gpufx_static", { layerId, index, effect, blend });
+    },
+    [applyTime, recordAction]
+  );
+
   // Per-cell effect stack (multi-frame grid). Mirror the layer-effect handlers,
   // threading the selected cell index.
   const onAddCellEffect = useCallback(
@@ -1257,6 +1307,25 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("cell_shine_static", { layerId, cell, index, blend });
+    },
+    [applyTime, recordAction]
+  );
+  const onSetCellGpuFxStatic = useCallback(
+    async (
+      layerId: number,
+      cell: number,
+      index: number,
+      effect: number,
+      tint: Rgba,
+      tint2: Rgba,
+      posX: number,
+      posY: number,
+      blend: number
+    ) => {
+      const p = await setCellGpuFxStatic(layerId, cell, index, effect, tint, tint2, posX, posY, blend);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("cell_gpufx_static", { layerId, cell, index, effect, blend });
     },
     [applyTime, recordAction]
   );
@@ -2048,6 +2117,14 @@ export default function App() {
     [recordAction]
   );
 
+  // Replace the whole multi-selection (marquee / drag-select in the timeline).
+  // The primary selection becomes the last layer in the box (or null if empty).
+  const selectMany = useCallback((ids: number[]) => {
+    setSelectedIds(ids);
+    setSelectedId(ids.length ? ids[ids.length - 1] : null);
+    setSelectedPart(null);
+  }, []);
+
   // Keep the multi-selection consistent with the primary selection for every
   // internal single-select (adding a layer, paste, delete, undo, etc. all call
   // `setSelectedId` directly): if the primary lands outside the current
@@ -2451,6 +2528,7 @@ export default function App() {
   const gridLinked = selectedId != null ? resolved[selectedId]?.frameGrid?.linked ?? [] : [];
   // Grid line style at the playhead (colour may be keyframed) for the inspector.
   const gridLineWidth = (selectedId != null ? resolved[selectedId]?.frameGrid?.lineWidth : null) ?? 0;
+  const gridHasBackground = !!(selectedId != null && resolved[selectedId]?.frameGrid?.background);
   const gridLineColor =
     (selectedId != null ? resolved[selectedId]?.frameGrid?.lineColor : null) ??
     ({ r: 255, g: 255, b: 255, a: 255 } as Rgba);
@@ -2834,6 +2912,7 @@ export default function App() {
           onKeyEffect={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
           onSetShineStatic={onSetShineStatic}
+          onSetGpuFxStatic={onSetGpuFxStatic}
           onShapeParams={onShapeParams}
           onShapeRotKey={onShapeRotKey}
           onAttachToShape={onAttachToShape}
@@ -2878,6 +2957,9 @@ export default function App() {
           onSetGridLineWidth={onSetGridLineWidth}
           onSetGridLineColor={onSetGridLineColor}
           onClearGridLineColor={onClearGridLineColor}
+          hasBackground={gridHasBackground}
+          onSetGridBackground={onSetGridBackground}
+          onClearGridBackground={onClearGridBackground}
           onMergeCell={onMergeCell}
           onSplitCell={onSplitCell}
           onAddCellEffect={onAddCellEffect}
@@ -2885,6 +2967,7 @@ export default function App() {
           onKeyCellEffect={onKeyCellEffect}
           onSetCellWipeStatic={onSetCellWipeStatic}
           onSetCellShineStatic={onSetCellShineStatic}
+          onSetCellGpuFxStatic={onSetCellGpuFxStatic}
           gridLinked={gridLinked}
           onLinkEffect={onLinkEffect}
           onAddLinkedEffect={onAddLinkedEffect}
@@ -2909,6 +2992,7 @@ export default function App() {
         selectedId={selectedId}
         selectedIds={selectedIds}
         onSelect={selectLayer}
+        onSelectMany={selectMany}
         onToggleHidden={onToggleHidden}
         onSeek={(t) => {
           if (playingRef.current) stop();
@@ -3065,6 +3149,7 @@ export default function App() {
           onKeyEffect={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
           onSetShineStatic={onSetShineStatic}
+          onSetGpuFxStatic={onSetGpuFxStatic}
           onClose={() => setFxEditorId(null)}
         />
       )}

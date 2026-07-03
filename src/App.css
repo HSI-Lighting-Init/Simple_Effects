@@ -1499,6 +1499,8 @@ body {
   grid-row: 2;
   border-right: 1px solid var(--line);
   overflow: hidden;
+  /* Dragging a layer row (to reorder) must not select its name text. */
+  user-select: none;
 }
 
 .tl-labels-inner {
@@ -1594,6 +1596,17 @@ body {
   min-width: 100%;
   /* The tracks area moves/selects layers — it does not scrub the playhead. */
   cursor: default;
+  /* Never start a native text selection when dragging to marquee-select. */
+  user-select: none;
+}
+
+/* Rubber-band selection box drawn while dragging across empty track space. */
+.tl-marquee {
+  position: absolute;
+  z-index: 6;
+  border: 1px solid rgba(108, 140, 255, 0.9);
+  background: rgba(108, 140, 255, 0.15);
+  pointer-events: none;
 }
 
 /* Cut (razor) tool: crosshair over the tracks and blocks. */
