@@ -1,6 +1,7 @@
 // Right-hand inspector. For text layers it edits content (Arabic/RTL aware),
 // font, colour, size (height), and the per-letter animation preset + timing.
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import SearchSelect, { type SelGroup } from "./SearchSelect";
 import type { Layer } from "../bindings/Layer";
 import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { LetterPreset } from "../bindings/LetterPreset";
@@ -27,6 +28,7 @@ import type { Decal } from "../bindings/Decal";
 import type { ResolvedEffect } from "../bindings/ResolvedEffect";
 import type { ResolvedLinkedEffect } from "../bindings/ResolvedLinkedEffect";
 import type { Transition } from "../bindings/Transition";
+import type { TransformEdit } from "../bindings/TransformEdit";
 import { REGISTRY, getTransitionMeta, type ParamSpec } from "../lib/transitions";
 
 type TransitionSlot = "in" | "out";
@@ -53,6 +55,12 @@ const TRANSITION_GROUPS: { category: string; items: { id: string; label: string 
   }
   return groups;
 })();
+
+// Transition picker groups for the searchable dropdown (a leading "None").
+const TRANSITION_SEL_GROUPS: SelGroup[] = [
+  { category: "General", items: [{ id: "none", label: "None" }] },
+  ...TRANSITION_GROUPS.map((g) => ({ category: g.category, items: g.items })),
+];
 
 const PRESETS: { value: LetterPreset | "none"; label: string }[] = [
   { value: "none", label: "None (static)" },
@@ -1129,6 +1137,7 @@ const EFFECT_TYPES: { kind: string; label: string }[] = [
   { kind: "shimmer", label: "Shimmer (GPU)" },
   { kind: "aurora", label: "Aurora (GPU)" },
   { kind: "fog", label: "Fog / smoke (GPU)" },
+  { kind: "flap", label: "Flap / 3D flip (GPU)" },
 ];
 
 // Per-GPU-effect UI schema: how the seven generic slots + colours + position map
@@ -1201,6 +1210,11 @@ const GPU_FX: Record<number, GpuSchema> = {
     { key: "detail", label: "Complexity", min: 2, max: 6, step: 1 },
     { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
   ] },
+  10: { name: "Flap / 3D flip", colors: 0, pos: false, sliders: [
+    { key: "detail", label: "Angle°", min: -360, max: 360, step: 1 },
+    { key: "extra", label: "Perspective", min: 0, max: 1, step: 0.01 },
+    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
+  ] },
 };
 
 type EffectParam =
@@ -1238,6 +1252,39 @@ type SetGpuFxStatic = (
   blend: number
 ) => void;
 
+// A collapsible inspector section: shows only its title until expanded. Used to
+// keep the panel tidy — collapse the sections you're not working on.
+function Section({
+  title,
+  children,
+  defaultOpen = true,
+}: {
+  title: string;
+  children: ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className={"insp-body insp-section" + (open ? " open" : "")}>
+      <button className="insp-sep insp-sep-toggle" onClick={() => setOpen((o) => !o)}>
+        <span className="effect-caret">{open ? "▾" : "▸"}</span>
+        {title}
+      </button>
+      {open && children}
+    </div>
+  );
+}
+
+// Round to the slider's step so typed/dragged values land exactly on increments
+// (e.g. step 0.05 → 0.35, never 0.3500001).
+function snapToStep(v: number, min: number, step: number): number {
+  if (!(step > 0)) return v;
+  const snapped = min + Math.round((v - min) / step) * step;
+  // Kill float dust from the multiply/add.
+  const decimals = (String(step).split(".")[1] ?? "").length;
+  return Number(snapped.toFixed(decimals));
+}
+
 function effSlider(
   label: string,
   value: number,
@@ -1246,18 +1293,71 @@ function effSlider(
   step: number,
   onChange: (v: number) => void
 ) {
+  const set = (v: number) => onChange(snapToStep(Math.max(min, Math.min(max, v)), min, step));
   return (
-    <label className="insp-field">
-      {label} {value.toFixed(2)}
+    <label className="insp-field insp-slider">
+      <span className="insp-slider-head">
+        <span>{label}</span>
+        <input
+          className="insp-num"
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={snapToStep(value, min, step)}
+          onChange={(e) => e.target.value !== "" && set(Number(e.target.value))}
+        />
+      </span>
       <input
         type="range"
         min={min}
         max={max}
         step={step}
         value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
+        onChange={(e) => set(Number(e.target.value))}
       />
     </label>
+  );
+}
+
+// Layer position / transform: numeric X/Y (pixels, snapped to whole pixels) plus
+// scale / rotation / opacity sliders. Every change keyframes at the playhead (the
+// same path as dragging on the canvas), so it animates.
+function TransformSection({
+  layerId,
+  tr,
+  onCommit,
+}: {
+  layerId: number;
+  tr: { x: number; y: number; scaleX: number; scaleY: number; rotation: number; opacity: number };
+  onCommit: (layerId: number, edit: TransformEdit) => void;
+}) {
+  const numField = (label: string, val: number, key: "x" | "y") => (
+    <label className="insp-field insp-slider" style={{ flex: 1 }}>
+      <span className="insp-slider-head">
+        <span>{label}</span>
+        <input
+          className="insp-num wide"
+          type="number"
+          step={1}
+          value={Math.round(val)}
+          onChange={(e) => e.target.value !== "" && onCommit(layerId, { [key]: Math.round(Number(e.target.value)) })}
+        />
+      </span>
+    </label>
+  );
+  return (
+    <Section title="Transform / Position">
+      <div className="row2">
+        {numField("Position X", tr.x, "x")}
+        {numField("Position Y", tr.y, "y")}
+      </div>
+      {effSlider("Scale X", tr.scaleX, 0.05, 5, 0.05, (v) => onCommit(layerId, { scaleX: v }))}
+      {effSlider("Scale Y", tr.scaleY, 0.05, 5, 0.05, (v) => onCommit(layerId, { scaleY: v }))}
+      {effSlider("Rotation°", tr.rotation, -360, 360, 1, (v) => onCommit(layerId, { rotation: v }))}
+      {effSlider("Opacity", tr.opacity, 0, 1, 0.01, (v) => onCommit(layerId, { opacity: v }))}
+      <p className="insp-hint">Nudge the numbers or drag on the canvas — both keyframe here.</p>
+    </Section>
   );
 }
 
@@ -1268,6 +1368,8 @@ function EffectRow({
   layerId,
   index,
   eff,
+  open,
+  onToggle,
   onRemove,
   onKey,
   onSetWipeStatic,
@@ -1277,6 +1379,8 @@ function EffectRow({
   layerId: number;
   index: number;
   eff: ResolvedEffect;
+  open: boolean;
+  onToggle: (index: number) => void;
   onRemove: (layerId: number, index: number) => void;
   onKey: KeyEffect;
   onSetWipeStatic: SetWipeStatic;
@@ -1430,7 +1534,24 @@ function EffectRow({
               {effSlider("Position Y", eff.posY, 0, 1, 0.01, (v) => setStatic({ posY: v }))}
             </>
           )}
-          {onSetGpuFxStatic && eff.effect !== 4 && eff.effect !== 6 && (
+          {onSetGpuFxStatic && eff.effect === 10 && (
+            <>
+              <label className="insp-field">
+                Axis (hinge)
+                <select value={eff.blend} onChange={(e) => setStatic({ blend: Number(e.target.value) })}>
+                  <option value={0}>Horizontal — flap up/down</option>
+                  <option value={1}>Vertical — flap left/right</option>
+                </select>
+              </label>
+              {effSlider("Axis position", eff.posX, 0, 1, 0.01, (v) => setStatic({ posX: v }))}
+              <p className="insp-hint">
+                Drag the dashed line in the preview to move the hinge. Keyframe <b>Angle°</b>{" "}
+                from 0 to 360 for a complete flip about the axis (edge-on at 90°/270°, back
+                face around 180°).
+              </p>
+            </>
+          )}
+          {onSetGpuFxStatic && eff.effect !== 4 && eff.effect !== 6 && eff.effect !== 10 && (
             <label className="insp-field">
               Blend
               <select value={eff.blend} onChange={(e) => setStatic({ blend: Number(e.target.value) })}>
@@ -1441,19 +1562,28 @@ function EffectRow({
               </select>
             </label>
           )}
-          <p className="insp-hint">
-            GPU (WebGL) {schema.name.toLowerCase()} overlay. Runs on the timeline clock —
-            keyframe the sliders to animate; static while paused (export-accurate).
-          </p>
+          {eff.effect !== 10 && (
+            <p className="insp-hint">
+              GPU (WebGL) {schema.name.toLowerCase()} overlay. Runs on the timeline clock —
+              keyframe the sliders to animate; static while paused (export-accurate).
+            </p>
+          )}
         </>
       ) : null;
       break;
     }
   }
   return (
-    <div className="effect-row">
+    <div className={"effect-row" + (open ? " open" : "")}>
       <div className="effect-head">
-        <span>{label}</span>
+        <button
+          className="effect-toggle"
+          title={open ? "Collapse" : "Expand"}
+          onClick={() => onToggle(index)}
+        >
+          <span className="effect-caret">{open ? "▾" : "▸"}</span>
+          <span className="effect-name">{label}</span>
+        </button>
         <button
           className="insp-btn tiny"
           title="Remove effect"
@@ -1462,7 +1592,7 @@ function EffectRow({
           ✕
         </button>
       </div>
-      {body}
+      {open && body}
     </div>
   );
 }
@@ -1488,24 +1618,27 @@ export function EffectsSection({
   onSetShineStatic?: SetShineStatic;
   onSetGpuFxStatic?: SetGpuFxStatic;
 }) {
+  // Accordion: only one effect's details show at a time, so the stack stays tidy
+  // and you focus on the effect you're editing. Adding one opens it automatically.
+  const [openIdx, setOpenIdx] = useState<number | null>(null);
+  const prevLen = useRef(effects.length);
+  useEffect(() => {
+    if (effects.length > prevLen.current) setOpenIdx(effects.length - 1);
+    else if (openIdx != null && openIdx >= effects.length) setOpenIdx(null);
+    prevLen.current = effects.length;
+  }, [effects.length, openIdx]);
+  const toggle = (i: number) => setOpenIdx((cur) => (cur === i ? null : i));
   return (
-    <div className="insp-body">
-      <div className="insp-sep">Effects</div>
+    <Section title="Effects">
       <label className="insp-field">
         Add effect
-        <select
+        <SearchSelect
           value=""
-          onChange={(e) => {
-            if (e.target.value) onAddEffect(layerId, e.target.value);
-          }}
-        >
-          <option value="">＋ Add…</option>
-          {EFFECT_TYPES.map((t) => (
-            <option key={t.kind} value={t.kind}>
-              {t.label}
-            </option>
-          ))}
-        </select>
+          buttonLabel="＋ Add effect…"
+          favKey="effects"
+          groups={[{ category: "Effects", items: EFFECT_TYPES.map((t) => ({ id: t.kind, label: t.label })) }]}
+          onChange={(kind) => onAddEffect(layerId, kind)}
+        />
       </label>
       {effects.length === 0 && (
         <p className="insp-hint">
@@ -1518,6 +1651,8 @@ export function EffectsSection({
           layerId={layerId}
           index={i}
           eff={eff}
+          open={openIdx === i}
+          onToggle={toggle}
           onRemove={onRemoveEffect}
           onKey={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
@@ -1525,7 +1660,7 @@ export function EffectsSection({
           onSetGpuFxStatic={onSetGpuFxStatic}
         />
       ))}
-    </div>
+    </Section>
   );
 }
 
@@ -1627,9 +1762,12 @@ function TransitionsSection({
     { slot: "in", tr: layer.transitionIn },
     { slot: "out", tr: layer.transitionOut },
   ];
+  // Each In/Out slot is a collapsible disclosure — collapsed shows just the slot
+  // + its current transition name; expand to edit. Defaults open when a
+  // transition is already set, until you toggle it.
+  const [openSlots, setOpenSlots] = useState<Record<string, boolean>>({});
   return (
-    <div className="insp-body">
-      <div className="insp-sep">Transitions</div>
+    <Section title="Transitions">
       {slots.map(({ slot, tr }) => {
         const durMs = tr?.durMs ?? 800;
         const direction = tr?.direction ?? 0;
@@ -1638,26 +1776,35 @@ function TransitionsSection({
         const value = !tr
           ? "none"
           : tr.engine ?? LEGACY_TO_ENGINE[tr.kind] ?? "none";
+        const open = openSlots[slot] ?? tr != null;
+        const curLabel =
+          value === "none" ? "None" : getTransitionMeta(value)?.label ?? value;
         const onPick = (id: string) => {
           // Picking a (different) transition resets its variables to defaults.
           if (id === "none") onSet(layer.id, slot, "none", durMs, direction, null, null);
           else onSet(layer.id, slot, "dissolve", durMs, direction, id, id === value ? paramsJson : null);
         };
         return (
-          <div key={slot} className="insp-field">
-            <span style={{ textTransform: "capitalize" }}>{slot}</span>
-            <select value={value} onChange={(e) => onPick(e.target.value)}>
-              <option value="none">None</option>
-              {TRANSITION_GROUPS.map((g) => (
-                <optgroup key={g.category} label={g.category}>
-                  {g.items.map((it) => (
-                    <option key={it.id} value={it.id}>
-                      {it.label}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
+          <div key={slot} className={"insp-disc" + (open ? " open" : "")}>
+            <button
+              className="insp-disc-head"
+              onClick={() => setOpenSlots((s) => ({ ...s, [slot]: !open }))}
+            >
+              <span className="effect-caret">{open ? "▾" : "▸"}</span>
+              <span className="insp-disc-title" style={{ textTransform: "capitalize" }}>
+                {slot}
+              </span>
+              <span className="insp-disc-badge">{curLabel}</span>
+            </button>
+            {open && (
+            <div className="insp-field">
+            <SearchSelect
+              value={value}
+              favKey="transitions"
+              placeholder="None"
+              groups={TRANSITION_SEL_GROUPS}
+              onChange={onPick}
+            />
             {value !== "none" && (
               <>
                 <div className="row2">
@@ -1692,6 +1839,8 @@ function TransitionsSection({
                 />
               </>
             )}
+            </div>
+            )}
           </div>
         );
       })}
@@ -1700,7 +1849,7 @@ function TransitionsSection({
         transition library — it reveals the layers beneath. Overlap a layer beneath to
         cross-blend.
       </p>
-    </div>
+    </Section>
   );
 }
 
@@ -1755,10 +1904,17 @@ interface Props {
   onLetterColor: (layerId: number, index: number, color: Rgba) => void;
   onClearLetterColor: (layerId: number, index: number) => void;
   onSetLayerTransition: SetLayerTransition;
+  /** The selected layer's transform sampled at the playhead (for the Position/
+   *  Transform readouts), or null when nothing is selected. */
+  transformNow: { x: number; y: number; scaleX: number; scaleY: number; rotation: number; opacity: number } | null;
+  /** Keyframe a transform edit at the playhead (numeric position/scale fields). */
+  onCommitTransform: (layerId: number, edit: TransformEdit) => void;
   /** Selected grid cell (row-major index) for a FrameGrid layer, or null. */
   selectedCell: number | null;
   /** The selected cell's zoom at the playhead (for the slider readout). */
   cellZoomNow: number | null;
+  /** The selected cell's image pan at the playhead (for the slider readouts). */
+  cellPanNow: { x: number; y: number } | null;
   /** Whether the selected cell is a merged block (spans > 1). */
   cellMerged: boolean;
   /** The selected cell's resolved effect stack (at the playhead). */
@@ -1766,6 +1922,7 @@ interface Props {
   onSetCellImage: (layerId: number, cell: number) => void;
   onClearCellImage: (layerId: number, cell: number) => void;
   onSetCellZoom: (layerId: number, cell: number, zoom: number) => void;
+  onSetCellPan: (layerId: number, cell: number, x: number, y: number) => void;
   cellTransitionIn: Transition | null;
   cellTransitionOut: Transition | null;
   onSetCellTransition: (
@@ -1837,12 +1994,14 @@ function FrameGridSection({
   hasImage,
   selectedCell,
   cellZoomNow,
+  cellPanNow,
   cellMerged,
   cellEffects,
   constrain,
   onSetCellImage,
   onClearCellImage,
   onSetCellZoom,
+  onSetCellPan,
   cellTransitionIn,
   cellTransitionOut,
   onSetCellTransition,
@@ -1882,12 +2041,14 @@ function FrameGridSection({
   hasImage: boolean;
   selectedCell: number | null;
   cellZoomNow: number | null;
+  cellPanNow: { x: number; y: number } | null;
   cellMerged: boolean;
   cellEffects: ResolvedEffect[];
   constrain: "freeform" | "rails";
   onSetCellImage: (layerId: number, cell: number) => void;
   onClearCellImage: (layerId: number, cell: number) => void;
   onSetCellZoom: (layerId: number, cell: number, zoom: number) => void;
+  onSetCellPan: (layerId: number, cell: number, x: number, y: number) => void;
   cellTransitionIn: Transition | null;
   cellTransitionOut: Transition | null;
   onSetCellTransition: (
@@ -1953,9 +2114,9 @@ function FrameGridSection({
   const cellLabel =
     selectedCell != null ? `row ${Math.floor(selectedCell / cols) + 1}, col ${(selectedCell % cols) + 1}` : null;
   const zoom = cellZoomNow ?? 1;
+  const pan = cellPanNow ?? { x: 0, y: 0 };
   return (
-    <div className="insp-body">
-      <div className="insp-sep">Multi-frame grid</div>
+    <Section title="Multi-frame grid">
       <p className="insp-hint">
         {cols}×{rows} grid. Click a cell to set its image; drag the blue vertex handles to warp.
         Shift-click handles to select several and drag them together.
@@ -2048,17 +2209,15 @@ function FrameGridSection({
             )}
           </div>
           {hasImage && (
-            <label className="insp-field" style={{ marginTop: 8 }}>
-              Zoom {zoom.toFixed(2)}×
-              <input
-                type="range"
-                min={0.2}
-                max={4}
-                step={0.05}
-                value={zoom}
-                onChange={(e) => onSetCellZoom(layerId, selectedCell, Number(e.target.value))}
-              />
-            </label>
+            <>
+              {effSlider("Zoom", zoom, 0.2, 4, 0.05, (v) => onSetCellZoom(layerId, selectedCell, v))}
+              {effSlider("Position X", pan.x, -1, 1, 0.01, (v) =>
+                onSetCellPan(layerId, selectedCell, v, pan.y)
+              )}
+              {effSlider("Position Y", pan.y, -1, 1, 0.01, (v) =>
+                onSetCellPan(layerId, selectedCell, pan.x, v)
+              )}
+            </>
           )}
           <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
             <button className="insp-btn" onClick={() => onMergeCell(layerId, selectedCell, "right")}>
@@ -2113,7 +2272,7 @@ function FrameGridSection({
         onSetLinkedMember={onSetLinkedMember}
         onUnlinkCell={onUnlinkCell}
       />
-    </div>
+    </Section>
   );
 }
 
@@ -2144,36 +2303,35 @@ function CellTransitionsSection({
     { slot: "in", tr: tin },
     { slot: "out", tr: tout },
   ];
+  const [openSlots, setOpenSlots] = useState<Record<string, boolean>>({});
   return (
-    <div className="insp-body">
-      <div className="insp-sep">Cell transition</div>
+    <Section title="Cell transition">
       {slots.map(({ slot, tr }) => {
         const durMs = tr?.durMs ?? 800;
         const direction = tr?.direction ?? 0;
         const paramsJson = tr?.params ?? null;
         const value = tr?.engine ?? LEGACY_TO_ENGINE[tr?.kind ?? ""] ?? "none";
+        const open = openSlots[slot] ?? tr != null;
+        const curLabel = value === "none" ? "None" : getTransitionMeta(value)?.label ?? value;
         return (
-          <div key={slot} className="insp-field">
-            <span style={{ textTransform: "capitalize" }}>{slot}</span>
-            <select
+          <div key={slot} className={"insp-disc" + (open ? " open" : "")}>
+            <button className="insp-disc-head" onClick={() => setOpenSlots((s) => ({ ...s, [slot]: !open }))}>
+              <span className="effect-caret">{open ? "▾" : "▸"}</span>
+              <span className="insp-disc-title" style={{ textTransform: "capitalize" }}>{slot}</span>
+              <span className="insp-disc-badge">{curLabel}</span>
+            </button>
+            {open && (
+            <div className="insp-field">
+            <SearchSelect
               value={value}
-              onChange={(e) => {
-                const id = e.target.value;
+              favKey="transitions"
+              placeholder="None"
+              groups={TRANSITION_SEL_GROUPS}
+              onChange={(id) => {
                 if (id === "none") onSet(layerId, cell, slot, durMs, direction, null, null);
                 else onSet(layerId, cell, slot, durMs, direction, id, id === value ? paramsJson : null);
               }}
-            >
-              <option value="none">None</option>
-              {TRANSITION_GROUPS.map((g) => (
-                <optgroup key={g.category} label={g.category}>
-                  {g.items.map((it) => (
-                    <option key={it.id} value={it.id}>
-                      {it.label}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
+            />
             {value !== "none" && (
               <>
                 <div className="row2">
@@ -2204,10 +2362,12 @@ function CellTransitionsSection({
                 />
               </>
             )}
+            </div>
+            )}
           </div>
         );
       })}
-    </div>
+    </Section>
   );
 }
 
@@ -2236,9 +2396,9 @@ function AllCellsTransitionsSection({
     { slot: "in", tr: tin },
     { slot: "out", tr: tout },
   ];
+  const [openSlots, setOpenSlots] = useState<Record<string, boolean>>({});
   return (
-    <div className="insp-body">
-      <div className="insp-sep">Transitions — all cells</div>
+    <Section title="Transitions — all cells">
       <p className="insp-hint" style={{ margin: 0 }}>
         Applies the chosen transition to every image in the grid.
       </p>
@@ -2247,28 +2407,27 @@ function AllCellsTransitionsSection({
         const direction = tr?.direction ?? 0;
         const paramsJson = tr?.params ?? null;
         const value = tr?.engine ?? LEGACY_TO_ENGINE[tr?.kind ?? ""] ?? "none";
+        const open = openSlots[slot] ?? tr != null;
+        const curLabel = value === "none" ? "None" : getTransitionMeta(value)?.label ?? value;
         return (
-          <div key={slot} className="insp-field">
-            <span style={{ textTransform: "capitalize" }}>{slot}</span>
-            <select
+          <div key={slot} className={"insp-disc" + (open ? " open" : "")}>
+            <button className="insp-disc-head" onClick={() => setOpenSlots((s) => ({ ...s, [slot]: !open }))}>
+              <span className="effect-caret">{open ? "▾" : "▸"}</span>
+              <span className="insp-disc-title" style={{ textTransform: "capitalize" }}>{slot}</span>
+              <span className="insp-disc-badge">{curLabel}</span>
+            </button>
+            {open && (
+            <div className="insp-field">
+            <SearchSelect
               value={value}
-              onChange={(e) => {
-                const id = e.target.value;
+              favKey="transitions"
+              placeholder="None"
+              groups={TRANSITION_SEL_GROUPS}
+              onChange={(id) => {
                 if (id === "none") onSet(layerId, slot, durMs, direction, null, null);
                 else onSet(layerId, slot, durMs, direction, id, id === value ? paramsJson : null);
               }}
-            >
-              <option value="none">None</option>
-              {TRANSITION_GROUPS.map((g) => (
-                <optgroup key={g.category} label={g.category}>
-                  {g.items.map((it) => (
-                    <option key={it.id} value={it.id}>
-                      {it.label}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
+            />
             {value !== "none" && (
               <>
                 <div className="row2">
@@ -2299,10 +2458,12 @@ function AllCellsTransitionsSection({
                 />
               </>
             )}
+            </div>
+            )}
           </div>
         );
       })}
-    </div>
+    </Section>
   );
 }
 
@@ -2345,9 +2506,10 @@ function LinkedEffectsSection({
   onUnlinkCell: (layerId: number, groupId: number, cell: number) => void;
 }) {
   const allCells = Array.from({ length: rows * cols }, (_, i) => i);
+  // Accordion open index, per linked group id.
+  const [openLinked, setOpenLinked] = useState<Record<number, number | null>>({});
   return (
-    <div className="insp-body">
-      <div className="insp-sep">Linked effects (shared)</div>
+    <Section title="Linked effects (shared)" defaultOpen={false}>
       <label className="insp-field">
         Link a new effect across all cells
         <select
@@ -2400,6 +2562,10 @@ function LinkedEffectsSection({
               layerId={layerId}
               index={i}
               eff={eff}
+              open={openLinked[g.id] === i}
+              onToggle={(idx) =>
+                setOpenLinked((s) => ({ ...s, [g.id]: s[g.id] === idx ? null : idx }))
+              }
               onRemove={(lid, idx) => onRemoveLinkedEffectItem(lid, g.id, idx)}
               onKey={(lid, idx, param, value, seed) => onKeyLinkedEffect(lid, g.id, idx, param, value, seed)}
               onSetWipeStatic={(lid, idx, angle, invert) => onSetLinkedWipeStatic(lid, g.id, idx, angle, invert)}
@@ -2436,7 +2602,7 @@ function LinkedEffectsSection({
           )}
         </div>
       ))}
-    </div>
+    </Section>
   );
 }
 
@@ -2483,11 +2649,13 @@ export default function Inspector({
   onSetLayerTransition,
   selectedCell,
   cellZoomNow,
+  cellPanNow,
   cellMerged,
   cellEffects,
   onSetCellImage,
   onClearCellImage,
   onSetCellZoom,
+  onSetCellPan,
   cellTransitionIn,
   cellTransitionOut,
   onSetCellTransition,
@@ -2520,6 +2688,8 @@ export default function Inspector({
   onRemoveLinkedGroup,
   onSetLinkedMember,
   onUnlinkCell,
+  transformNow,
+  onCommitTransform,
 }: Props) {
   const decalControls = layer && (layer.kind.kind === "image" || layer.kind.kind === "text") && (
     <DecalControls
@@ -2539,6 +2709,9 @@ export default function Inspector({
     <aside className="inspector">
       <div className="panel-title">{layer ? layer.name : "Inspector"}</div>
       {!layer && <span className="muted">Select a layer to edit it.</span>}
+      {layer && transformNow && (
+        <TransformSection layerId={layer.id} tr={transformNow} onCommit={onCommitTransform} />
+      )}
       {layer && layer.kind.kind === "text" && (
         <TextInspector
           layerId={layer.id}
@@ -2609,14 +2782,13 @@ export default function Inspector({
       )}
       {layer && layer.kind.kind === "adjustment" && (
         <>
-          <div className="insp-body">
-            <div className="insp-sep">Adjustment layer</div>
+          <Section title="Adjustment layer">
             <p className="insp-hint">
               Lights every layer <b>below</b> this one in the stack, over its time span.
               Reorder it in the timeline to change what it affects. Only the{" "}
               <b>Shiny clouds</b> effect renders on adjustment layers.
             </p>
-          </div>
+          </Section>
           <EffectsSection
             layerId={layer.id}
             effects={resolvedEffects}
@@ -2643,6 +2815,7 @@ export default function Inspector({
           hasBackground={hasBackground}
           selectedCell={selectedCell}
           cellZoomNow={cellZoomNow}
+          cellPanNow={cellPanNow}
           cellMerged={cellMerged}
           cellEffects={cellEffects}
           constrain={layer.kind.constrain}
@@ -2655,6 +2828,7 @@ export default function Inspector({
           onSetCellImage={onSetCellImage}
           onClearCellImage={onClearCellImage}
           onSetCellZoom={onSetCellZoom}
+          onSetCellPan={onSetCellPan}
           onSetCellTransition={onSetCellTransition}
           onSetAllCellsTransition={onSetAllCellsTransition}
           onSetGridConstrain={onSetGridConstrain}

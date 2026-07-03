@@ -164,5 +164,5 @@ export function renderGpuFx(src: Texture | null, w: number, h: number, p: GpuFxP
  *  displacement/darkening effects (Heat Haze 4, Vignette 6) need the underlying
  *  pixels and are per-image only. */
 export function gpuFxIsOverlay(effect: number): boolean {
-  return effect !== 4 && effect !== 6;
+  return effect !== 4 && effect !== 6 && effect !== 10;
 }

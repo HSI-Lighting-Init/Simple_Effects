@@ -113,6 +113,9 @@ pub struct ResolvedFrameCell {
     pub fit: FitMode,
     /// Zoom sampled at this time (for the inspector's slider readout).
     pub zoom: f32,
+    /// Image pan within the cell (fractions of the cell) sampled at this time.
+    pub pan_x: f32,
+    pub pan_y: f32,
     /// Grid position + merge spans (so the frontend can map a cell back to its
     /// lattice vertices for live-warp, and know its size).
     pub row: u32,
@@ -193,6 +196,8 @@ fn resolve_frame_grid(
                     img_h: 0.0,
                     fit: FitMode::Cover,
                     zoom: 1.0,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
                     row: r,
                     col: c,
                     row_span: 1,
@@ -210,16 +215,28 @@ fn resolve_frame_grid(
             let br = pts[((r + rs) * vcols + c + cs) as usize];
             let bl = pts[((r + rs) * vcols + c) as usize];
             let cell = cells.get(idx);
-            let (src, img_w, img_h, fit, zoom, mut effects): (_, _, _, _, _, Vec<ResolvedEffect>) = match cell {
+            #[allow(clippy::type_complexity)]
+            let (src, img_w, img_h, fit, zoom, pan_x, pan_y, mut effects): (
+                _,
+                _,
+                _,
+                _,
+                _,
+                f32,
+                f32,
+                Vec<ResolvedEffect>,
+            ) = match cell {
                 Some(cell) => (
                     cell.src.clone(),
                     cell.img_w as f32,
                     cell.img_h as f32,
                     cell.fit,
                     sample_track(&cell.zoom, t_ms),
+                    sample_track(&cell.pan_x, t_ms),
+                    sample_track(&cell.pan_y, t_ms),
                     cell.effects.iter().map(|e| resolve_effect(e, t_ms)).collect(),
                 ),
-                None => (None, 0.0, 0.0, FitMode::Cover, 1.0, Vec::new()),
+                None => (None, 0.0, 0.0, FitMode::Cover, 1.0, 0.0, 0.0, Vec::new()),
             };
             // Fold in every linked group this cell belongs to (after its local stack).
             for g in &resolved_linked {
@@ -230,10 +247,18 @@ fn resolve_frame_grid(
             let cell_transition = cell.and_then(|c| {
                 resolve_transition_windows(&c.transition_in, &c.transition_out, layer_start, layer_end, t_ms)
             });
-            // Fit against the merged block's aspect, then apply zoom.
+            // Fit against the merged block's aspect, then apply zoom, then pan the
+            // UV window (in fractions of the cell) to reposition the image.
             let block_w = cs as f32 * cell_w;
             let block_h = rs as f32 * cell_h;
-            let (u0, v0, u1, v1) = zoom_uvs(fit_uvs(fit, block_w, block_h, img_w, img_h), zoom);
+            let (mut u0, mut v0, mut u1, mut v1) =
+                zoom_uvs(fit_uvs(fit, block_w, block_h, img_w, img_h), zoom);
+            let pw = u1 - u0;
+            let ph = v1 - v0;
+            u0 -= pan_x * pw;
+            u1 -= pan_x * pw;
+            v0 -= pan_y * ph;
+            v1 -= pan_y * ph;
             let corners = vec![
                 QuadVertex { hx: tl.x, hy: tl.y, hw: 1.0, u: u0, v: v0 },
                 QuadVertex { hx: tr.x, hy: tr.y, hw: 1.0, u: u1, v: v0 },
@@ -247,6 +272,8 @@ fn resolve_frame_grid(
                 img_h,
                 fit,
                 zoom,
+                pan_x,
+                pan_y,
                 row: r,
                 col: c,
                 row_span: rs,

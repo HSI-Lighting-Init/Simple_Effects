@@ -1,9 +1,12 @@
 // The timeline. One track per layer (top layer on top), so every image you add
 // gets its own row. Blocks show each layer's [startMs, endMs] range; diamonds
 // mark keyframes; the playhead is draggable to scrub.
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import type { Project } from "../bindings/Project";
 import type { Layer } from "../bindings/Layer";
+import type { FrameCell } from "../bindings/FrameCell";
+import type { Effect } from "../bindings/Effect";
+import type { Track } from "../bindings/Track";
 
 /** Smallest range a layer block may be trimmed to (ms) — matches the Rust floor. */
 const MIN_SPAN_MS = 50;
@@ -48,14 +51,10 @@ function kindColor(l: Layer): string {
 
 /** Unique keyframe times across a layer's transform tracks (+ text decompose,
  *  + 3D-shape rotations). */
-function keyframeTimes(l: Layer): number[] {
-  const t = l.transform;
-  const tracks = [t.x, t.y, t.scaleX, t.scaleY, t.rotation, t.opacity];
-  if (l.kind.kind === "text") tracks.push(l.kind.decompose);
-  if (l.kind.kind === "shape3d")
-    tracks.push(l.kind.rotation_x, l.kind.rotation_y, l.kind.rotation_z);
-  if (l.attach) tracks.push(l.attach.u, l.attach.v, l.attach.scale, l.attach.rotation);
-  for (const e of l.effects) {
+/** Push every keyframeable `Track` of an effect stack onto `tracks`. Shared by
+ *  layer-level rows and per-cell child rows. */
+function pushEffectTracks(effects: Effect[], tracks: Track[]) {
+  for (const e of effects) {
     if (e.kind === "blur") tracks.push(e.radius);
     else if (e.kind === "hue") tracks.push(e.degrees);
     else if (e.kind === "wipe") tracks.push(e.position, e.softness);
@@ -65,6 +64,26 @@ function keyframeTimes(l: Layer): number[] {
       tracks.push(e.intensity, e.scale, e.speed, e.detail, e.softness, e.extra, e.opacity);
     else tracks.push(e.amount);
   }
+}
+
+function keyframeTimes(l: Layer): number[] {
+  const t = l.transform;
+  const tracks = [t.x, t.y, t.scaleX, t.scaleY, t.rotation, t.opacity];
+  if (l.kind.kind === "text") tracks.push(l.kind.decompose);
+  if (l.kind.kind === "shape3d")
+    tracks.push(l.kind.rotation_x, l.kind.rotation_y, l.kind.rotation_z);
+  if (l.attach) tracks.push(l.attach.u, l.attach.v, l.attach.scale, l.attach.rotation);
+  pushEffectTracks(l.effects, tracks);
+  const set = new Set<number>();
+  for (const tr of tracks) for (const k of tr.keys) set.add(k.timeMs);
+  return [...set];
+}
+
+/** Unique keyframe times for one grid cell (its zoom + effect stack) — drives the
+ *  cell's child-timeline row. */
+function cellKeyTimes(cell: FrameCell): number[] {
+  const tracks: Track[] = [cell.zoom, cell.panX, cell.panY];
+  pushEffectTracks(cell.effects, tracks);
   const set = new Set<number>();
   for (const tr of tracks) for (const k of tr.keys) set.add(k.timeMs);
   return [...set];
@@ -87,6 +106,16 @@ interface Props {
   /** Retime a keyframe (drag a diamond): move all keys at `fromMs` to `toMs`. */
   onMoveKeyframe: (id: number, fromMs: number, toMs: number) => void;
   onLayerContextMenu: (id: number, x: number, y: number) => void;
+  /** The selected grid cell (row-major) of the selected layer, if any. */
+  selectedCell: number | null;
+  /** Select a grid cell (click its child-timeline row). */
+  onSelectCell: (layerId: number, cell: number) => void;
+  /** Right-click a grid cell's row → its effect copy/paste menu. */
+  onCellContextMenu: (layerId: number, cell: number, x: number, y: number) => void;
+  /** Retime a grid cell's keyframe (drag a diamond in its child row). */
+  onMoveCellKeyframe: (layerId: number, cell: number, fromMs: number, toMs: number) => void;
+  /** Delete a grid cell's keyframe (click a diamond in its child row). */
+  onDeleteCellKeyframe: (layerId: number, cell: number, tMs: number) => void;
   onSetLayerRange: (id: number, startMs: number, endMs: number) => void;
   /** Commit a new z-order (full list of layer ids, bottom-first). */
   onReorder: (order: number[]) => void;
@@ -111,6 +140,11 @@ export default function Timeline({
   onDeleteKeyframe,
   onMoveKeyframe,
   onLayerContextMenu,
+  selectedCell,
+  onSelectCell,
+  onCellContextMenu,
+  onMoveCellKeyframe,
+  onDeleteCellKeyframe,
   onSetLayerRange,
   onReorder,
   razor,
@@ -122,8 +156,23 @@ export default function Timeline({
   // Layer-row reorder (drag a layer onto the one you want it under).
   const [rowDragId, setRowDragId] = useState<number | null>(null);
   const [rowOverId, setRowOverId] = useState<number | null>(null);
-  // Keyframe-diamond drag (retime). `fromMs` identifies which diamond is moving.
-  const [kfDrag, setKfDrag] = useState<{ id: number; fromMs: number; toMs: number } | null>(null);
+  // Keyframe-diamond drag (retime). `fromMs` identifies which diamond is moving;
+  // `cell` (row-major) is set when dragging a per-cell child-row diamond.
+  const [kfDrag, setKfDrag] = useState<
+    { id: number; cell?: number; fromMs: number; toMs: number } | null
+  >(null);
+  // Grid layers whose per-cell child rows are expanded in the timeline.
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  // Auto-expand a grid's cell rows the first time it's selected (discoverable);
+  // the chevron can still collapse it afterwards. Idempotent, so it won't fight
+  // a manual collapse until the selection changes again.
+  useEffect(() => {
+    if (selectedId == null) return;
+    const l = project.layers.find((x) => x.id === selectedId);
+    if (l?.kind.kind !== "framegrid") return;
+    setExpanded((prev) => (prev.has(selectedId) ? prev : new Set(prev).add(selectedId)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
   // Rubber-band (marquee) selection box, in tracks-inner content px. Non-null
   // only while dragging across empty track space.
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
@@ -403,18 +452,55 @@ export default function Timeline({
     window.addEventListener("mouseup", up);
   };
 
+  // Drag/click a diamond in a grid cell's child row (retime on drag, delete on
+  // click). Positions map over the full tracks width like the playhead, so cell
+  // keys sit at their absolute comp time.
+  const startCellKfDrag = (e: React.MouseEvent, layerId: number, cell: number, tm: number) => {
+    e.stopPropagation();
+    const el = tracksRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const startX = e.clientX;
+    let toMs = tm;
+    let moved = false;
+    const move = (ev: MouseEvent) => {
+      if (!moved && Math.abs(ev.clientX - startX) > 3) moved = true;
+      const pct = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+      toMs = Math.round(pct * dur);
+      if (moved) setKfDrag({ id: layerId, cell, fromMs: tm, toMs });
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      if (moved && toMs !== tm) onMoveCellKeyframe(layerId, cell, tm, toMs);
+      else if (!moved) onDeleteCellKeyframe(layerId, cell, tm);
+      setKfDrag(null);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
   const seekFromX = (clientX: number) => {
     const el = tracksRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
     const pct = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
     const raw = pct * dur;
-    // Snap the playhead onto layer edges (and comp bounds) — the mirror of how
-    // layers snap onto the playhead when they're dragged.
+    // Snap the playhead onto keyframes, layer edges, and comp bounds — the mirror
+    // of how layers snap onto the playhead when they're dragged. Keyframes are the
+    // tightest target so scrubbing lands exactly on a diamond.
     const thresholdMs = (7 / (r.width || 1)) * dur;
+    const kfTargets = project.layers.flatMap((l) => {
+      const times = keyframeTimes(l);
+      if (l.kind.kind === "framegrid") {
+        for (const cell of l.kind.cells) times.push(...cellKeyTimes(cell));
+      }
+      return times;
+    });
     let best = raw;
     let bestD = thresholdMs;
-    for (const tgt of [0, dur, ...project.layers.flatMap((l) => [l.startMs, l.endMs])]) {
+    // Keyframes first so they win ties against a coincident layer edge.
+    for (const tgt of [...kfTargets, 0, dur, ...project.layers.flatMap((l) => [l.startMs, l.endMs])]) {
       const d = Math.abs(raw - tgt);
       if (d < bestD) {
         bestD = d;
@@ -423,6 +509,37 @@ export default function Timeline({
     }
     onSeek(Math.round(best));
   };
+
+  // A grid layer shows its per-cell child rows while it's in the expanded set.
+  // Selecting a grid auto-expands it (below), but the chevron can then collapse
+  // it back — even while it stays selected.
+  const gridExpanded = (l: Layer) => l.kind.kind === "framegrid" && expanded.has(l.id);
+
+  // Which cells (row-major) of a grid get a child row: the ones carrying their
+  // own effects or keyframes (the ones you'd want to retime).
+  const gridChildRows = (l: Layer): { cell: number; label: string; times: number[] }[] => {
+    if (l.kind.kind !== "framegrid") return [];
+    const cols = l.kind.cols || 1;
+    const out: { cell: number; label: string; times: number[] }[] = [];
+    l.kind.cells.forEach((c, i) => {
+      const times = cellKeyTimes(c);
+      if (c.effects.length === 0 && times.length === 0) return;
+      out.push({
+        cell: i,
+        label: `Cell #${i + 1} (r${Math.floor(i / cols) + 1} c${(i % cols) + 1})`,
+        times,
+      });
+    });
+    return out;
+  };
+
+  const toggleExpanded = (id: number) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   const onMouseDown = (e: React.MouseEvent) => {
     // Prevent the browser from starting a text selection on the ruler's tick
@@ -536,9 +653,13 @@ export default function Timeline({
 
         <div className="tl-labels" onWheel={onLabelsWheel}>
           <div className="tl-labels-inner" ref={labelsInnerRef}>
-          {layers.map((l) => (
+          {layers.map((l) => {
+            const childRows = gridChildRows(l);
+            const showChildren = gridExpanded(l);
+            const isGrid = l.kind.kind === "framegrid";
+            return (
+            <Fragment key={l.id}>
             <div
-              key={l.id}
               data-layer-id={l.id}
               className={
                 "tl-label" +
@@ -563,14 +684,27 @@ export default function Timeline({
                 onLayerContextMenu(l.id, e.clientX, e.clientY);
               }}
             >
-              <button
-                className={"dot" + (l.hidden ? "" : " on")}
-                title={l.hidden ? "Show layer" : "Hide layer"}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onToggleHidden(l.id);
-                }}
-              />
+              {isGrid && childRows.length > 0 ? (
+                <button
+                  className="tl-expand"
+                  title={showChildren ? "Hide cell rows" : "Show cell rows"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleExpanded(l.id);
+                  }}
+                >
+                  {showChildren ? "▾" : "▸"}
+                </button>
+              ) : (
+                <button
+                  className={"dot" + (l.hidden ? "" : " on")}
+                  title={l.hidden ? "Show layer" : "Hide layer"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleHidden(l.id);
+                  }}
+                />
+              )}
               <span className="tl-label-name">{l.name}</span>
               <span className="tl-label-kind">{l.kind.kind}</span>
               <button
@@ -584,7 +718,32 @@ export default function Timeline({
                 ✕
               </button>
             </div>
-          ))}
+            {showChildren &&
+              childRows.map((cr) => (
+                <div
+                  key={`c${cr.cell}`}
+                  className={
+                    "tl-label tl-child-label" +
+                    (selectedCell === cr.cell && l.id === selectedId ? " selected" : "")
+                  }
+                  title="Click to select this cell · right-click to copy/paste its effects"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectCell(l.id, cr.cell);
+                  }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.nativeEvent.stopPropagation();
+                    onCellContextMenu(l.id, cr.cell, e.clientX, e.clientY);
+                  }}
+                >
+                  <span className="tl-child-tick">└</span>
+                  <span className="tl-label-name">{cr.label}</span>
+                </div>
+              ))}
+            </Fragment>
+            );
+          })}
           </div>
         </div>
 
@@ -622,8 +781,11 @@ export default function Timeline({
             const left = (sMs / dur) * 100;
             const width = ((eMs - sMs) / dur) * 100;
             const span = Math.max(1, eMs - sMs);
+            const childRows = gridChildRows(l);
+            const showChildren = gridExpanded(l);
             return (
-              <div key={l.id} className={"tl-track" + (l.hidden ? " hidden" : "")}>
+              <Fragment key={l.id}>
+              <div className={"tl-track" + (l.hidden ? " hidden" : "")}>
                 <div
                   data-lid={l.id}
                   className={"tl-block" + (selectedIds.includes(l.id) ? " selected" : "")}
@@ -650,15 +812,13 @@ export default function Timeline({
                     onMouseDown={(e) => startBlockDrag(e, l, "end")}
                   />
                   {keyframeTimes(l).map((tm, i) => {
-                    const effTm =
-                      kfDrag && kfDrag.id === l.id && kfDrag.fromMs === tm ? kfDrag.toMs : tm;
+                    const dragging =
+                      kfDrag != null && kfDrag.id === l.id && kfDrag.cell == null && kfDrag.fromMs === tm;
+                    const effTm = dragging ? kfDrag!.toMs : tm;
                     return (
                       <button
                         key={i}
-                        className={
-                          "tl-kf" +
-                          (kfDrag && kfDrag.id === l.id && kfDrag.fromMs === tm ? " dragging" : "")
-                        }
+                        className={"tl-kf" + (dragging ? " dragging" : "")}
                         title="Drag to retime · click to delete"
                         style={{ left: `${((effTm - sMs) / span) * 100}%` }}
                         onMouseDown={(e) => startKfDrag(e, l, tm)}
@@ -667,6 +827,47 @@ export default function Timeline({
                   })}
                 </div>
               </div>
+              {showChildren &&
+                childRows.map((cr) => (
+                  <div
+                    key={`c${cr.cell}`}
+                    className={
+                      "tl-track tl-child-track" +
+                      (selectedCell === cr.cell && l.id === selectedId ? " selected" : "")
+                    }
+                    onMouseDown={(e) => {
+                      // A press on empty child-row space selects the cell (but not
+                      // on a diamond — that starts a keyframe drag).
+                      if (!(e.target as HTMLElement).closest(".tl-kf")) onSelectCell(l.id, cr.cell);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.nativeEvent.stopPropagation();
+                      onCellContextMenu(l.id, cr.cell, e.clientX, e.clientY);
+                    }}
+                  >
+                    {/* Faint bar marking the grid layer's span for context. */}
+                    <div className="tl-child-span" style={{ left: `${left}%`, width: `${width}%` }} />
+                    {cr.times.map((tm, i) => {
+                      const dragging =
+                        kfDrag != null &&
+                        kfDrag.id === l.id &&
+                        kfDrag.cell === cr.cell &&
+                        kfDrag.fromMs === tm;
+                      const effTm = dragging ? kfDrag!.toMs : tm;
+                      return (
+                        <button
+                          key={i}
+                          className={"tl-kf tl-cell-kf" + (dragging ? " dragging" : "")}
+                          title="Drag to retime · click to delete"
+                          style={{ left: `${(effTm / dur) * 100}%` }}
+                          onMouseDown={(e) => startCellKfDrag(e, l.id, cr.cell, tm)}
+                        />
+                      );
+                    })}
+                  </div>
+                ))}
+              </Fragment>
             );
           })}
             <div className="tl-playhead" style={{ left: `${(time / dur) * 100}%` }} />

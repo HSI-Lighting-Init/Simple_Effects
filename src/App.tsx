@@ -27,6 +27,7 @@ import TransitionsDemo from "./components/TransitionsDemo";
 import {
   addEffect,
   addFrameGrid,
+  filterExistingFiles,
   addImageLayer,
   addVideoLayer,
   addAudioLayer,
@@ -43,6 +44,7 @@ import {
   setCellTransition,
   setAllCellsTransition,
   setCellZoom,
+  setCellPan,
   setGridVertices,
   setGridConstrain,
   setGridLineWidth,
@@ -56,6 +58,10 @@ import {
   setCellWipeStatic,
   setCellShineStatic,
   setCellGpuFxStatic,
+  pasteCellEffects,
+  pasteCellEffectsAll,
+  moveCellKeyframesAt,
+  deleteCellKeyframesAt,
   linkEffect,
   addLinkedEffect,
   removeLinkedEffectItem,
@@ -148,6 +154,7 @@ import type { TransformEdit } from "./bindings/TransformEdit";
 import type { LetterAnimation } from "./bindings/LetterAnimation";
 import type { Font } from "./bindings/Font";
 import type { Rgba } from "./bindings/Rgba";
+import type { Effect } from "./bindings/Effect";
 import type { SurfaceShape } from "./bindings/SurfaceShape";
 import type { TextStyle } from "./bindings/TextStyle";
 import type { TextAnimator } from "./bindings/TextAnimator";
@@ -178,6 +185,9 @@ const SEFX_FILTER = [{ name: "Simple Effects Project", extensions: ["sefx"] }];
 
 /** Box faces, in `box_face_basis` order (index = the `face` value). */
 const FACE_LABELS = ["Front", "Back", "Left", "Right", "Top", "Bottom"];
+
+/** localStorage key for the persisted media-bin path list. */
+const MEDIA_BIN_KEY = "sefx.mediaBin";
 
 /**
  * A pleasant 3/4 view `[rotationX, rotationY]` (degrees) that brings each box
@@ -227,7 +237,16 @@ export default function App() {
   // empty). The Rust side swaps the editing scope; this is the UI trail.
   const [groupPath, setGroupPath] = useState<{ id: number; name: string }[]>([]);
   // The media bin (imported image/video/audio paths, not necessarily placed yet).
-  const [media, setMedia] = useState<string[]>([]);
+  // Seeded synchronously from localStorage so the bin survives app restarts; a
+  // startup effect then prunes any files that no longer exist and loads thumbs.
+  const [media, setMedia] = useState<string[]>(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(MEDIA_BIN_KEY) || "[]");
+      return Array.isArray(v) ? (v as string[]).filter((p) => typeof p === "string") : [];
+    } catch {
+      return [];
+    }
+  });
   // Thumbnails for non-image media (video poster frames), path → data URL.
   const [mediaThumbs, setMediaThumbs] = useState<Record<string, string>>({});
   // True while an OS file drag is hovering the window (shows the drop overlay).
@@ -242,7 +261,7 @@ export default function App() {
   // Multi-frame grid creation dialog (null = closed).
   const [gridDialog, setGridDialog] = useState<{ rows: number; cols: number } | null>(null);
   const [ctxMenu, setCtxMenu] = useState<
-    { x: number; y: number; shapeId?: number; layerId?: number } | null
+    { x: number; y: number; shapeId?: number; layerId?: number; cell?: number } | null
   >(null);
   const [exporting, setExporting] = useState(false);
   const [exportMsg, setExportMsg] = useState("");
@@ -582,18 +601,13 @@ export default function App() {
   }, [resolveImages, applyTime, recordAction]);
 
   // --- Media bin ---------------------------------------------------------
-  // Add image/video/audio files to the bin (dedup) and load their thumbnails
-  // (image data URLs / video poster frames). Accepts dialog or OS-drop paths.
-  const addMediaPaths = useCallback(async (paths: string[]) => {
-    const supported = paths.filter((p) => mediaKind(p) != null);
-    if (!supported.length) return;
-    setMedia((cur) => {
-      const seen = new Set(cur);
-      return [...cur, ...supported.filter((p) => !seen.has(p))];
-    });
+  // Load thumbnails for a set of media paths (image data URLs / video poster
+  // frames) into the shared caches. Best-effort — a failed thumbnail just leaves
+  // the placeholder icon.
+  const loadMediaThumbs = useCallback(async (paths: string[]) => {
     const imgThumbs: Record<string, string> = {};
     const vidThumbs: Record<string, string> = {};
-    for (const src of supported) {
+    for (const src of paths) {
       const kind = mediaKind(src);
       try {
         if (kind === "image") imgThumbs[src] = await loadImageDataUrl(src);
@@ -604,8 +618,55 @@ export default function App() {
     }
     if (Object.keys(imgThumbs).length) setImages((m) => ({ ...m, ...imgThumbs }));
     if (Object.keys(vidThumbs).length) setMediaThumbs((m) => ({ ...m, ...vidThumbs }));
+  }, []);
+
+  // Add image/video/audio files to the bin (dedup) and load their thumbnails.
+  // Accepts dialog or OS-drop paths.
+  const addMediaPaths = useCallback(async (paths: string[]) => {
+    const supported = paths.filter((p) => mediaKind(p) != null);
+    if (!supported.length) return;
+    setMedia((cur) => {
+      const seen = new Set(cur);
+      return [...cur, ...supported.filter((p) => !seen.has(p))];
+    });
+    await loadMediaThumbs(supported);
     recordAction("media_import", { count: supported.length });
-  }, [recordAction]);
+  }, [loadMediaThumbs, recordAction]);
+
+  // Persist the media bin (path list) so it survives app restarts.
+  useEffect(() => {
+    try {
+      localStorage.setItem(MEDIA_BIN_KEY, JSON.stringify(media));
+    } catch {
+      /* ignore quota / unavailable */
+    }
+  }, [media]);
+
+  // On startup, prune any persisted media whose file no longer exists on disk,
+  // then load thumbnails for what remains. Runs once.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const saved = (() => {
+        try {
+          const v = JSON.parse(localStorage.getItem(MEDIA_BIN_KEY) || "[]");
+          return Array.isArray(v) ? (v as string[]) : [];
+        } catch {
+          return [];
+        }
+      })();
+      if (!saved.length) return;
+      const existing = await filterExistingFiles(saved).catch(() => saved);
+      if (cancelled) return;
+      const keep = new Set(existing);
+      setMedia((cur) => cur.filter((p) => keep.has(p)));
+      await loadMediaThumbs(existing);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onImportMedia = useCallback(async () => {
     const selected = await open({
@@ -802,6 +863,65 @@ export default function App() {
     setSelectedCell({ layerId, cell });
   }, []);
 
+  // Clipboard for a grid cell's whole effect stack (copy one cell → paste onto
+  // others). Held in state so the context menu's "Paste" enables reactively.
+  const [cellClip, setCellClip] = useState<Effect[] | null>(null);
+
+  // Copy one cell's effect stack (a deep clone so later edits don't mutate it).
+  const onCopyCellEffects = useCallback((layerId: number, cell: number) => {
+    const layer = projectRef.current?.layers.find((l) => l.id === layerId);
+    if (layer?.kind.kind !== "framegrid") return;
+    const fx = layer.kind.cells[cell]?.effects ?? [];
+    setCellClip(structuredClone(fx));
+  }, []);
+
+  // Paste the clipboard onto one cell (replaces its stack). `effects` overrides
+  // the clipboard (used for "clear" by passing []).
+  const onPasteCellEffects = useCallback(
+    async (layerId: number, cell: number, effects?: Effect[]) => {
+      const fx = effects ?? cellClip;
+      if (!fx) return;
+      const p = await pasteCellEffects(layerId, cell, structuredClone(fx));
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("paste_cell_effects", { layerId, cell });
+    },
+    [cellClip, applyTime, recordAction]
+  );
+
+  // Paste the clipboard onto every cell of the grid at once (one undo step).
+  const onPasteCellEffectsAll = useCallback(
+    async (layerId: number) => {
+      if (!cellClip) return;
+      const p = await pasteCellEffectsAll(layerId, structuredClone(cellClip), null);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("paste_cell_effects_all", { layerId });
+    },
+    [cellClip, applyTime, recordAction]
+  );
+
+  // Retime / delete a single cell's effect keyframes from its child timeline.
+  const onMoveCellKeyframe = useCallback(
+    async (layerId: number, cell: number, fromMs: number, toMs: number) => {
+      const p = await moveCellKeyframesAt(layerId, cell, fromMs, toMs);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("move_cell_keyframe", { layerId, cell, fromMs, toMs });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onDeleteCellKeyframe = useCallback(
+    async (layerId: number, cell: number, tMs: number) => {
+      const p = await deleteCellKeyframesAt(layerId, cell, tMs);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("delete_cell_keyframe", { layerId, cell, tMs });
+    },
+    [applyTime, recordAction]
+  );
+
   // Set (or replace) the selected cell's image via a file picker.
   const onSetCellImage = useCallback(
     async (layerId: number, cell: number) => {
@@ -979,6 +1099,20 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("set_cell_zoom", { layerId, cell, zoom, timeMs: t });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Pan a cell's image within its window (keyframed at the playhead).
+  const onSetCellPan = useCallback(
+    async (layerId: number, cell: number, x: number, y: number) => {
+      const t = Math.round(timeRef.current);
+      const layer = projectRef.current?.layers.find((l) => l.id === layerId);
+      const seedStart = layer ? t > layer.startMs : false;
+      const p = await setCellPan(layerId, cell, x, y, t, seedStart);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("set_cell_pan", { layerId, cell, x, y, timeMs: t });
     },
     [applyTime, recordAction]
   );
@@ -1256,6 +1390,21 @@ export default function App() {
     [applyTime, recordAction]
   );
 
+  // Drag the Flap hinge line in the preview → set its axis (pos_x), preserving
+  // the effect's other static fields.
+  const onSetFlapAxis = useCallback(
+    async (layerId: number, index: number, axis: number) => {
+      const layer = projectRef.current?.layers.find((l) => l.id === layerId);
+      const eff = layer?.effects[index];
+      if (!eff || eff.kind !== "gpuoverlay") return;
+      const p = await setGpuFxStatic(layerId, index, eff.effect, eff.tint, eff.tint2, axis, eff.posY, eff.blend);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("flap_axis", { layerId, index, axis });
+    },
+    [applyTime, recordAction]
+  );
+
   // Per-cell effect stack (multi-frame grid). Mirror the layer-effect handlers,
   // threading the selected cell index.
   const onAddCellEffect = useCallback(
@@ -1517,6 +1666,14 @@ export default function App() {
   const onLayerContextMenu = useCallback((layerId: number, x: number, y: number) => {
     setSelectedId(layerId);
     setCtxMenu({ x, y, layerId });
+  }, []);
+
+  // Right-click a grid cell (in the preview or a cell's timeline row) → open the
+  // cell effects copy/paste menu (and select that cell).
+  const onCellContextMenu = useCallback((layerId: number, cell: number, x: number, y: number) => {
+    setSelectedId(layerId);
+    setSelectedCell({ layerId, cell });
+    setCtxMenu({ x, y, layerId, cell });
   }, []);
 
   // Change the composition resolution / orientation and/or its length.
@@ -2507,6 +2664,14 @@ export default function App() {
   const decalVisible = !!selDecal && selDecal.quads.length > 0;
   // The selected layer's effect stack, sampled at the playhead (for the sliders).
   const resolvedEffects = (selectedId != null ? resolved[selectedId]?.effects : null) ?? [];
+  // The selected layer's transform sampled at the playhead (for the Inspector's
+  // numeric Position / Transform fields).
+  const transformNow = (() => {
+    const r = selectedId != null ? resolved[selectedId] : null;
+    return r
+      ? { x: r.x, y: r.y, scaleX: r.scaleX, scaleY: r.scaleY, rotation: r.rotation, opacity: r.opacity }
+      : null;
+  })();
   // The selected text layer's fill colour AT THE PLAYHEAD (so the swatch shows the
   // keyframed colour at the current time, not the static/first-key colour).
   const textColorNow = (selectedId != null ? resolved[selectedId]?.color : null) ?? null;
@@ -2521,6 +2686,9 @@ export default function App() {
       ? resolved[selectedId]?.frameGrid?.cells[selectedCell.cell] ?? null
       : null;
   const cellZoomNow = selectedResolvedCell?.zoom ?? null;
+  const cellPanNow = selectedResolvedCell
+    ? { x: selectedResolvedCell.panX, y: selectedResolvedCell.panY }
+    : null;
   const cellMerged = selectedResolvedCell
     ? selectedResolvedCell.rowSpan > 1 || selectedResolvedCell.colSpan > 1
     : false;
@@ -2877,8 +3045,10 @@ export default function App() {
             onShapeContextMenu={onShapeContextMenu}
             onLayerContextMenu={onLayerContextMenu}
             onPickCell={onPickCell}
+            onCellContextMenu={onCellContextMenu}
             onMoveVertices={onMoveVertices}
             onEnterGroup={onEnterGroup}
+            onSetFlapAxis={onSetFlapAxis}
             exporting={exporting}
             fpsOverlay={fpsOverlay}
           />
@@ -2938,9 +3108,12 @@ export default function App() {
           onClearLetterColor={onClearLetterColor}
           onDecomposeKey={onDecomposeKey}
           onSetLayerTransition={onSetLayerTransition}
+          transformNow={transformNow}
+          onCommitTransform={onCommit}
           selectedCell={selectedCell?.layerId === selectedLayer?.id ? selectedCell?.cell ?? null : null}
           cellZoomNow={cellZoomNow}
           cellMerged={cellMerged}
+          cellPanNow={cellPanNow}
           cellEffects={cellEffects}
           cellTransitionIn={selectedGridCell?.transitionIn ?? null}
           cellTransitionOut={selectedGridCell?.transitionOut ?? null}
@@ -2949,6 +3122,7 @@ export default function App() {
           onSetCellImage={onSetCellImage}
           onClearCellImage={onClearCellImage}
           onSetCellZoom={onSetCellZoom}
+          onSetCellPan={onSetCellPan}
           onSetCellTransition={onSetCellTransition}
           onSetAllCellsTransition={onSetAllCellsTransition}
           onSetGridConstrain={onSetGridConstrain}
@@ -3002,6 +3176,11 @@ export default function App() {
         onDeleteKeyframe={onDeleteKeyframe}
         onMoveKeyframe={onMoveKeyframe}
         onLayerContextMenu={onLayerContextMenu}
+        selectedCell={selectedCell?.layerId === selectedId ? selectedCell?.cell ?? null : null}
+        onSelectCell={onPickCell}
+        onCellContextMenu={onCellContextMenu}
+        onMoveCellKeyframe={onMoveCellKeyframe}
+        onDeleteCellKeyframe={onDeleteCellKeyframe}
         onSetLayerRange={onSetLayerRange}
         onReorder={onReorder}
         razor={razor}
@@ -3055,7 +3234,33 @@ export default function App() {
                       onClick: () => onInsertTextOnShape(ctxMenu.shapeId!, 0),
                     },
                   ]
-              : ctxMenu.layerId != null
+              : ctxMenu.cell != null && ctxMenu.layerId != null
+                ? [
+                    { label: `Cell #${ctxMenu.cell + 1}` },
+                    {
+                      label: "⧉ Copy cell effects",
+                      onClick: () => onCopyCellEffects(ctxMenu.layerId!, ctxMenu.cell!),
+                    },
+                    cellClip
+                      ? {
+                          label: `⧉ Paste effects (${cellClip.length})`,
+                          onClick: () => void onPasteCellEffects(ctxMenu.layerId!, ctxMenu.cell!),
+                        }
+                      : { label: "⧉ Paste effects — copy a cell first" },
+                    ...(cellClip
+                      ? [
+                          {
+                            label: "⧉ Paste to all cells",
+                            onClick: () => void onPasteCellEffectsAll(ctxMenu.layerId!),
+                          },
+                        ]
+                      : []),
+                    {
+                      label: "⊘ Clear cell effects",
+                      onClick: () => void onPasteCellEffects(ctxMenu.layerId!, ctxMenu.cell!, []),
+                    },
+                  ]
+                : ctxMenu.layerId != null
                 ? [
                     ...(project.layers.find((l) => l.id === ctxMenu.layerId)?.kind.kind === "image"
                       ? [

@@ -232,11 +232,51 @@ void main() {
     }
     // ===== 9. Smoke / Fog ==================================================
     //  softness=density(0-1), detail=complexity(2-6).
-    else {
+    else if (u_effect == 9) {
         vec2 p = uv * u_scale + vec2(t * u_speed * 0.2, t * u_speed * 0.1);
         float f = fbm(p, int(clamp(u_detail, 2.0, 6.0)), 2.0, 0.6);
         float fog = smoothstep(u_softness, u_softness + 0.2, f);
         col = u_tint; mask = fog;
+    }
+    // ===== 10. Flap (full 3D rotation about a movable hinge, 0..360) =======
+    //  detail=angle(deg, any — keyframe 0→360 for a complete spin),
+    //  extra=perspective(0..1), pos.x=axis(0..1), blend==1 = vertical hinge.
+    //  We spin the image plane about the hinge and inverse-map each screen pixel
+    //  back onto it via a real perspective ray→plane solve, so the panel turns
+    //  edge-on at 90°/270° and shows its (mirrored) back face around 180°.
+    else if (u_effect == 10) {
+        bool vert = u_blend == 1;
+        // `co` is perpendicular to the hinge (the axis is the line co = a);
+        // `pe` runs parallel to the hinge (unaffected by the rotation).
+        float co = vert ? uv.x : uv.y;
+        float pe = vert ? uv.y : uv.x;
+        float a = clamp(u_pos.x, 0.0, 1.0);
+        float ang = radians(u_detail);              // unbounded → full 360 spin
+        float ca = cos(ang), sa = sin(ang);
+        float f = mix(6.0, 1.5, clamp(u_extra, 0.0, 1.0)); // focal (smaller = stronger)
+        // Source distance from the hinge on the (un-rotated) plane, from the
+        // perspective-projected screen distance `coS`.
+        float coS = co - a;
+        float denom = ca - coS * sa / f;
+        float d = (abs(denom) < 1e-5) ? 1e6 : coS / denom;
+        float zr = d * sa;                          // rotated depth
+        float depth = f + zr;                       // >0 means in front of camera
+        float s = f / depth;                        // perspective scale at this row
+        float srcCo = a + d;
+        float srcPe = 0.5 + (pe - 0.5) / s;
+        vec2 srcUv = vert ? vec2(srcCo, srcPe) : vec2(srcPe, srcCo);
+        if (depth > 0.0 && srcUv.x >= 0.0 && srcUv.x <= 1.0 && srcUv.y >= 0.0 && srcUv.y <= 1.0) {
+            vec4 c = texture(u_inputImage, srcUv);
+            fragColor = vec4(c.rgb, c.a * u_opacity);
+        } else {
+            fragColor = vec4(0.0);
+        }
+        return;
+    }
+    // Fallback (unknown index) → passthrough.
+    else {
+        fragColor = texture(u_inputImage, uv);
+        return;
     }
 
     // --- Output ------------------------------------------------------------

@@ -8,6 +8,7 @@ import type { ShapedText } from "../bindings/ShapedText";
 import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { Font } from "../bindings/Font";
 import type { Rgba } from "../bindings/Rgba";
+import type { Effect } from "../bindings/Effect";
 import type { SurfaceShape } from "../bindings/SurfaceShape";
 import type { ConstrainMode } from "../bindings/ConstrainMode";
 import type { TextStyle } from "../bindings/TextStyle";
@@ -229,6 +230,10 @@ export const addShapeLayer = (shape: SurfaceShape) =>
 export const addFrameGrid = (rows: number, cols: number) =>
   invoke<Project>("add_frame_grid", { rows, cols });
 
+/** Keep only the paths that still exist on disk (prunes the persisted media bin). */
+export const filterExistingFiles = (paths: string[]) =>
+  invoke<string[]>("filter_existing_files", { paths });
+
 /** Set (or replace) the image in one grid cell (row-major index). */
 export const setCellImage = (layerId: number, cell: number, path: string) =>
   invoke<Project>("set_cell_image", { layerId, cell, path });
@@ -274,6 +279,17 @@ export const setCellZoom = (
   tMs: number,
   seedStart: boolean
 ) => invoke<Project>("set_cell_zoom", { layerId, cell, zoom, tMs, seedStart });
+
+/** Keyframe a grid cell's image pan (position within its cell, fractions of the
+ *  cell; 0 = centred) on both axes at the playhead. */
+export const setCellPan = (
+  layerId: number,
+  cell: number,
+  x: number,
+  y: number,
+  tMs: number,
+  seedStart: boolean
+) => invoke<Project>("set_cell_pan", { layerId, cell, x, y, tMs, seedStart });
 
 /** Move grid lattice vertices to new local positions (keyframed at the playhead).
  *  Each update is the new absolute local (x,y) for the vertex `index`. */
@@ -455,6 +471,21 @@ export const setCellGpuFxStatic = (
   posY: number,
   blend: number
 ) => invoke<Project>("set_cell_gpufx_static", { layerId, cell, index, effect, tint, tint2, posX, posY, blend });
+
+// Copy/paste a cell's whole effect stack. `pasteCellEffects` replaces one cell's
+// stack; `pasteCellEffectsAll` stamps it onto every cell (optionally skipping the
+// source cell). Retime/delete a cell's keyframes from its child timeline.
+export const pasteCellEffects = (layerId: number, cell: number, effects: Effect[]) =>
+  invoke<Project>("paste_cell_effects", { layerId, cell, effects });
+
+export const pasteCellEffectsAll = (layerId: number, effects: Effect[], except: number | null) =>
+  invoke<Project>("paste_cell_effects_all", { layerId, effects, except });
+
+export const moveCellKeyframesAt = (layerId: number, cell: number, fromMs: number, toMs: number) =>
+  invoke<Project>("move_cell_keyframes_at", { layerId, cell, fromMs, toMs });
+
+export const deleteCellKeyframesAt = (layerId: number, cell: number, tMs: number) =>
+  invoke<Project>("delete_cell_keyframes_at", { layerId, cell, tMs });
 
 // --- Linked (shared) effect groups (multi-frame grid) ---
 export const linkEffect = (layerId: number, kind: string, cells: number[]) =>

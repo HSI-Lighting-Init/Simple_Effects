@@ -14,6 +14,10 @@ export type ResolvedFrameCell = { quad: SurfaceQuad, src: string | null, imgW: n
  */
 zoom: number, 
 /**
+ * Image pan within the cell (fractions of the cell) sampled at this time.
+ */
+panX: number, panY: number, 
+/**
  * Grid position + merge spans (so the frontend can map a cell back to its
  * lattice vertices for live-warp, and know its size).
  */

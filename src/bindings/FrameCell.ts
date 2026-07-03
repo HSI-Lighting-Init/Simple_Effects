@@ -16,6 +16,12 @@ export type FrameCell = { src: string | null, imgW: number, imgH: number, fit: F
  */
 zoom: Track, 
 /**
+ * Keyframeable pan of the image within its cell, in fractions of the cell
+ * (0 = centred; ±0.5 shifts by half a cell). Lets you reposition the image
+ * inside its window — most useful together with `zoom`.
+ */
+panX: Track, panY: Track, 
+/**
  * Merge spans: how many columns/rows this cell covers (1 = a single slot).
  * A cell with span > 1 is the "master" of a merged block; the slots it
  * covers render nothing (their images are cleared on merge).

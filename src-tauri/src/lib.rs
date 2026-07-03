@@ -1334,6 +1334,13 @@ fn add_shape_layer(state: State<AppState>, shape: SurfaceShape) -> Project {
     project.clone()
 }
 
+/// Return only the paths that still exist as files on disk. Used to prune the
+/// persisted media bin on startup so moved/deleted files drop out of it.
+#[tauri::command]
+fn filter_existing_files(paths: Vec<String>) -> Vec<String> {
+    paths.into_iter().filter(|p| std::path::Path::new(p).is_file()).collect()
+}
+
 /// Add a multi-frame grid (`rows`×`cols`) centred in the comp, sized to ~70% of
 /// it. Cells start empty; the vertex lattice starts regular (no warp). Undoable.
 #[tauri::command]
@@ -1571,6 +1578,32 @@ fn set_cell_zoom(
     };
     let c = cells.get_mut(cell as usize).ok_or("cell out of range")?;
     upsert_key(&mut c.zoom, t_ms, Some(zoom.max(0.01)), seed_start, start);
+    Ok(project.clone())
+}
+
+/// Keyframe a grid cell's image pan at `t_ms` (position within its cell, in
+/// fractions of the cell; 0 = centred). Drops keys on both axes at the playhead
+/// so the pan can animate. Undoable.
+#[tauri::command]
+fn set_cell_pan(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    x: f32,
+    y: f32,
+    t_ms: u32,
+    seed_start: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let start = project.layers.iter().find(|l| l.id == layer_id).map(|l| l.start_ms).unwrap_or(0);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    let c = cells.get_mut(cell as usize).ok_or("cell out of range")?;
+    upsert_key(&mut c.pan_x, t_ms, Some(x), seed_start, start);
+    upsert_key(&mut c.pan_y, t_ms, Some(y), seed_start, start);
     Ok(project.clone())
 }
 
@@ -2238,6 +2271,117 @@ fn set_cell_gpufx_static(
     Ok(project.clone())
 }
 
+/// Replace one grid cell's whole effect stack with `effects` (the copy/paste
+/// clipboard). The pasted effects carry their own keyframes, so the target cell
+/// gets an identical, independent copy. Undoable.
+#[tauri::command]
+fn paste_cell_effects(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    effects: Vec<Effect>,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    *cell_effects_mut(layer, cell)? = effects;
+    Ok(project.clone())
+}
+
+/// Paste the same effect stack onto EVERY cell of a grid at once (except the
+/// `except` cell, if given — normally the source cell keeps its original). One
+/// undo step. Undoable.
+#[tauri::command]
+fn paste_cell_effects_all(
+    state: State<AppState>,
+    layer_id: u32,
+    effects: Vec<Effect>,
+    except: Option<u32>,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    for (i, c) in cells.iter_mut().enumerate() {
+        if except == Some(i as u32) {
+            continue;
+        }
+        c.effects = effects.clone();
+    }
+    Ok(project.clone())
+}
+
+/// Call `f` on each keyframeable `Track` belonging to ONE grid cell (its zoom +
+/// its effect stack). Used by the per-cell child-timeline keyframe editing so a
+/// retime/delete only touches that cell.
+fn for_each_cell_track_mut(
+    layer: &mut Layer,
+    cell: u32,
+    mut f: impl FnMut(&mut Track),
+) -> Result<(), String> {
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    let c = cells.get_mut(cell as usize).ok_or("cell out of range")?;
+    f(&mut c.zoom);
+    f(&mut c.pan_x);
+    f(&mut c.pan_y);
+    for e in c.effects.iter_mut() {
+        walk_effect_tracks(e, &mut f);
+    }
+    Ok(())
+}
+
+/// Retime every keyframe of one grid cell that sits at `from_ms` to `to_ms`
+/// (drag a diamond in the cell's child timeline). Undoable.
+#[tauri::command]
+fn move_cell_keyframes_at(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    from_ms: u32,
+    to_ms: u32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    let dur = project.duration_ms;
+    state.snapshot(&project);
+    let to = to_ms.min(dur);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    if to == from_ms {
+        return Ok(project.clone());
+    }
+    for_each_cell_track_mut(layer, cell, |tr| {
+        if !tr.keys.iter().any(|k| k.time_ms == from_ms) {
+            return;
+        }
+        tr.keys.retain(|k| k.time_ms != to);
+        for k in tr.keys.iter_mut() {
+            if k.time_ms == from_ms {
+                k.time_ms = to;
+            }
+        }
+        tr.keys.sort_by(|a, b| a.time_ms.cmp(&b.time_ms));
+    })?;
+    Ok(project.clone())
+}
+
+/// Delete every keyframe of one grid cell that sits at `t_ms`. Undoable.
+#[tauri::command]
+fn delete_cell_keyframes_at(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    t_ms: u32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    for_each_cell_track_mut(layer, cell, |tr| tr.keys.retain(|k| k.time_ms != t_ms))?;
+    Ok(project.clone())
+}
+
 /// Borrow a grid's linked-effect groups mutably.
 fn grid_linked_mut(layer: &mut Layer) -> Result<&mut Vec<LinkedEffectGroup>, String> {
     let LayerKind::FrameGrid { linked, .. } = &mut layer.kind else {
@@ -2576,6 +2720,8 @@ fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
             }
             for cell in cells.iter_mut() {
                 f(&mut cell.zoom);
+                f(&mut cell.pan_x);
+                f(&mut cell.pan_y);
                 for e in cell.effects.iter_mut() {
                     walk_effect_tracks(e, &mut f);
                 }
@@ -2835,6 +2981,7 @@ pub fn run() {
             set_decompose_key,
             add_shape_layer,
             add_frame_grid,
+            filter_existing_files,
             set_cell_image,
             set_grid_background,
             clear_grid_background,
@@ -2855,6 +3002,11 @@ pub fn run() {
             set_cell_wipe_static,
             set_cell_shine_static,
             set_cell_gpufx_static,
+            set_cell_pan,
+            paste_cell_effects,
+            paste_cell_effects_all,
+            move_cell_keyframes_at,
+            delete_cell_keyframes_at,
             link_effect,
             add_linked_effect,
             remove_linked_effect_item,

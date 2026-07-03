@@ -138,6 +138,7 @@ type Interaction = {
   listening: boolean;
   draggable: boolean;
   onClick: (e: Konva.KonvaEventObject<MouseEvent>) => void;
+  onDragMove: (e: Konva.KonvaEventObject<DragEvent>) => void;
   onDragEnd: () => void;
   onTransformEnd: () => void;
   onContextMenu: (e: Konva.KonvaEventObject<MouseEvent>) => void;
@@ -922,6 +923,7 @@ function GroupNode({
       opacity={r.opacity}
       listening={interaction.listening}
       draggable={interaction.draggable}
+      onDragMove={interaction.onDragMove}
       onDragEnd={interaction.onDragEnd}
       onTransformEnd={interaction.onTransformEnd}
       onContextMenu={interaction.onContextMenu}
@@ -1066,6 +1068,7 @@ function FrameGridNode({
   selected,
   screenScale,
   onPickCell,
+  onCellContextMenu,
   onMoveVertices,
 }: {
   layer: Layer;
@@ -1076,6 +1079,7 @@ function FrameGridNode({
   selected: boolean;
   screenScale: number;
   onPickCell: (layerId: number, cell: number) => void;
+  onCellContextMenu?: (layerId: number, cell: number, x: number, y: number) => void;
   onMoveVertices: (layerId: number, updates: { index: number; x: number; y: number }[]) => Promise<void>;
 }) {
   const grid = r.frameGrid;
@@ -1180,6 +1184,7 @@ function FrameGridNode({
       opacity={r.opacity}
       listening={interaction.listening}
       draggable={interaction.draggable}
+      onDragMove={interaction.onDragMove}
       onDragEnd={interaction.onDragEnd}
       onTransformEnd={interaction.onTransformEnd}
       onContextMenu={interaction.onContextMenu}
@@ -1356,6 +1361,21 @@ function FrameGridNode({
               (cell) => !cell.covered && pointInPoly(pos.x, pos.y, quadPts(cell.quad))
             );
             if (hit >= 0) onPickCell(layerId, hit);
+          }
+        }}
+        onContextMenu={(e) => {
+          // Right-click a cell → its copy/paste-effects menu. Falls through to
+          // the layer menu if the click missed a cell or no handler is wired.
+          const pos = e.target.getRelativePointerPosition?.();
+          const hit = pos
+            ? grid.cells.findIndex((cell) => !cell.covered && pointInPoly(pos.x, pos.y, quadPts(cell.quad)))
+            : -1;
+          if (onCellContextMenu && hit >= 0) {
+            e.evt.preventDefault();
+            e.cancelBubble = true; // suppress the layer-level context menu
+            onCellContextMenu(layerId, hit, e.evt.clientX, e.evt.clientY);
+          } else {
+            interaction.onContextMenu(e);
           }
         }}
       />
@@ -1897,10 +1917,14 @@ interface Props {
   onLayerContextMenu: (layerId: number, x: number, y: number) => void;
   /** A grid cell was clicked (row-major index) — selects it for image editing. */
   onPickCell: (layerId: number, cell: number) => void;
+  /** Right-click a grid cell → its effect copy/paste menu. */
+  onCellContextMenu?: (layerId: number, cell: number, x: number, y: number) => void;
   /** Commit dragged grid vertices (new local positions, keyframed at playhead). */
   onMoveVertices: (layerId: number, updates: { index: number; x: number; y: number }[]) => Promise<void>;
   /** Double-click a group (precomp) to enter it and edit its children. */
   onEnterGroup: (layerId: number) => void;
+  /** Move a Flap effect's hinge axis (drag the dashed line in the preview). */
+  onSetFlapAxis?: (layerId: number, index: number, axis: number) => void;
   exporting?: boolean;
   /** When set (during export with "show FPS" on), burn this fps value into the
    *  rendered frames as a corner label. Null = no overlay. */
@@ -2002,6 +2026,70 @@ function AdjustmentNode({
   );
 }
 
+// Draggable dashed hinge line for a Flap effect on the selected image layer.
+// Rendered in the image's own transform so it tracks position/scale/rotation.
+function FlapAxisOverlay({
+  layer,
+  r,
+  effIndex,
+  axis,
+  vertical,
+  screenScale,
+  onCommit,
+}: {
+  layer: Layer;
+  r: ResolvedLayer;
+  effIndex: number;
+  axis: number;
+  vertical: boolean;
+  screenScale: number;
+  onCommit: (layerId: number, index: number, axis: number) => void;
+}) {
+  const [live, setLive] = useState<number | null>(null);
+  if (layer.kind.kind !== "image") return null;
+  const w = layer.kind.width;
+  const h = layer.kind.height;
+  if (!w || !h) return null;
+  const a = live ?? axis;
+  const hw = w / 2;
+  const hh = h / 2;
+  const pts = vertical
+    ? [(a - 0.5) * w, -hh, (a - 0.5) * w, hh]
+    : [-hw, (a - 0.5) * h, hw, (a - 0.5) * h];
+  const hx = vertical ? (a - 0.5) * w : 0;
+  const hy = vertical ? 0 : (a - 0.5) * h;
+  const sAvg = Math.max(0.05, (Math.abs(r.scaleX) + Math.abs(r.scaleY)) / 2);
+  const rad = (8 * screenScale) / sAvg;
+  const sw = (1.6 * screenScale) / sAvg;
+  const readAxis = (n: Konva.Node) =>
+    Math.min(1, Math.max(0, vertical ? n.x() / w + 0.5 : n.y() / h + 0.5));
+  return (
+    <Group x={r.x} y={r.y} scaleX={r.scaleX} scaleY={r.scaleY} rotation={r.rotation}>
+      <Line points={pts} stroke="#ffd23c" strokeWidth={sw} dash={[sw * 4, sw * 3]} listening={false} />
+      <Circle
+        x={hx}
+        y={hy}
+        radius={rad}
+        fill="#ffd23c"
+        stroke="#1a1a1a"
+        strokeWidth={sw * 0.6}
+        draggable
+        onDragMove={(e) => {
+          const n = e.target;
+          if (vertical) n.y(0);
+          else n.x(0);
+          setLive(readAxis(n));
+        }}
+        onDragEnd={(e) => {
+          const na = readAxis(e.target);
+          setLive(null);
+          onCommit(layer.id, effIndex, na);
+        }}
+      />
+    </Group>
+  );
+}
+
 export default function Preview({
   project,
   resolved,
@@ -2020,8 +2108,10 @@ export default function Preview({
   onShapeContextMenu,
   onLayerContextMenu,
   onPickCell,
+  onCellContextMenu,
   onMoveVertices,
   onEnterGroup,
+  onSetFlapAxis,
   exporting = false,
   fpsOverlay = null,
   stageRef,
@@ -2085,6 +2175,19 @@ export default function Preview({
     if (Object.keys(edit).length) onCommit(id, edit);
   };
 
+  // While dragging a layer, snap its anchor onto the composition centre when it
+  // gets within ~8 screen px. Mutates the node position in place (no React state,
+  // so it doesn't fight Konva's own drag). Works in comp coords: the frame centre
+  // is (width/2, height/2) and every node is centre-anchored, so its x/y is where
+  // its centre lands.
+  const snapToCenter = (node: Konva.Node) => {
+    const thr = 8 / (scale || 1);
+    const cx = project.width / 2;
+    const cy = project.height / 2;
+    if (Math.abs(node.x() - cx) < thr) node.x(cx);
+    if (Math.abs(node.y() - cy) < thr) node.y(cy);
+  };
+
   const interaction = (id: number): Interaction => ({
     listening: !playing,
     draggable: selectedId === id && !playing,
@@ -2092,6 +2195,7 @@ export default function Preview({
       e.cancelBubble = true;
       onSelect(id);
     },
+    onDragMove: (e) => snapToCenter(e.target),
     onDragEnd: () => commit(id),
     onTransformEnd: () => commit(id),
     onContextMenu: (e) => {
@@ -2134,6 +2238,7 @@ export default function Preview({
     listening: false,
     draggable: false,
     onClick: () => {},
+    onDragMove: () => {},
     onDragEnd: () => {},
     onTransformEnd: () => {},
     onContextMenu: () => {},
@@ -2236,6 +2341,7 @@ export default function Preview({
           selected={isSel}
           screenScale={h}
           onPickCell={interactive ? onPickCell : () => {}}
+          onCellContextMenu={interactive ? onCellContextMenu : undefined}
           onMoveVertices={onMoveVertices}
         />
       );
@@ -2285,6 +2391,24 @@ export default function Preview({
           <ImageNode src={src} r={r} interaction={flatInter} registerRef={reg} />
         );
     }
+    // A Flap effect on the selected image layer → a draggable dashed hinge line.
+    const flapIdx =
+      interactive && isSel && k.kind === "image" && !r.surface && onSetFlapAxis
+        ? r.effects.findIndex((e) => e.kind === "gpuoverlay" && e.effect === 10)
+        : -1;
+    const flapEff = flapIdx >= 0 ? r.effects[flapIdx] : null;
+    const flapOverlay =
+      flapEff && flapEff.kind === "gpuoverlay" ? (
+        <FlapAxisOverlay
+          layer={layer}
+          r={r}
+          effIndex={flapIdx}
+          axis={flapEff.posX}
+          vertical={flapEff.blend === 1}
+          screenScale={h}
+          onCommit={onSetFlapAxis!}
+        />
+      ) : null;
     // Engine transitions on a flat image / grid bake themselves into the node
     // above; everything else uses the legacy transition group wrap.
     const engineHandled =
@@ -2293,9 +2417,13 @@ export default function Preview({
     return tp ? (
       <Group key={layer.id} {...tp}>
         {node}
+        {flapOverlay}
       </Group>
     ) : (
-      <Group key={layer.id}>{node}</Group>
+      <Group key={layer.id}>
+        {node}
+        {flapOverlay}
+      </Group>
     );
   };
 

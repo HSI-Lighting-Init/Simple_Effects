@@ -327,6 +327,13 @@ pub struct FrameCell {
     /// zoomed in / cropped, <1 = zoomed out). Scales about the cell centre.
     #[serde(default = "one_track")]
     pub zoom: Track,
+    /// Keyframeable pan of the image within its cell, in fractions of the cell
+    /// (0 = centred; ±0.5 shifts by half a cell). Lets you reposition the image
+    /// inside its window — most useful together with `zoom`.
+    #[serde(default)]
+    pub pan_x: Track,
+    #[serde(default)]
+    pub pan_y: Track,
     /// Merge spans: how many columns/rows this cell covers (1 = a single slot).
     /// A cell with span > 1 is the "master" of a merged block; the slots it
     /// covers render nothing (their images are cleared on merge).
@@ -359,6 +366,8 @@ impl Default for FrameCell {
             img_h: 0,
             fit: FitMode::default(),
             zoom: one_track(),
+            pan_x: Track::default(),
+            pan_y: Track::default(),
             col_span: 1,
             row_span: 1,
             effects: Vec::new(),
@@ -971,6 +980,11 @@ impl Effect {
                 Rgba { r: 120, g: 255, b: 180, a: 255 }, Rgba { r: 120, g: 140, b: 255, a: 255 }, 0.5, 0.5, 1),
             "fog" => Effect::gpu_overlay(9, [1.0, 1.5, 0.5, 4.0, 0.45, 0.0, 0.6],
                 Rgba { r: 200, g: 205, b: 215, a: 255 }, WHITE, 0.5, 0.5, 1),
+            // Flap: detail=angle°, softness=orientation(0 horizontal/1 vertical),
+            // extra=perspective, pos_x=axis position, opacity=final. Keyframe the
+            // angle to animate the tilt.
+            "flap" => Effect::gpu_overlay(10, [1.0, 1.0, 0.0, 30.0, 0.0, 0.5, 1.0],
+                WHITE, WHITE, 0.5, 0.5, 0),
             _ => return None,
         })
     }
