@@ -1257,7 +1257,7 @@ type SetGpuFxStatic = (
 function Section({
   title,
   children,
-  defaultOpen = true,
+  defaultOpen = false,
 }: {
   title: string;
   children: ReactNode;
@@ -1754,9 +1754,13 @@ function TransitionVars({
 function TransitionsSection({
   layer,
   onSet,
+  title = "Transitions",
+  hint,
 }: {
   layer: Layer;
   onSet: SetLayerTransition;
+  title?: string;
+  hint?: string;
 }) {
   const slots: { slot: TransitionSlot; tr: Layer["transitionIn"] }[] = [
     { slot: "in", tr: layer.transitionIn },
@@ -1767,7 +1771,7 @@ function TransitionsSection({
   // transition is already set, until you toggle it.
   const [openSlots, setOpenSlots] = useState<Record<string, boolean>>({});
   return (
-    <Section title="Transitions">
+    <Section title={title}>
       {slots.map(({ slot, tr }) => {
         const durMs = tr?.durMs ?? 800;
         const direction = tr?.direction ?? 0;
@@ -1845,9 +1849,8 @@ function TransitionsSection({
         );
       })}
       <p className="insp-hint">
-        In plays over the layer's start, Out over its end. Pick any effect from the
-        transition library — it reveals the layers beneath. Overlap a layer beneath to
-        cross-blend.
+        {hint ??
+          "In plays over the layer's start, Out over its end. Pick any effect from the transition library — it reveals the layers beneath. Overlap a layer beneath to cross-blend."}
       </p>
     </Section>
   );
@@ -1988,6 +1991,8 @@ interface Props {
 
 /** Multi-frame grid controls: grid size + set/clear the selected cell's image. */
 function FrameGridSection({
+  layer,
+  onSetLayerTransition,
   layerId,
   rows,
   cols,
@@ -2035,6 +2040,8 @@ function FrameGridSection({
   onSetLinkedMember,
   onUnlinkCell,
 }: {
+  layer: Layer;
+  onSetLayerTransition: SetLayerTransition;
   layerId: number;
   rows: number;
   cols: number;
@@ -2185,6 +2192,14 @@ function FrameGridSection({
             : "Set one image spanning the whole grid; each cell (window) reveals its slice and can take its own effect."}
         </p>
       </div>
+      {/* Transition the WHOLE grid as one image (rasterised & transitioned
+          together), vs. "all cells" below which transitions each image. */}
+      <TransitionsSection
+        layer={layer}
+        onSet={onSetLayerTransition}
+        title="Whole-grid transition"
+        hint="Transitions the entire grid as a single image (all cells together). In plays over the grid's start, Out over its end — reveals whatever is beneath."
+      />
       <AllCellsTransitionsSection
         layerId={layerId}
         tin={allCellsTransitionIn}
@@ -2808,6 +2823,8 @@ export default function Inspector({
       )}
       {layer && layer.kind.kind === "framegrid" && (
         <FrameGridSection
+          layer={layer}
+          onSetLayerTransition={onSetLayerTransition}
           layerId={layer.id}
           rows={layer.kind.rows}
           cols={layer.kind.cols}
@@ -2856,7 +2873,10 @@ export default function Inspector({
           onUnlinkCell={onUnlinkCell}
         />
       )}
-      {layer && <TransitionsSection layer={layer} onSet={onSetLayerTransition} />}
+      {/* Grids get their whole-grid transition inside the grid section instead. */}
+      {layer && layer.kind.kind !== "framegrid" && (
+        <TransitionsSection layer={layer} onSet={onSetLayerTransition} />
+      )}
     </aside>
   );
 }
