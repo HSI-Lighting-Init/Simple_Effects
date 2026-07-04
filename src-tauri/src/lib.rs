@@ -21,7 +21,7 @@ use model::{
     LayerKind, LetterAnimation, LetterOverride, LinkedEffectGroup, Project, Rgba, SurfaceShape,
     Track, Transform, TransformEdit, Transition, TransitionKind,
 };
-use text::{Font, ShapedText};
+use text::{Font, FontFace, ShapedText};
 
 /// Shortest play range a layer is allowed to have, and the floor for the comp
 /// duration (ms). Keeps a trimmed block from collapsing to nothing.
@@ -80,8 +80,8 @@ impl AppState {
 
 /// (Re)shape a single layer into the cache if it's a text layer.
 fn reshape_layer(shaped: &mut HashMap<u32, ShapedText>, layer: &Layer) {
-    if let LayerKind::Text { content, size, font, .. } = &layer.kind {
-        shaped.insert(layer.id, text::shape(content, *size, font));
+    if let LayerKind::Text { content, size, font, weight, italic, .. } = &layer.kind {
+        shaped.insert(layer.id, text::shape(content, *size, font, *weight, *italic));
     }
 }
 
@@ -210,7 +210,7 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
     let end_ms = default_new_layer_end(project.duration_ms);
     let font = Font("Vazirmatn".into());
-    let shaped = text::shape(&content, size, &font);
+    let shaped = text::shape(&content, size, &font, 400, false);
     project.layers.push(Layer {
         id: next_id,
         name: "Text".into(),
@@ -222,6 +222,8 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
             color: Rgba { r: 245, g: 245, b: 250, a: 255 },
             color_keys: vec![],
             font,
+            weight: 400,
+            italic: false,
             anim: None,
             parts: vec![],
             // Full strength: per-letter overrides apply directly, so keyframing a
@@ -286,11 +288,11 @@ fn set_text_content(
         .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
-    let font = match &mut layer.kind {
-        LayerKind::Text { content: c, size: s, font, .. } => {
+    let (font, weight, italic) = match &mut layer.kind {
+        LayerKind::Text { content: c, size: s, font, weight, italic, .. } => {
             *c = content.clone();
             *s = size;
-            font.clone()
+            (font.clone(), *weight, *italic)
         }
         _ => return Err("not a text layer".into()),
     };
@@ -298,7 +300,7 @@ fn set_text_content(
         .shaped
         .lock()
         .unwrap()
-        .insert(layer_id, text::shape(&content, size, &font));
+        .insert(layer_id, text::shape(&content, size, &font, weight, italic));
     Ok(project.clone())
 }
 
@@ -389,16 +391,16 @@ fn clear_text_color_keys(
 fn set_text_font(state: State<AppState>, layer_id: u32, font: Font) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    let (content, size) = {
+    let (content, size, weight, italic) = {
         let layer = project
             .layers
             .iter_mut()
             .find(|l| l.id == layer_id)
             .ok_or("layer not found")?;
         match &mut layer.kind {
-            LayerKind::Text { content, size, font: f, .. } => {
+            LayerKind::Text { content, size, font: f, weight, italic, .. } => {
                 *f = font.clone();
-                (content.clone(), *size)
+                (content.clone(), *size, *weight, *italic)
             }
             _ => return Err("not a text layer".into()),
         }
@@ -407,7 +409,40 @@ fn set_text_font(state: State<AppState>, layer_id: u32, font: Font) -> Result<Pr
         .shaped
         .lock()
         .unwrap()
-        .insert(layer_id, text::shape(&content, size, &font));
+        .insert(layer_id, text::shape(&content, size, &font, weight, italic));
+    Ok(project.clone())
+}
+
+/// Change a text layer's weight (100..900) and/or italic, then re-shape it.
+#[tauri::command]
+fn set_text_font_style(
+    state: State<AppState>,
+    layer_id: u32,
+    weight: u16,
+    italic: bool,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let (content, size, font) = {
+        let layer = project
+            .layers
+            .iter_mut()
+            .find(|l| l.id == layer_id)
+            .ok_or("layer not found")?;
+        match &mut layer.kind {
+            LayerKind::Text { content, size, font, weight: w, italic: it, .. } => {
+                *w = weight.clamp(100, 900);
+                *it = italic;
+                (content.clone(), *size, font.clone())
+            }
+            _ => return Err("not a text layer".into()),
+        }
+    };
+    state
+        .shaped
+        .lock()
+        .unwrap()
+        .insert(layer_id, text::shape(&content, size, &font, weight.clamp(100, 900), italic));
     Ok(project.clone())
 }
 
@@ -418,6 +453,14 @@ fn set_text_font(state: State<AppState>, layer_id: u32, font: Font) -> Result<Pr
 fn list_fonts() -> Vec<String> {
     text::reload_fonts();
     text::list_font_families()
+}
+
+/// The available styles (faces) of one font family — Regular, Medium, Bold,
+/// Thin, Bold Italic, etc. — for the Style dropdown. Reads the already-loaded
+/// font db (populated by `list_fonts`).
+#[tauri::command]
+fn font_styles(family: String) -> Vec<FontFace> {
+    text::list_font_styles(&family)
 }
 
 /// Set (or clear) the per-letter animation preset on a text layer.
@@ -3141,8 +3184,10 @@ pub fn run() {
             set_text_color,
             clear_text_color_keys,
             set_text_font,
+            set_text_font_style,
             set_text_anim,
             list_fonts,
+            font_styles,
             set_text_style,
             set_text_animators,
             set_text_layer_styles,

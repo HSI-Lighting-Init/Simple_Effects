@@ -14,6 +14,10 @@ import type { StrokePosition } from "../bindings/StrokePosition";
 import type { TextAnimator } from "../bindings/TextAnimator";
 import type { AnimSelector } from "../bindings/AnimSelector";
 import type { AnimProps } from "../bindings/AnimProps";
+import type { Track } from "../bindings/Track";
+import type { FontFace } from "../bindings/FontFace";
+import { fontStyles } from "../lib/api";
+import { sampleTrack, constTrack, upsertKey, isKeyed } from "../lib/track";
 import type { SelectorKind } from "../bindings/SelectorKind";
 import type { RangeShape } from "../bindings/RangeShape";
 import type { TextLayerStyles } from "../bindings/TextLayerStyles";
@@ -172,35 +176,74 @@ function TextStyleSection({
 
 const DEFAULT_SELECTOR: AnimSelector = {
   kind: "range",
-  start: 0,
-  end: 100,
-  offset: 0,
-  smoothness: 100,
-  easeHigh: 0,
-  easeLow: 0,
+  start: constTrack(0),
+  end: constTrack(100),
+  offset: constTrack(0),
+  smoothness: constTrack(100),
+  easeHigh: constTrack(0),
+  easeLow: constTrack(0),
   shape: "square",
-  wigglesPerSec: 2,
-  amount: 100,
-  correlation: 50,
-  temporalPhase: 0,
-  spatialPhase: 0,
+  wigglesPerSec: constTrack(2),
+  amount: constTrack(100),
+  correlation: constTrack(50),
+  temporalPhase: constTrack(0),
+  spatialPhase: constTrack(0),
   seed: 1,
 };
 const DEFAULT_PROPS: AnimProps = {
-  position: [0, 0],
-  scale: 100,
-  rotation: 0,
-  skew: 0,
-  skewAxis: 0,
-  opacity: 100,
-  tracking: 0,
-  blur: 0,
+  position: [constTrack(0), constTrack(0)],
+  scale: constTrack(100),
+  rotation: constTrack(0),
+  skew: constTrack(0),
+  skewAxis: constTrack(0),
+  opacity: constTrack(100),
+  tracking: constTrack(0),
+  blur: constTrack(0),
   fill: null,
   charOffset: 0,
-  rotationX: 0,
-  rotationY: 0,
-  positionZ: 0,
+  rotationX: constTrack(0),
+  rotationY: constTrack(0),
+  positionZ: constTrack(0),
 };
+
+// A keyframed "sweep" offset track: the range selection slides across the whole
+// run over `durMs` starting at the playhead — so a Range animator reveals its
+// characters in sequence (offset 0 = all selected/hidden → the sweep clears
+// every letter, so they end fully revealed). Overshoots 100 so the feathered
+// edge fully releases the last letters (otherwise they stay shrunk/dim).
+function sweepOffset(tMs: number, durMs = 800): Track {
+  const a = Math.max(0, Math.round(tMs));
+  return {
+    default: 0,
+    keys: [
+      { timeMs: a, value: 0, easing: "easeInOut" },
+      { timeMs: a + durMs, value: 130, easing: "linear" },
+    ],
+  };
+}
+
+// Build a ready-to-play animator. The range presets pair a keyframed offset
+// sweep with a property so the letters actually animate in over time; "wiggle"
+// is the self-driving jitter. All of it stays fully editable/keyframeable.
+function makeAnimPreset(kind: "fade" | "rise" | "scale" | "wiggle", tMs: number): TextAnimator {
+  if (kind === "wiggle") {
+    return {
+      selector: { ...DEFAULT_SELECTOR, kind: "wiggly" },
+      props: { ...DEFAULT_PROPS, position: [constTrack(0), constTrack(14)], rotation: constTrack(8) },
+    };
+  }
+  const selector: AnimSelector = {
+    ...DEFAULT_SELECTOR,
+    kind: "range",
+    shape: "square",
+    smoothness: constTrack(30),
+    offset: sweepOffset(tMs),
+  };
+  const props: AnimProps = { ...DEFAULT_PROPS, opacity: constTrack(0) };
+  if (kind === "rise") props.position = [constTrack(0), constTrack(60)];
+  if (kind === "scale") props.scale = constTrack(0);
+  return { selector, props };
+}
 
 // Compact labelled number input.
 function NumField({ label, value, step = 1, min, max, onChange }: { label: string; value: number; step?: number; min?: number; max?: number; onChange: (v: number) => void }) {
@@ -212,14 +255,63 @@ function NumField({ label, value, step = 1, min, max, onChange }: { label: strin
   );
 }
 
+// A keyframeable number field backed by a `Track`. The ◆ stopwatch toggles
+// keyframing: off = editing sets one constant value; on = editing writes a
+// keyframe at the playhead (`tMs`), so the value animates over time. The shown
+// value is the track sampled at the playhead.
+function KeyNumField({
+  label,
+  track,
+  tMs,
+  step = 1,
+  min,
+  max,
+  onChange,
+}: {
+  label: string;
+  track: Track;
+  tMs: number;
+  step?: number;
+  min?: number;
+  max?: number;
+  onChange: (t: Track) => void;
+}) {
+  const keyed = isKeyed(track);
+  const val = sampleTrack(track, tMs);
+  const disp = Math.round(val * 1000) / 1000;
+  const setVal = (v: number) => onChange(keyed ? upsertKey(track, tMs, v) : constTrack(v));
+  const toggle = () => onChange(keyed ? constTrack(val) : upsertKey(constTrack(val), tMs, val));
+  return (
+    <label className="an-num">
+      <span className="an-num-label">
+        {label}
+        <button
+          type="button"
+          className={"kf-dot" + (keyed ? " on" : "")}
+          title={keyed ? `Keyframed (${track.keys.length}) — click to freeze at this value` : "Keyframe at the playhead"}
+          onClick={(e) => {
+            e.preventDefault();
+            toggle();
+          }}
+        >
+          ◆
+        </button>
+      </span>
+      <input type="number" value={disp} step={step} min={min} max={max} onChange={(e) => setVal(Number(e.target.value))} />
+    </label>
+  );
+}
+
 // After Effects-style per-character animators: a stack of selector + properties.
 function TextAnimatorsSection({
   layerId,
   animators,
+  timeMs,
   onSet,
 }: {
   layerId: number;
   animators: TextAnimator[];
+  timeMs: number;
   onSet: (layerId: number, animators: TextAnimator[]) => void;
 }) {
   const setAnim = (i: number, a: TextAnimator) => onSet(layerId, animators.map((x, j) => (j === i ? a : x)));
@@ -230,6 +322,13 @@ function TextAnimatorsSection({
       <div className="ts-head">
         <span>Animators</span>
         <button className="insp-btn" onClick={() => onSet(layerId, [...animators, { selector: DEFAULT_SELECTOR, props: DEFAULT_PROPS }])}>＋ Animator</button>
+      </div>
+      <div className="an-presets">
+        <span className="muted">Animate in:</span>
+        <button className="insp-btn tiny" title="Letters fade in one by one from the playhead" onClick={() => onSet(layerId, [...animators, makeAnimPreset("fade", timeMs)])}>Fade</button>
+        <button className="insp-btn tiny" title="Letters rise + fade in, in sequence" onClick={() => onSet(layerId, [...animators, makeAnimPreset("rise", timeMs)])}>Rise</button>
+        <button className="insp-btn tiny" title="Letters scale + fade in, in sequence" onClick={() => onSet(layerId, [...animators, makeAnimPreset("scale", timeMs)])}>Scale</button>
+        <button className="insp-btn tiny" title="Continuous wiggle" onClick={() => onSet(layerId, [...animators, makeAnimPreset("wiggle", timeMs)])}>Wiggle</button>
       </div>
       {animators.map((an, i) => {
         const sel = an.selector;
@@ -251,12 +350,12 @@ function TextAnimatorsSection({
             {sel.kind === "range" && (
               <>
                 <div className="an-grid">
-                  <NumField label="Start %" value={sel.start} onChange={(v) => setSel(i, { start: v })} />
-                  <NumField label="End %" value={sel.end} onChange={(v) => setSel(i, { end: v })} />
-                  <NumField label="Offset %" value={sel.offset} onChange={(v) => setSel(i, { offset: v })} />
-                  <NumField label="Smooth %" value={sel.smoothness} min={0} max={100} onChange={(v) => setSel(i, { smoothness: v })} />
-                  <NumField label="Ease Hi" value={sel.easeHigh} min={-100} max={100} onChange={(v) => setSel(i, { easeHigh: v })} />
-                  <NumField label="Ease Lo" value={sel.easeLow} min={-100} max={100} onChange={(v) => setSel(i, { easeLow: v })} />
+                  <KeyNumField label="Start %" track={sel.start} tMs={timeMs} onChange={(t) => setSel(i, { start: t })} />
+                  <KeyNumField label="End %" track={sel.end} tMs={timeMs} onChange={(t) => setSel(i, { end: t })} />
+                  <KeyNumField label="Offset %" track={sel.offset} tMs={timeMs} onChange={(t) => setSel(i, { offset: t })} />
+                  <KeyNumField label="Smooth %" track={sel.smoothness} tMs={timeMs} min={0} max={100} onChange={(t) => setSel(i, { smoothness: t })} />
+                  <KeyNumField label="Ease Hi" track={sel.easeHigh} tMs={timeMs} min={-100} max={100} onChange={(t) => setSel(i, { easeHigh: t })} />
+                  <KeyNumField label="Ease Lo" track={sel.easeLow} tMs={timeMs} min={-100} max={100} onChange={(t) => setSel(i, { easeLow: t })} />
                 </div>
                 <label className="insp-field">
                   Shape
@@ -273,26 +372,26 @@ function TextAnimatorsSection({
             )}
             {sel.kind === "wiggly" && (
               <div className="an-grid">
-                <NumField label="Wiggles/s" value={sel.wigglesPerSec} step={0.5} min={0} onChange={(v) => setSel(i, { wigglesPerSec: v })} />
-                <NumField label="Amount %" value={sel.amount} min={0} max={100} onChange={(v) => setSel(i, { amount: v })} />
-                <NumField label="Correl %" value={sel.correlation} min={0} max={100} onChange={(v) => setSel(i, { correlation: v })} />
+                <KeyNumField label="Wiggles/s" track={sel.wigglesPerSec} tMs={timeMs} step={0.5} min={0} onChange={(t) => setSel(i, { wigglesPerSec: t })} />
+                <KeyNumField label="Amount %" track={sel.amount} tMs={timeMs} min={0} max={100} onChange={(t) => setSel(i, { amount: t })} />
+                <KeyNumField label="Correl %" track={sel.correlation} tMs={timeMs} min={0} max={100} onChange={(t) => setSel(i, { correlation: t })} />
                 <NumField label="Seed" value={sel.seed} min={1} onChange={(v) => setSel(i, { seed: Math.max(1, Math.round(v)) })} />
               </div>
             )}
             <div className="an-sep">Animate</div>
             <div className="an-grid">
-              <NumField label="Pos X" value={p.position[0]} onChange={(v) => setProps(i, { position: [v, p.position[1]] })} />
-              <NumField label="Pos Y" value={p.position[1]} onChange={(v) => setProps(i, { position: [p.position[0], v] })} />
-              <NumField label="Scale %" value={p.scale} onChange={(v) => setProps(i, { scale: v })} />
-              <NumField label="Rotate°" value={p.rotation} onChange={(v) => setProps(i, { rotation: v })} />
-              <NumField label="Opacity %" value={p.opacity} min={0} max={100} onChange={(v) => setProps(i, { opacity: v })} />
-              <NumField label="Tracking" value={p.tracking} step={0.5} onChange={(v) => setProps(i, { tracking: v })} />
-              <NumField label="Skew°" value={p.skew} onChange={(v) => setProps(i, { skew: v })} />
-              <NumField label="Skew Axis°" value={p.skewAxis} onChange={(v) => setProps(i, { skewAxis: v })} />
-              <NumField label="Blur px" value={p.blur} step={0.5} min={0} onChange={(v) => setProps(i, { blur: v })} />
-              <NumField label="Rot X° (3D)" value={p.rotationX} onChange={(v) => setProps(i, { rotationX: v })} />
-              <NumField label="Rot Y° (3D)" value={p.rotationY} onChange={(v) => setProps(i, { rotationY: v })} />
-              <NumField label="Pos Z (3D)" value={p.positionZ} onChange={(v) => setProps(i, { positionZ: v })} />
+              <KeyNumField label="Pos X" track={p.position[0]} tMs={timeMs} onChange={(t) => setProps(i, { position: [t, p.position[1]] })} />
+              <KeyNumField label="Pos Y" track={p.position[1]} tMs={timeMs} onChange={(t) => setProps(i, { position: [p.position[0], t] })} />
+              <KeyNumField label="Scale %" track={p.scale} tMs={timeMs} onChange={(t) => setProps(i, { scale: t })} />
+              <KeyNumField label="Rotate°" track={p.rotation} tMs={timeMs} onChange={(t) => setProps(i, { rotation: t })} />
+              <KeyNumField label="Opacity %" track={p.opacity} tMs={timeMs} min={0} max={100} onChange={(t) => setProps(i, { opacity: t })} />
+              <KeyNumField label="Tracking" track={p.tracking} tMs={timeMs} step={0.5} onChange={(t) => setProps(i, { tracking: t })} />
+              <KeyNumField label="Skew°" track={p.skew} tMs={timeMs} onChange={(t) => setProps(i, { skew: t })} />
+              <KeyNumField label="Skew Axis°" track={p.skewAxis} tMs={timeMs} onChange={(t) => setProps(i, { skewAxis: t })} />
+              <KeyNumField label="Blur px" track={p.blur} tMs={timeMs} step={0.5} min={0} onChange={(t) => setProps(i, { blur: t })} />
+              <KeyNumField label="Rot X° (3D)" track={p.rotationX} tMs={timeMs} onChange={(t) => setProps(i, { rotationX: t })} />
+              <KeyNumField label="Rot Y° (3D)" track={p.rotationY} tMs={timeMs} onChange={(t) => setProps(i, { rotationY: t })} />
+              <KeyNumField label="Pos Z (3D)" track={p.positionZ} tMs={timeMs} onChange={(t) => setProps(i, { positionZ: t })} />
             </div>
             <label className="ts-check">
               <input
@@ -310,7 +409,7 @@ function TextAnimatorsSection({
       })}
       {animators.length > 0 && (
         <p className="insp-hint">
-          Each animator's selector picks characters; its values are the offset at full selection. Scrub/Play to see it move (Wiggly animates on its own; Range animates when you keyframe nothing — drive it via Offset over time in a later build).
+          Every field is keyframeable — click its ◆ to key at the playhead. Wiggly moves on its own; to animate a Range (Ramp&nbsp;Up etc.), keyframe the selector <b>Offset</b> (e.g. −100 → 100) so the selection sweeps across the letters over time.
         </p>
       )}
     </div>
@@ -485,12 +584,16 @@ function TextLayerStylesSection({
 
 function TextInspector({
   layerId,
+  timeMs,
   content: content0,
   size: size0,
   color,
   font,
+  weight,
+  italic,
   fonts,
   onRefreshFonts,
+  onFontStyle,
   anim,
   style,
   animators,
@@ -519,12 +622,16 @@ function TextInspector({
   onClearLetterColor,
 }: {
   layerId: number;
+  timeMs: number;
   content: string;
   size: number;
   color: Rgba;
   font: Font;
+  weight: number;
+  italic: boolean;
   fonts: string[];
   onRefreshFonts: () => void;
+  onFontStyle: (layerId: number, weight: number, italic: boolean) => void;
   anim: LetterAnimation | null;
   style: TextStyle | null;
   animators: TextAnimator[];
@@ -558,6 +665,23 @@ function TextInspector({
     setContent(content0);
     setSize(size0);
   }, [layerId, content0, size0]);
+
+  // The faces (styles) the current family actually offers — Regular, Bold,
+  // Medium, Thin, Bold Italic… — for the Style dropdown. Refetched per font.
+  const [faces, setFaces] = useState<FontFace[]>([]);
+  useEffect(() => {
+    let alive = true;
+    fontStyles(font).then((f) => alive && setFaces(f));
+    return () => {
+      alive = false;
+    };
+  }, [font]);
+  // The dropdown's current value; if the stored weight/italic isn't among the
+  // faces (e.g. a family that lost a face), show it as an extra option.
+  const styleKey = `${weight}:${italic}`;
+  const faceList: FontFace[] = faces.some((f) => `${f.weight}:${f.italic}` === styleKey)
+    ? faces
+    : [...faces, { name: `${weight}${italic ? " Italic" : ""}`, weight, italic }];
 
   // Grow the text box to fit its content so long text isn't hidden behind a
   // 2-row scroll — height tracks the wrapped line count (min 2 rows, max ~12).
@@ -625,6 +749,23 @@ function TextInspector({
         </div>
       </label>
 
+      <label className="insp-field">
+        Style
+        <select
+          value={styleKey}
+          onChange={(e) => {
+            const [w, it] = e.target.value.split(":");
+            onFontStyle(layerId, Number(w), it === "true");
+          }}
+        >
+          {faceList.map((f) => (
+            <option key={`${f.weight}:${f.italic}`} value={`${f.weight}:${f.italic}`}>
+              {f.name}
+            </option>
+          ))}
+        </select>
+      </label>
+
       <div className="row2">
         <label className="insp-field">
           Size (height)
@@ -663,7 +804,7 @@ function TextInspector({
       <TextStyleSection layerId={layerId} style={style} color={color} onSet={onSetTextStyle} />
 
       <div className="insp-sep">Text animators</div>
-      <TextAnimatorsSection layerId={layerId} animators={animators} onSet={onSetTextAnimators} />
+      <TextAnimatorsSection layerId={layerId} animators={animators} timeMs={timeMs} onSet={onSetTextAnimators} />
 
       <div className="insp-sep">Layer styles &amp; 3D</div>
       <TextLayerStylesSection
@@ -1858,6 +1999,7 @@ function TransitionsSection({
 
 interface Props {
   layer: Layer | null;
+  timeMs: number;
   fonts: string[];
   onRefreshFonts: () => void;
   decomposed: boolean;
@@ -1894,6 +2036,7 @@ interface Props {
   onColor: (layerId: number, color: Rgba) => void;
   onClearColorKeys: (layerId: number, color: Rgba) => void;
   onFont: (layerId: number, font: Font) => void;
+  onFontStyle: (layerId: number, weight: number, italic: boolean) => void;
   onAnim: (layerId: number, anim: LetterAnimation | null) => void;
   onSetTextStyle: (layerId: number, style: TextStyle | null) => void;
   onSetTextAnimators: (layerId: number, animators: TextAnimator[]) => void;
@@ -2623,6 +2766,7 @@ function LinkedEffectsSection({
 
 export default function Inspector({
   layer,
+  timeMs,
   fonts,
   onRefreshFonts,
   decomposed,
@@ -2649,6 +2793,7 @@ export default function Inspector({
   onColor,
   onClearColorKeys,
   onFont,
+  onFontStyle,
   onAnim,
   onSetTextStyle,
   onSetTextAnimators,
@@ -2730,13 +2875,17 @@ export default function Inspector({
       {layer && layer.kind.kind === "text" && (
         <TextInspector
           layerId={layer.id}
+          timeMs={timeMs}
           content={layer.kind.content}
           size={layer.kind.size}
           color={textColorNow ?? layer.kind.color}
           colorKeyCount={layer.kind.colorKeys?.length ?? 0}
           font={layer.kind.font}
+          weight={layer.kind.weight}
+          italic={layer.kind.italic}
           fonts={fonts}
           onRefreshFonts={onRefreshFonts}
+          onFontStyle={onFontStyle}
           anim={layer.kind.anim}
           style={layer.kind.style}
           animators={layer.kind.animators}

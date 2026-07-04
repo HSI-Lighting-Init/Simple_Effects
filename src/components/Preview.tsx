@@ -374,6 +374,8 @@ function useShaped(layer: Layer): ShapedText | null {
   const content = isText ? k.content : "";
   const size = isText ? k.size : 0;
   const font = isText ? k.font : "";
+  const weight = isText ? k.weight : 0;
+  const italic = isText ? k.italic : false;
   const [shaped, setShaped] = useState<ShapedText | null>(null);
 
   useEffect(() => {
@@ -389,7 +391,7 @@ function useShaped(layer: Layer): ShapedText | null {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layer.id, isText, content, size, font]);
+  }, [layer.id, isText, content, size, font, weight, italic]);
 
   return shaped;
 }
@@ -431,7 +433,15 @@ function rasterizeText(
     const sc = lt?.scale ?? 1;
     ctx.scale(sc, sc);
     ctx.translate(-g.cx, -g.cy);
-    ctx.fill(new Path2D(g.d));
+    const path = new Path2D(g.d);
+    ctx.fill(path);
+    if (shaped.embolden > 0) {
+      // Synthetic bold: fatten the outline with a same-colour stroke.
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = ctx.fillStyle;
+      ctx.lineWidth = shaped.embolden;
+      ctx.stroke(path);
+    }
     ctx.restore();
   });
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -448,7 +458,8 @@ function paintGlyph(
   letterAlpha: number,
   style: TextStyle | null,
   base: Rgba,
-  letterFill?: Rgba | null
+  letterFill?: Rgba | null,
+  embolden = 0
 ) {
   const fills = letterFill
     ? [{ color: letterFill, opacity: 100 }]
@@ -461,6 +472,13 @@ function paintGlyph(
       ctx.globalAlpha = letterAlpha * (f.color.a / 255) * (f.opacity / 100);
       ctx.fillStyle = `rgb(${f.color.r},${f.color.g},${f.color.b})`;
       ctx.fill(path);
+      // Synthetic bold: a same-colour stroke fattens the fill outward.
+      if (embolden > 0) {
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = ctx.fillStyle;
+        ctx.lineWidth = embolden;
+        ctx.stroke(path);
+      }
     }
   };
   const drawStrokes = () => {
@@ -694,7 +712,7 @@ function rasterizeStyledText(
         }
         if (lt?.blur) ctx.filter = `blur(${lt.blur}px)`;
         ctx.translate(-g.cx, -g.cy);
-        paintGlyph(ctx, new Path2D(g.d), lt?.opacity ?? 1, style, base, lt?.fill ?? null);
+        paintGlyph(ctx, new Path2D(g.d), lt?.opacity ?? 1, style, base, lt?.fill ?? null, shaped.embolden);
         ctx.restore();
       }
       trackAcc += lt?.tracking ?? 0;
@@ -1675,6 +1693,8 @@ function TextGlyphs({
   content,
   size,
   font,
+  weight,
+  italic,
   fill,
   color,
   style,
@@ -1695,6 +1715,8 @@ function TextGlyphs({
   content: string;
   size: number;
   font: string;
+  weight: number;
+  italic: boolean;
   fill: string;
   color: Rgba;
   style: TextStyle | null;
@@ -1724,7 +1746,7 @@ function TextGlyphs({
     return () => {
       alive = false;
     };
-  }, [layerId, content, size, font]);
+  }, [layerId, content, size, font, weight, italic]);
 
   // Attach the per-glyph Transformer to the selected glyph (decompose only).
   useEffect(() => {
@@ -1855,12 +1877,18 @@ function TextGlyphs({
             }
             data={g.d}
             fill={glyphFill}
+            {...(shaped.embolden > 0
+              ? { stroke: glyphFill, strokeWidth: shaped.embolden, lineJoin: "round" as const, fillAfterStrokeEnabled: true }
+              : null)}
             x={left + g.x + g.cx + off.dx}
             y={baseline + g.cy + off.dy}
             offsetX={g.cx}
             offsetY={g.cy}
-            scaleX={off.scale}
-            scaleY={off.scale}
+            // Never a hard 0: a zero-scale Konva node has a singular transform,
+            // whose inverse (used for hit-testing) is NaN — that can blank the
+            // whole text. Clamp to an invisibly-tiny but non-singular value.
+            scaleX={off.scale || 1e-4}
+            scaleY={off.scale || 1e-4}
             rotation={off.rotation}
             opacity={off.opacity}
             perfectDrawEnabled={false}
@@ -2362,6 +2390,8 @@ export default function Preview({
           content={k.content}
           size={k.size}
           font={k.font}
+          weight={k.weight}
+          italic={k.italic}
           fill={rgbaCss(r.color ?? k.color)}
           color={r.color ?? k.color}
           style={k.style}

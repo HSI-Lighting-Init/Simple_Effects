@@ -120,6 +120,7 @@ import {
   clearTextColorKeys,
   setTextContent,
   setTextFont,
+  setTextFontStyle,
   listFonts,
   setTextStyle,
   setTextAnimators,
@@ -2228,6 +2229,16 @@ export default function App() {
     [applyTime, recordAction]
   );
 
+  const onSetFontStyle = useCallback(
+    async (layerId: number, weight: number, italic: boolean) => {
+      const p = await setTextFontStyle(layerId, weight, italic);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("text_font_style", { layerId, weight, italic });
+    },
+    [applyTime, recordAction]
+  );
+
   // Pick / clear / retune a text layer's per-letter preset.
   const onSetAnim = useCallback(
     async (layerId: number, anim: LetterAnimation | null) => {
@@ -3144,6 +3155,7 @@ export default function App() {
         />
         <Inspector
           layer={selectedLayer}
+          timeMs={time}
           fonts={fonts}
           onRefreshFonts={refreshFonts}
           decomposed={selectedLayer != null && decomposeId === selectedLayer.id}
@@ -3172,6 +3184,7 @@ export default function App() {
           onColor={onSetColor}
           onClearColorKeys={onClearColorKeys}
           onFont={onSetFont}
+          onFontStyle={onSetFontStyle}
           onAnim={onSetAnim}
           onSetTextStyle={onSetTextStyle}
           onSetTextAnimators={onSetTextAnimators}

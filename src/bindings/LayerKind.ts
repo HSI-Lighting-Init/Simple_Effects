@@ -50,7 +50,16 @@ size: number, color: Rgba,
  * interpolated at the current time, so the text colour animates over the
  * clip. Empty = the static `color` fill (back-compatible).
  */
-colorKeys: Array<ColorKey>, font: Font, anim: LetterAnimation | null, parts: Array<LetterOverride>, 
+colorKeys: Array<ColorKey>, font: Font, 
+/**
+ * Font weight (100..900, CSS scale; 400 = Regular, 700 = Bold). Used to
+ * pick the matching face from the family when shaping.
+ */
+weight: number, 
+/**
+ * Select the italic/oblique face of the family when available.
+ */
+italic: boolean, anim: LetterAnimation | null, parts: Array<LetterOverride>, 
 /**
  * Keyframeable 0..1: how much of `parts` is applied. 0 = composed,
  * 1 = fully decomposed. Keyframe it to animate the decompose effect.

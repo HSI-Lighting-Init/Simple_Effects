@@ -144,6 +144,13 @@ pub enum LayerKind {
         #[serde(default, rename = "colorKeys")]
         color_keys: Vec<ColorKey>,
         font: Font,
+        /// Font weight (100..900, CSS scale; 400 = Regular, 700 = Bold). Used to
+        /// pick the matching face from the family when shaping.
+        #[serde(default = "default_weight")]
+        weight: u16,
+        /// Select the italic/oblique face of the family when available.
+        #[serde(default)]
+        italic: bool,
         anim: Option<LetterAnimation>,
         #[serde(default)]
         parts: Vec<LetterOverride>,
@@ -254,6 +261,10 @@ pub enum LayerKind {
     /// over the layer's time span. Currently drives the GPU "shiny clouds"
     /// overlay; the frontend composites it over the layers below.
     Adjustment {},
+}
+
+fn default_weight() -> u16 {
+    400
 }
 
 fn default_line_width() -> f32 {
@@ -655,60 +666,127 @@ pub enum RangeShape {
     Smooth,
 }
 
+/// Accept either a bare number (legacy saved files, where animator params were
+/// plain scalars) or a full `Track` object — so old projects keep loading now
+/// that every animator parameter is keyframeable.
+fn de_track<'de, D>(d: D) -> Result<Track, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrTrack {
+        Num(f32),
+        Track(Track),
+    }
+    Ok(match NumOrTrack::deserialize(d)? {
+        NumOrTrack::Num(v) => Track::constant(v),
+        NumOrTrack::Track(t) => t,
+    })
+}
+
+/// Same, but for the 2-element `position` array — each element may be a bare
+/// number (legacy `[x, y]`) or a `Track`.
+fn de_pos<'de, D>(d: D) -> Result<[Track; 2], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrTrack {
+        Num(f32),
+        Track(Track),
+    }
+    let items = <Vec<NumOrTrack>>::deserialize(d)?;
+    let mut it = items.into_iter().map(|x| match x {
+        NumOrTrack::Num(v) => Track::constant(v),
+        NumOrTrack::Track(t) => t,
+    });
+    let x = it.next().unwrap_or_default();
+    let y = it.next().unwrap_or_default();
+    Ok([x, y])
+}
+
+fn pos_default() -> [Track; 2] {
+    [Track::default(), Track::default()]
+}
+
 /// A text-animator selector. Range fields are percentages (0..100). Wiggly
-/// randomises the per-character selection over time.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+/// randomises the per-character selection over time. Every numeric field is a
+/// keyframeable `Track` — animate the selector's `offset` (or start/end) to
+/// sweep the selection across the letters over time (the classic AE move).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct AnimSelector {
     pub kind: SelectorKind,
     // --- Range ---
-    pub start: f32,
-    pub end: f32,
-    pub offset: f32,
-    pub smoothness: f32,
-    pub ease_high: f32,
-    pub ease_low: f32,
+    #[serde(default, deserialize_with = "de_track")]
+    pub start: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub end: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub offset: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub smoothness: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub ease_high: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub ease_low: Track,
     pub shape: RangeShape,
     // --- Wiggly ---
-    pub wiggles_per_sec: f32,
-    pub amount: f32,
-    pub correlation: f32,
-    pub temporal_phase: f32,
-    pub spatial_phase: f32,
+    #[serde(default, deserialize_with = "de_track")]
+    pub wiggles_per_sec: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub amount: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub correlation: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub temporal_phase: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub spatial_phase: Track,
     pub seed: u32,
 }
 
 /// The per-character property offsets a text animator applies (scaled by the
 /// selector amount). Units: position px, rotation/skew degrees, scale/opacity
 /// percent (100 = no change), tracking/blur px, fill overrides the glyph colour.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+/// Every numeric field is a keyframeable `Track`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct AnimProps {
-    pub position: [f32; 2],
-    pub scale: f32,
-    pub rotation: f32,
-    pub skew: f32,
-    pub skew_axis: f32,
-    pub opacity: f32,
-    pub tracking: f32,
-    pub blur: f32,
+    #[serde(default = "pos_default", deserialize_with = "de_pos")]
+    pub position: [Track; 2],
+    #[serde(default, deserialize_with = "de_track")]
+    pub scale: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub rotation: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub skew: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub skew_axis: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub opacity: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub tracking: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub blur: Track,
     pub fill: Option<Rgba>,
     /// Unicode code-point shift; persisted, not yet applied (needs reshape).
     pub char_offset: i32,
     /// Per-character 3D (only applied when the layer's `per_char_3d` is on):
     /// X/Y rotation in degrees and Z position in px.
-    #[serde(default)]
-    pub rotation_x: f32,
-    #[serde(default)]
-    pub rotation_y: f32,
-    #[serde(default)]
-    pub position_z: f32,
+    #[serde(default, deserialize_with = "de_track")]
+    pub rotation_x: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub rotation_y: Track,
+    #[serde(default, deserialize_with = "de_track")]
+    pub position_z: Track,
 }
 
 /// One After Effects-style text animator: a selector + the properties it drives.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct TextAnimator {
@@ -1141,6 +1219,8 @@ impl Project {
                 color: Rgba { r: 240, g: 240, b: 245, a: 255 },
                 color_keys: vec![],
                 font: Font("Vazirmatn".into()),
+                weight: 400,
+                italic: false,
                 anim: Some(LetterAnimation {
                     preset: LetterPreset::RiseUp,
                     start_ms: 300,

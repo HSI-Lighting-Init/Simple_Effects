@@ -7,6 +7,7 @@ import type { TransformEdit } from "../bindings/TransformEdit";
 import type { ShapedText } from "../bindings/ShapedText";
 import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { Font } from "../bindings/Font";
+import type { FontFace } from "../bindings/FontFace";
 import type { Rgba } from "../bindings/Rgba";
 import type { Effect } from "../bindings/Effect";
 import type { SurfaceShape } from "../bindings/SurfaceShape";
@@ -146,8 +147,15 @@ export const clearTextColorKeys = (layerId: number, color: Rgba) =>
 export const setTextFont = (layerId: number, font: Font) =>
   invoke<Project>("set_text_font", { layerId, font });
 
+/** Set a text layer's weight (100..900) and italic; re-shapes the glyphs. */
+export const setTextFontStyle = (layerId: number, weight: number, italic: boolean) =>
+  invoke<Project>("set_text_font_style", { layerId, weight, italic });
+
 /** Every selectable font family (built-ins first, then installed system fonts). */
 export const listFonts = () => invoke<string[]>("list_fonts");
+
+/** The available styles (faces) of one family — Regular, Bold, Medium, etc. */
+export const fontStyles = (family: string) => invoke<FontFace[]>("font_styles", { family });
 
 /** Set (or clear with null) the typographic + fill/stroke style on a text layer. */
 export const setTextStyle = (layerId: number, style: TextStyle | null) =>

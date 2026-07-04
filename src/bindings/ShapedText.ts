@@ -9,4 +9,10 @@ width: number,
 /**
  * Scaled ascender / descender (px, both positive).
  */
-ascender: number, descender: number, };
+ascender: number, descender: number, 
+/**
+ * Synthetic-bold stroke width (px) to add when the family has no real face
+ * heavier than the chosen one. 0 = the outlines are already the right weight
+ * (a real Bold/Medium face was found), so the renderer just fills them.
+ */
+embolden: number, };

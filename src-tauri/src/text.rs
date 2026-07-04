@@ -64,28 +64,105 @@ pub fn reload_fonts() {
     }
 }
 
-/// Resolve a family name to font bytes + face index. Built-ins are embedded;
-/// everything else comes from the system db, falling back to Vazirmatn.
-fn font_data(family: &str) -> (Vec<u8>, u32) {
+/// Resolve a family name (plus the requested weight/italic) to font bytes + face
+/// index. Built-ins are embedded (single face each, so weight/italic are honoured
+/// synthetically at shape time); everything else queries the system db for the
+/// closest matching face, falling back to Vazirmatn.
+///
+/// Returns the bytes, the face index, and the weight/italic the *chosen* face
+/// actually provides — so the caller can synthesise the difference (fake-bold /
+/// fake-italic) when the family has no matching real face (e.g. the single-face
+/// built-ins, or a family with a Regular but no Bold).
+fn font_data(family: &str, weight: u16, italic: bool) -> (Vec<u8>, u32, u16, bool) {
     match family {
-        "Vazirmatn" => return (VAZIRMATN.to_vec(), 0),
-        "Sahel" => return (SAHEL.to_vec(), 0),
-        "Shabnam" => return (SHABNAM.to_vec(), 0),
-        "Gandom" => return (GANDOM.to_vec(), 0),
+        "Vazirmatn" => return (VAZIRMATN.to_vec(), 0, 400, false),
+        "Sahel" => return (SAHEL.to_vec(), 0, 400, false),
+        "Shabnam" => return (SHABNAM.to_vec(), 0, 400, false),
+        "Gandom" => return (GANDOM.to_vec(), 0, 400, false),
         _ => {}
     }
     if let Ok(db) = db().read() {
         let query = fontdb::Query {
             families: &[fontdb::Family::Name(family)],
+            weight: fontdb::Weight(weight),
+            style: if italic { fontdb::Style::Italic } else { fontdb::Style::Normal },
             ..Default::default()
         };
         if let Some(id) = db.query(&query) {
+            let info = db.face(id).map(|f| (f.weight.0, f.style != fontdb::Style::Normal));
             if let Some(data) = db.with_face_data(id, |data, index| (data.to_vec(), index)) {
-                return data;
+                let (gw, gi) = info.unwrap_or((weight, italic));
+                return (data.0, data.1, gw, gi);
             }
         }
     }
-    (VAZIRMATN.to_vec(), 0)
+    (VAZIRMATN.to_vec(), 0, 400, false)
+}
+
+/// One selectable face (style) of a family: a human name plus the weight/italic
+/// it maps to. The frontend shows `name` and stores `weight`/`italic`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct FontFace {
+    pub name: String,
+    pub weight: u16,
+    pub italic: bool,
+}
+
+/// CSS-weight → human name (the labels users expect: Thin … Black).
+fn weight_name(w: u16) -> &'static str {
+    match w {
+        0..=149 => "Thin",
+        150..=249 => "Extra Light",
+        250..=349 => "Light",
+        350..=449 => "Regular",
+        450..=549 => "Medium",
+        550..=649 => "Semi Bold",
+        650..=749 => "Bold",
+        750..=849 => "Extra Bold",
+        _ => "Black",
+    }
+}
+
+fn face_label(weight: u16, italic: bool) -> String {
+    let base = weight_name(weight);
+    match (base, italic) {
+        ("Regular", true) => "Italic".to_string(),
+        (_, true) => format!("{base} Italic"),
+        (_, false) => base.to_string(),
+    }
+}
+
+/// Every available style (face) of one family, as installed. Built-ins are
+/// single-face embedded fonts whose weight/italic we synthesise, so they offer
+/// the useful synthetic variants; system families report their real faces
+/// (deduped by weight + italic, sorted light→heavy, upright before italic).
+pub fn list_font_styles(family: &str) -> Vec<FontFace> {
+    if BUILTINS.contains(&family) {
+        return [(400, false), (400, true), (700, false), (700, true)]
+            .into_iter()
+            .map(|(weight, italic)| FontFace { name: face_label(weight, italic), weight, italic })
+            .collect();
+    }
+    let mut seen = BTreeSet::new();
+    let mut out: Vec<FontFace> = Vec::new();
+    if let Ok(db) = db().read() {
+        for face in db.faces() {
+            if face.families.iter().any(|(n, _)| n == family) {
+                let italic = face.style != fontdb::Style::Normal;
+                let weight = face.weight.0;
+                if seen.insert((weight, italic)) {
+                    out.push(FontFace { name: face_label(weight, italic), weight, italic });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.weight.cmp(&b.weight).then(a.italic.cmp(&b.italic)));
+    if out.is_empty() {
+        out.push(FontFace { name: "Regular".into(), weight: 400, italic: false });
+    }
+    out
 }
 
 /// All selectable font families: the built-ins first, then every system family
@@ -134,46 +211,76 @@ pub struct ShapedText {
     /// Scaled ascender / descender (px, both positive).
     pub ascender: f32,
     pub descender: f32,
+    /// Synthetic-bold stroke width (px) to add when the family has no real face
+    /// heavier than the chosen one. 0 = the outlines are already the right weight
+    /// (a real Bold/Medium face was found), so the renderer just fills them.
+    #[serde(default)]
+    pub embolden: f32,
 }
 
 /// Builds an SVG path string from a glyph outline, baking in the px scale and
 /// the Y-flip (font space is Y-up, screen space is Y-down).
+/// Synthetic-italic slant: horizontal shear applied to every outline point
+/// (≈12.4°). Only used when the family has no real italic face.
+const SYNTH_SLANT: f32 = 0.22;
+
 struct PathBuilder {
     d: String,
     s: f32,
+    /// Shear factor for fake-italic (0 = upright). Applied in screen space, where
+    /// the baseline is y=0 and ascenders are negative, so the top leans right.
+    shear: f32,
+}
+impl PathBuilder {
+    /// Font point (font-up units) → screen coords (px, y-down), with the italic
+    /// shear folded in.
+    fn map(&self, x: f32, y: f32) -> (f32, f32) {
+        let sx = x * self.s;
+        let sy = -y * self.s;
+        (sx - self.shear * sy, sy)
+    }
 }
 impl ttf_parser::OutlineBuilder for PathBuilder {
     fn move_to(&mut self, x: f32, y: f32) {
-        self.d.push_str(&format!("M{:.2} {:.2} ", x * self.s, -y * self.s));
+        let (x, y) = self.map(x, y);
+        self.d.push_str(&format!("M{x:.2} {y:.2} "));
     }
     fn line_to(&mut self, x: f32, y: f32) {
-        self.d.push_str(&format!("L{:.2} {:.2} ", x * self.s, -y * self.s));
+        let (x, y) = self.map(x, y);
+        self.d.push_str(&format!("L{x:.2} {y:.2} "));
     }
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        self.d.push_str(&format!(
-            "Q{:.2} {:.2} {:.2} {:.2} ",
-            x1 * self.s, -y1 * self.s, x * self.s, -y * self.s
-        ));
+        let (x1, y1) = self.map(x1, y1);
+        let (x, y) = self.map(x, y);
+        self.d.push_str(&format!("Q{x1:.2} {y1:.2} {x:.2} {y:.2} "));
     }
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        self.d.push_str(&format!(
-            "C{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} ",
-            x1 * self.s, -y1 * self.s, x2 * self.s, -y2 * self.s, x * self.s, -y * self.s
-        ));
+        let (x1, y1) = self.map(x1, y1);
+        let (x2, y2) = self.map(x2, y2);
+        let (x, y) = self.map(x, y);
+        self.d.push_str(&format!("C{x1:.2} {y1:.2} {x2:.2} {y2:.2} {x:.2} {y:.2} "));
     }
     fn close(&mut self) {
         self.d.push_str("Z ");
     }
 }
 
-/// Shape `content` at `size` px with `font` into positioned glyph outlines.
-pub fn shape(content: &str, size: f32, font: &Font) -> ShapedText {
-    let (mut bytes, mut index) = font_data(&font.0);
+/// Shape `content` at `size` px with `font` (of the given weight/italic) into
+/// positioned glyph outlines. A real matching face is preferred; when the family
+/// offers none, the difference is synthesised — italic as an outline shear,
+/// bold as an `embolden` stroke width the renderer applies.
+pub fn shape(content: &str, size: f32, font: &Font, weight: u16, italic: bool) -> ShapedText {
+    let (mut bytes, mut index, got_weight, got_italic) = font_data(&font.0, weight, italic);
     // Guard against an unparseable system font — fall back to a built-in.
     if ttf_parser::Face::parse(&bytes, index).is_err() || rustybuzz::Face::from_slice(&bytes, index).is_none() {
         bytes = VAZIRMATN.to_vec();
         index = 0;
     }
+    // Synthesise what the chosen face doesn't already provide.
+    let shear = if italic && !got_italic { SYNTH_SLANT } else { 0.0 };
+    let weight_gap = (weight as i32 - got_weight as i32).max(0) as f32;
+    // ~0.4px of stroke per 100 weight-steps at 100px, clamped so it never blobs.
+    let embolden = (weight_gap / 100.0 * 0.004 * size).min(size * 0.05);
     let rb_face = rustybuzz::Face::from_slice(&bytes, index).expect("font is valid");
     let ttf = ttf_parser::Face::parse(&bytes, index).expect("font is valid");
     let upem = ttf.units_per_em() as f32;
@@ -192,7 +299,7 @@ pub fn shape(content: &str, size: f32, font: &Font) -> ShapedText {
     let mut pen = 0.0f32;
     for (info, pos) in infos.iter().zip(positions.iter()) {
         let gid = ttf_parser::GlyphId(info.glyph_id as u16);
-        let mut b = PathBuilder { d: String::new(), s };
+        let mut b = PathBuilder { d: String::new(), s, shear };
         let bbox = ttf.outline_glyph(gid, &mut b);
 
         // Centre of the glyph's bounding box (local px), Y already flipped.
@@ -220,6 +327,7 @@ pub fn shape(content: &str, size: f32, font: &Font) -> ShapedText {
         width: pen,
         ascender: ttf.ascender() as f32 * s,
         descender: (ttf.descender() as f32 * s).abs(),
+        embolden,
     }
 }
 
@@ -232,7 +340,7 @@ mod tests {
         // The example string the client cares about — across every built-in font.
         for name in ["Vazirmatn", "Sahel", "Shabnam", "Gandom"] {
             let font = Font(name.to_string());
-            let st = shape("آموزش اتوکد پی‌دی‌اف رایگان", 88.0, &font);
+            let st = shape("آموزش اتوکد پی‌دی‌اف رایگان", 88.0, &font, 400, false);
             assert!(st.width > 0.0, "run should have width for {name}");
             assert!(st.glyphs.len() > 5, "should produce many glyphs for {name}");
             let with_outline = st.glyphs.iter().filter(|g| !g.d.is_empty()).count();
@@ -242,14 +350,27 @@ mod tests {
 
     #[test]
     fn latin_advances_left_to_right() {
-        let st = shape("AV", 100.0, &Font("Vazirmatn".to_string()));
+        let st = shape("AV", 100.0, &Font("Vazirmatn".to_string()), 400, false);
         assert_eq!(st.glyphs.len(), 2);
         assert!(st.glyphs[1].x > st.glyphs[0].x);
     }
 
     #[test]
     fn unknown_font_falls_back() {
-        let st = shape("AV", 100.0, &Font("Totally Not A Real Font 123".to_string()));
+        let st = shape("AV", 100.0, &Font("Totally Not A Real Font 123".to_string()), 400, false);
         assert_eq!(st.glyphs.len(), 2);
+    }
+
+    #[test]
+    fn builtin_synthesises_bold_and_italic() {
+        // A built-in has a single face, so weight/italic must be synthesised.
+        let font = Font("Vazirmatn".to_string());
+        let reg = shape("A", 100.0, &font, 400, false);
+        let bold = shape("A", 100.0, &font, 700, false);
+        assert_eq!(reg.embolden, 0.0);
+        assert!(bold.embolden > 0.0, "bold should carry a synthetic stroke");
+        // Italic shears the outline, so its path differs from upright.
+        let ital = shape("A", 100.0, &font, 400, true);
+        assert_ne!(reg.glyphs[0].d, ital.glyphs[0].d, "italic should slant the outline");
     }
 }

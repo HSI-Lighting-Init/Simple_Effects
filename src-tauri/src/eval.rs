@@ -1005,20 +1005,24 @@ fn apply_ease(s: f32, ease_high: f32, ease_low: f32) -> f32 {
     (s * (1.0 - ease) + smooth * ease).clamp(0.0, 1.0)
 }
 
-/// The 0..1 selection amount a selector assigns to character `i` of `count` at time `t` (seconds).
-fn selector_amount(sel: &AnimSelector, i: usize, count: usize, t: f32) -> f32 {
+/// The 0..1 selection amount a selector assigns to character `i` of `count` at
+/// comp time `t_ms`. Every selector parameter is sampled from its `Track` at
+/// `t_ms`, so keyframing e.g. the range `offset` sweeps the selection over time.
+fn selector_amount(sel: &AnimSelector, i: usize, count: usize, t_ms: u32) -> f32 {
     let c = if count <= 1 { 0.5 } else { (i as f32 + 0.5) / count as f32 };
     match sel.kind {
         SelectorKind::Expression => 1.0,
         SelectorKind::Wiggly => {
-            let cor = (sel.correlation / 100.0).clamp(0.0, 1.0);
-            let sx = i as f32 * (1.0 - cor) * 1.3 + sel.spatial_phase / 57.2958;
-            let tt = t * sel.wiggles_per_sec + sel.temporal_phase / 57.2958;
-            (sel.amount / 100.0).clamp(0.0, 1.0) * noise01(sx, tt, sel.seed.max(1))
+            let t = t_ms as f32 / 1000.0;
+            let cor = (sample_track(&sel.correlation, t_ms) / 100.0).clamp(0.0, 1.0);
+            let sx = i as f32 * (1.0 - cor) * 1.3 + sample_track(&sel.spatial_phase, t_ms) / 57.2958;
+            let tt = t * sample_track(&sel.wiggles_per_sec, t_ms) + sample_track(&sel.temporal_phase, t_ms) / 57.2958;
+            (sample_track(&sel.amount, t_ms) / 100.0).clamp(0.0, 1.0) * noise01(sx, tt, sel.seed.max(1))
         }
         SelectorKind::Range => {
-            let a = (sel.start + sel.offset) / 100.0;
-            let b = (sel.end + sel.offset) / 100.0;
+            let offset = sample_track(&sel.offset, t_ms);
+            let a = (sample_track(&sel.start, t_ms) + offset) / 100.0;
+            let b = (sample_track(&sel.end, t_ms) + offset) / 100.0;
             let (ws, we) = (a.min(b), a.max(b));
             let w = (we - ws).max(1e-4);
             let inside = c >= ws && c <= we;
@@ -1042,14 +1046,14 @@ fn selector_amount(sel: &AnimSelector, i: usize, count: usize, t: f32) -> f32 {
             };
             // Feather the hard square edges by `smoothness`.
             if matches!(sel.shape, RangeShape::Square) {
-                let feather = (sel.smoothness / 100.0) * w * 0.5;
+                let feather = (sample_track(&sel.smoothness, t_ms) / 100.0) * w * 0.5;
                 if feather > 1e-4 {
                     let up = ((c - (ws - feather)) / (2.0 * feather)).clamp(0.0, 1.0);
                     let down = (((we + feather) - c) / (2.0 * feather)).clamp(0.0, 1.0);
                     s = up.min(down);
                 }
             }
-            apply_ease(s, sel.ease_high, sel.ease_low)
+            apply_ease(s, sample_track(&sel.ease_high, t_ms), sample_track(&sel.ease_low, t_ms))
         }
     }
 }
@@ -1060,34 +1064,47 @@ fn apply_animators(base: &mut [LetterTransform], animators: &[TextAnimator], cou
     if count == 0 {
         return;
     }
-    let t = t_ms as f32 / 1000.0;
     for anim in animators {
         let p = &anim.props;
+        // Sample each property track once at the playhead — they're constant
+        // across characters (the selector amount is what varies per character).
+        let pos_x = sample_track(&p.position[0], t_ms);
+        let pos_y = sample_track(&p.position[1], t_ms);
+        let rotation = sample_track(&p.rotation, t_ms);
+        let skew = sample_track(&p.skew, t_ms);
+        let skew_axis = sample_track(&p.skew_axis, t_ms);
+        let scale = sample_track(&p.scale, t_ms);
+        let opacity = sample_track(&p.opacity, t_ms);
+        let tracking = sample_track(&p.tracking, t_ms);
+        let blur = sample_track(&p.blur, t_ms);
+        let rot_x = sample_track(&p.rotation_x, t_ms);
+        let rot_y = sample_track(&p.rotation_y, t_ms);
+        let pos_z = sample_track(&p.position_z, t_ms);
         for i in 0..count.min(base.len()) {
-            let a = selector_amount(&anim.selector, i, count, t);
+            let a = selector_amount(&anim.selector, i, count, t_ms);
             if a <= 0.0 {
                 continue;
             }
             let lt = &mut base[i];
-            lt.dx += p.position[0] * a;
-            lt.dy += p.position[1] * a;
-            lt.rotation += p.rotation * a;
-            lt.skew += p.skew * a;
-            if p.skew_axis != 0.0 {
-                lt.skew_axis = p.skew_axis;
+            lt.dx += pos_x * a;
+            lt.dy += pos_y * a;
+            lt.rotation += rotation * a;
+            lt.skew += skew * a;
+            if skew_axis != 0.0 {
+                lt.skew_axis = skew_axis;
             }
-            lt.scale *= 1.0 + (p.scale / 100.0 - 1.0) * a;
-            lt.opacity *= 1.0 + (p.opacity / 100.0 - 1.0) * a;
-            lt.tracking += p.tracking * a;
-            lt.blur += p.blur * a;
+            lt.scale *= 1.0 + (scale / 100.0 - 1.0) * a;
+            lt.opacity *= 1.0 + (opacity / 100.0 - 1.0) * a;
+            lt.tracking += tracking * a;
+            lt.blur += blur * a;
             if let Some(fc) = p.fill {
                 let from = lt.fill.unwrap_or(color);
                 lt.fill = Some(blend_rgba(from, fc, a));
             }
             if per_char_3d {
-                lt.rx += p.rotation_x * a;
-                lt.ry += p.rotation_y * a;
-                lt.dz += p.position_z * a;
+                lt.rx += rot_x * a;
+                lt.ry += rot_y * a;
+                lt.dz += pos_z * a;
             }
         }
     }
@@ -1188,6 +1205,90 @@ mod tests {
         ];
         assert_eq!(sample_color(&keys, a, 999).r, 10);
         assert_eq!(sample_color(&keys, a, 1000).r, 200);
+    }
+
+    fn base_selector(kind: SelectorKind) -> AnimSelector {
+        AnimSelector {
+            kind,
+            start: Track::constant(0.0),
+            end: Track::constant(100.0),
+            offset: Track::constant(0.0),
+            smoothness: Track::constant(0.0),
+            ease_high: Track::constant(0.0),
+            ease_low: Track::constant(0.0),
+            shape: RangeShape::RampUp,
+            wiggles_per_sec: Track::constant(2.0),
+            amount: Track::constant(100.0),
+            correlation: Track::constant(50.0),
+            temporal_phase: Track::constant(0.0),
+            spatial_phase: Track::constant(0.0),
+            seed: 1,
+        }
+    }
+
+    fn zero_props() -> crate::model::AnimProps {
+        crate::model::AnimProps {
+            position: [Track::constant(0.0), Track::constant(0.0)],
+            scale: Track::constant(100.0),
+            rotation: Track::constant(0.0),
+            skew: Track::constant(0.0),
+            skew_axis: Track::constant(0.0),
+            opacity: Track::constant(100.0),
+            tracking: Track::constant(0.0),
+            blur: Track::constant(0.0),
+            fill: None,
+            char_offset: 0,
+            rotation_x: Track::constant(0.0),
+            rotation_y: Track::constant(0.0),
+            position_z: Track::constant(0.0),
+        }
+    }
+
+    #[test]
+    fn animator_position_offsets_letters() {
+        // A static Range (Ramp Up) with a Y offset should displace letters now —
+        // more toward the end of the run (ramp).
+        let mut props = zero_props();
+        props.position[1] = Track::constant(-50.0);
+        let anim = TextAnimator { selector: base_selector(SelectorKind::Range), props };
+        let mut base = vec![LetterTransform::IDENTITY; 6];
+        apply_animators(&mut base, std::slice::from_ref(&anim), 6, 0, Rgba { r: 255, g: 255, b: 255, a: 255 }, false);
+        // Last char (fully selected on a ramp) moves; magnitude grows along the run.
+        assert!(base[5].dy < -1.0, "last letter should be offset: {}", base[5].dy);
+        assert!(base[5].dy < base[1].dy, "ramp should offset later letters more");
+    }
+
+    #[test]
+    fn keyframed_offset_sweeps_over_time() {
+        // Keyframing the selector Offset makes a Range animator animate: the same
+        // letter is selected differently at different times, so its offset changes.
+        let mut sel = base_selector(SelectorKind::Range);
+        sel.shape = RangeShape::RampUp;
+        // Narrow window that slides across the run as offset goes -100 -> 0.
+        sel.start = Track::constant(0.0);
+        sel.end = Track::constant(30.0);
+        sel.offset = Track {
+            default: -100.0,
+            keys: vec![
+                Keyframe { time_ms: 0, value: -100.0, easing: Easing::Linear },
+                Keyframe { time_ms: 1000, value: 100.0, easing: Easing::Linear },
+            ],
+        };
+        let mut props = zero_props();
+        props.position[1] = Track::constant(-40.0);
+        let anim = TextAnimator { selector: sel, props };
+
+        let sample = |t: u32| {
+            let mut base = vec![LetterTransform::IDENTITY; 8];
+            apply_animators(&mut base, std::slice::from_ref(&anim), 8, t, Rgba { r: 255, g: 255, b: 255, a: 255 }, false);
+            base.iter().map(|l| l.dy).collect::<Vec<_>>()
+        };
+        let early = sample(0);
+        let mid = sample(500);
+        let late = sample(1000);
+        // The set of displaced letters must change over time (it animates).
+        assert_ne!(early, mid, "offset keyframe should change the selection over time");
+        assert_ne!(mid, late, "offset keyframe should keep sweeping");
     }
 
     #[test]

@@ -42,6 +42,26 @@ export function sampleTrack(track: Track, tMs: number): number {
   return k0.value + (k1.value - k0.value) * ease(k0.easing, u);
 }
 
+/** A keyframeless track that always reads `v` (mirrors `Track::constant`). */
+export function constTrack(v: number): Track {
+  return { keys: [], default: v };
+}
+
+/** Whether a track carries any keyframes (i.e. the "stopwatch" is on). */
+export function isKeyed(track: Track): boolean {
+  return track.keys.length > 0;
+}
+
+/** Insert or replace the keyframe at `tMs` (linear), keeping keys time-sorted.
+ * Editing a keyed track upserts at the playhead; the `default` tracks the first
+ * key so an empty track that gets its first key still reads sensibly. */
+export function upsertKey(track: Track, tMs: number, value: number): Track {
+  const keys = track.keys.filter((k) => k.timeMs !== tMs);
+  keys.push({ timeMs: tMs, value, easing: "linear" });
+  keys.sort((a, b) => a.timeMs - b.timeMs);
+  return { keys, default: track.keys.length ? track.default : value };
+}
+
 function mix(a: number, b: number, t: number): number {
   return Math.round(Math.max(0, Math.min(255, a + (b - a) * t)));
 }

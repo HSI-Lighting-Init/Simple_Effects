@@ -979,6 +979,14 @@ body {
   grid-template-columns: 1fr 1fr 1fr;
   gap: 4px 6px;
 }
+.an-presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin: 6px 0 2px;
+  font-size: 11px;
+}
 .an-num {
   display: flex;
   flex-direction: column;
@@ -988,6 +996,28 @@ body {
 .an-num input {
   width: 100%;
   min-width: 0;
+}
+.an-num-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+/* Per-field keyframe stopwatch: dim when off, accent when the field is keyed. */
+.kf-dot {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 1;
+  padding: 0 1px;
+  color: var(--line);
+}
+.kf-dot:hover {
+  color: var(--muted);
+}
+.kf-dot.on {
+  color: var(--accent);
 }
 
 .row2 {
@@ -1027,6 +1057,30 @@ body {
   padding: 2px 7px;
   font-size: 11px;
   border-radius: 5px;
+}
+
+/* An inline on/off toggle button (e.g. Italic), matching the field controls. */
+.insp-toggle-btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.insp-toggle-btn:hover {
+  border-color: var(--accent);
+}
+.insp-toggle-btn.on {
+  background: rgba(233, 69, 96, 0.18);
+  border-color: var(--accent);
+  color: #fff;
 }
 
 /* Segmented Off / Box / Cylinder switch. */
