@@ -325,10 +325,10 @@ export function drawSurface(
     dctx.clearRect(0, 0, pw, ph);
     dctx.drawImage(buf, 0, 0);
     bctx.globalCompositeOperation = "destination-over";
-    bctx.filter = `blur(${SS * 2}px)`;
-    // Two passes so the blurred fill builds up to full opacity in the gaps.
-    bctx.drawImage(dil, 0, 0);
-    bctx.drawImage(dil, 0, 0);
+    bctx.filter = `blur(${SS * 4}px)`;
+    // Several passes so the blurred fill builds up to full opacity even in the
+    // wider gaps that show at steep rotation.
+    for (let i = 0; i < 4; i++) bctx.drawImage(dil, 0, 0);
     bctx.filter = "none";
     bctx.globalCompositeOperation = "source-over";
   }
