@@ -1044,12 +1044,17 @@ fn selector_amount(sel: &AnimSelector, i: usize, count: usize, t_ms: u32) -> f32
                     x * x * (3.0 - 2.0 * x)
                 }
             };
-            // Feather the hard square edges by `smoothness`.
+            // Feather the hard square edges by `smoothness`. The soft ramp sits
+            // OUTSIDE the [ws, we] range (0 at ws-feather → 1 at ws, and 1 at we →
+            // 0 at we+feather), so every item INSIDE the range stays fully
+            // selected. (A centred straddle would eat `feather` into the range and
+            // leave the first/last selected items only partly selected — which is
+            // why a "hide then reveal" animator's end letters peeked through.)
             if matches!(sel.shape, RangeShape::Square) {
                 let feather = (sample_track(&sel.smoothness, t_ms) / 100.0) * w * 0.5;
                 if feather > 1e-4 {
-                    let up = ((c - (ws - feather)) / (2.0 * feather)).clamp(0.0, 1.0);
-                    let down = (((we + feather) - c) / (2.0 * feather)).clamp(0.0, 1.0);
+                    let up = ((c - (ws - feather)) / feather).clamp(0.0, 1.0);
+                    let down = (((we + feather) - c) / feather).clamp(0.0, 1.0);
                     s = up.min(down);
                 }
             }

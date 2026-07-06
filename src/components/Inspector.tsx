@@ -209,8 +209,8 @@ const DEFAULT_PROPS: AnimProps = {
 // A keyframed "sweep" offset track: the range selection slides across the whole
 // run over `durMs` starting at the playhead — so a Range animator reveals its
 // characters in sequence (offset 0 = all selected/hidden → the sweep clears
-// every letter, so they end fully revealed). Overshoots 100 so the feathered
-// edge fully releases the last letters (otherwise they stay shrunk/dim).
+// every letter, so they end fully revealed). Overshoots 100 so the outward
+// feather fully releases the last letter.
 function sweepOffset(tMs: number, durMs = 800): Track {
   const a = Math.max(0, Math.round(tMs));
   return {
