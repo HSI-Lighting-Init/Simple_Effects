@@ -64,22 +64,55 @@ function det3(
 
 // How far (px, in the drawing's local space) to nudge a clip polygon outward so
 // neighbouring pieces overlap and their shared hairline AA seam is covered.
-const SEAM_OUTSET = 0.75;
+const SEAM_OUTSET = 0.9;
 
-/** Push each polygon vertex out from the centroid by `px` (overlaps neighbours). */
+/** Line/line intersection: point `a0` + s·`ad` meets `b0` + t·`bd`. Null if parallel. */
+function lineIntersect(
+  a0: { x: number; y: number }, ad: { x: number; y: number },
+  b0: { x: number; y: number }, bd: { x: number; y: number }
+): { x: number; y: number } | null {
+  const det = ad.x * -bd.y - ad.y * -bd.x;
+  if (Math.abs(det) < 1e-9) return null;
+  const rx = b0.x - a0.x, ry = b0.y - a0.y;
+  const s = (rx * -bd.y - ry * -bd.x) / det;
+  return { x: a0.x + s * ad.x, y: a0.y + s * ad.y };
+}
+
+/** Dilate a convex polygon by `px`: shift every edge outward along its own normal
+ *  and re-intersect the edges. Unlike a centroid-radial scale, this guarantees
+ *  each edge (hence each shared seam) is covered by the full `px` no matter the
+ *  polygon's aspect ratio — which is exactly what a tall, thin cylinder sliver
+ *  needs (radial outset there barely overlaps the vertical seams). */
 function outsetPoly(pts: { x: number; y: number }[], px: number): { x: number; y: number }[] {
-  let gx = 0, gy = 0;
+  const n = pts.length;
+  if (n < 3) return pts;
+  let cx = 0, cy = 0;
   for (const p of pts) {
-    gx += p.x;
-    gy += p.y;
+    cx += p.x;
+    cy += p.y;
   }
-  gx /= pts.length;
-  gy /= pts.length;
-  return pts.map((p) => {
-    const dx = p.x - gx, dy = p.y - gy;
-    const len = Math.hypot(dx, dy) || 1;
-    const k = (len + px) / len;
-    return { x: gx + dx * k, y: gy + dy * k };
+  cx /= n;
+  cy /= n;
+  // Each edge, shifted outward by `px` along its (centroid-verified) normal.
+  const edges = pts.map((a, i) => {
+    const b = pts[(i + 1) % n];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    let nx = dy, ny = -dx; // rotate the edge direction 90°
+    const len = Math.hypot(nx, ny) || 1;
+    nx /= len;
+    ny /= len;
+    // Point the normal away from the centroid so we grow, not shrink.
+    if (((a.x + b.x) * 0.5 - cx) * nx + ((a.y + b.y) * 0.5 - cy) * ny < 0) {
+      nx = -nx;
+      ny = -ny;
+    }
+    return { p: { x: a.x + nx * px, y: a.y + ny * px }, d: { x: dx, y: dy } };
+  });
+  // New vertex i is where shifted edge (i-1) meets shifted edge i.
+  return pts.map((orig, i) => {
+    const e0 = edges[(i - 1 + n) % n];
+    const e1 = edges[i];
+    return lineIntersect(e0.p, e0.d, e1.p, e1.d) ?? orig;
   });
 }
 
@@ -202,6 +235,11 @@ function drawQuad(ctx: KCtx, img: CanvasImageSource, iw: number, ih: number, q: 
 /** A texture source: a loaded image or an offscreen canvas (rasterised text). */
 export type Texture = HTMLImageElement | HTMLCanvasElement;
 
+// Reused offscreen buffers: one to assemble the surface, one to snapshot it for
+// the seam dilation pass.
+let surfaceBuf: HTMLCanvasElement | null = null;
+let surfaceDilate: HTMLCanvasElement | null = null;
+
 export function drawSurface(
   ctx: KCtx,
   img: Texture,
@@ -211,10 +249,93 @@ export function drawSurface(
   const iw = img instanceof HTMLImageElement ? img.naturalWidth || img.width : img.width;
   const ih = img instanceof HTMLImageElement ? img.naturalHeight || img.height : img.height;
   if (!iw || !ih) return;
-  // The Group already set globalAlpha for the layer opacity; multiply into it
-  // rather than clobbering it.
-  const base = (typeof ctx.globalAlpha === "number" ? ctx.globalAlpha : 1) * layerOpacity;
-  for (const q of surface.quads) drawQuad(ctx, img, iw, ih, q, base);
+
+  // The seams between the (perspective) quads are covered by drawing each piece a
+  // hair larger than its neighbour (outset). That only works when the surface is
+  // OPAQUE — if the surface itself is semi-transparent (a layer opacity or, most
+  // visibly, a dissolve transition fading the decal in/out), those overlap strips
+  // get painted twice and DOUBLE-BLEND into bright hairlines. So we never paint
+  // the quads straight onto `ctx`. We assemble the whole surface OPAQUE in an
+  // offscreen buffer (overlaps just overwrite — no blend), then blit that buffer
+  // as a single image under whatever alpha the enclosing Konva Group already set.
+  // Because it's one drawImage, the fade applies uniformly and no seam can blend.
+  //
+  // We deliberately do NOT read/modify `ctx.globalAlpha`: Konva has already set it
+  // to the layer/transition opacity, and a single drawImage inherits it exactly.
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const q of surface.quads) {
+    for (const c of q.corners) {
+      const w = c.hw || 1e-6;
+      const x = c.hx / w, y = c.hy / w;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (!isFinite(minX)) return;
+  const PAD = 3;
+  minX -= PAD;
+  minY -= PAD;
+  maxX += PAD;
+  maxY += PAD;
+  const bw = Math.ceil(maxX - minX), bh = Math.ceil(maxY - minY);
+  // Fall back to painting straight onto `ctx` on a degenerate or absurd buffer
+  // size (a hairline seam is preferable to a failed allocation).
+  const buf = bw > 0 && bh > 0 && bw <= 8192 && bh <= 8192
+    ? surfaceBuf ?? (surfaceBuf = document.createElement("canvas"))
+    : null;
+  const bctx = buf ? buf.getContext("2d") : null;
+  if (!buf || !bctx) {
+    for (const q of surface.quads) drawQuad(ctx, img, iw, ih, q, layerOpacity);
+    return;
+  }
+  // Supersample the buffer so the piecewise-affine AA seams between quads land at
+  // sub-pixel size and average away on the down-blit.
+  const SS = 2;
+  const pw = bw * SS, ph = bh * SS;
+  if (buf.width !== pw || buf.height !== ph) {
+    buf.width = pw;
+    buf.height = ph;
+  }
+  bctx.setTransform(1, 0, 0, 1, 0, 0);
+  bctx.clearRect(0, 0, pw, ph);
+  // Comp-space → buffer pixels (scaled by SS); each quad opaque so overlapping
+  // seams overwrite instead of blending.
+  bctx.setTransform(SS, 0, 0, SS, -minX * SS, -minY * SS);
+  for (const q of surface.quads) drawQuad(bctx as unknown as KCtx, img, iw, ih, q, 1);
+  bctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  // Seam backfill: the quad clips leave hairline TRANSPARENT gaps between pieces.
+  // At full opacity nothing's behind the decal so they're invisible, but during a
+  // cross-fade the layer beneath bleeds through them as lines. Snapshot the
+  // assembled decal, then draw a BLURRED copy of it UNDERNEATH (`destination-over`
+  // only paints where the buffer is still clear, so the crisp texture on top is
+  // untouched). Every gap is filled with a smooth local average of its
+  // surroundings — no transparent holes remain for the layer beneath to show
+  // through, and the fill colour matches, so there's no visible seam or ghosting.
+  const dil = surfaceDilate ?? (surfaceDilate = document.createElement("canvas"));
+  if (dil.width !== pw || dil.height !== ph) {
+    dil.width = pw;
+    dil.height = ph;
+  }
+  const dctx = dil.getContext("2d");
+  if (dctx) {
+    dctx.setTransform(1, 0, 0, 1, 0, 0);
+    dctx.clearRect(0, 0, pw, ph);
+    dctx.drawImage(buf, 0, 0);
+    bctx.globalCompositeOperation = "destination-over";
+    bctx.filter = `blur(${SS * 2}px)`;
+    // Two passes so the blurred fill builds up to full opacity in the gaps.
+    bctx.drawImage(dil, 0, 0);
+    bctx.drawImage(dil, 0, 0);
+    bctx.filter = "none";
+    bctx.globalCompositeOperation = "source-over";
+  }
+
+  // One down-blit at Konva's current alpha. `ctx` carries the comp→screen
+  // transform, so place the buffer at its comp-space origin.
+  (ctx as unknown as CanvasRenderingContext2D).drawImage(buf, 0, 0, pw, ph, minX, minY, bw, bh);
 }
 
 /**
