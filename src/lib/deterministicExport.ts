@@ -39,6 +39,8 @@ export interface DeterministicOpts {
   onFrameRendered?: (tMs: number, frameIndex: number) => void;
   /** 0..1 progress for the UI. */
   onProgress?: (frac: number) => void;
+  /** Called once the render loop is done and the final encoder flush begins. */
+  onFlush?: () => void;
   /** Abort flag — checked each frame. */
   shouldAbort?: () => boolean;
 }
@@ -83,12 +85,21 @@ export async function encodeDeterministicWebm(opts: DeterministicOpts): Promise<
       const frame = new VideoFrame(canvas, { timestamp: f * frameDurUs, duration: frameDurUs });
       encoder.encode(frame, { keyFrame: f % keyEvery === 0 });
       frame.close();
-      // Don't let the encoder queue run away on big comps.
-      if (encoder.encodeQueueSize > 8) {
-        await new Promise((r) => setTimeout(r, 0));
+      // Backpressure: BLOCK until the encoder drains below the threshold before
+      // rendering the next frame. This was an `if` that yielded a single task and
+      // then kept queuing, so the software VP9 encoder fell far behind and the
+      // whole backlog was deferred to flush() — which showed as the export
+      // hanging at "100%". A `while` keeps the encoder in step with rendering so
+      // progress is honest and flush() at the end is near-instant.
+      while (encoder.encodeQueueSize > 8) {
+        if (encodeError) throw encodeError;
+        await new Promise((r) => setTimeout(r, 6));
       }
       opts.onProgress?.((f + 1) / frameCount);
     }
+    // Drain whatever's left; with the bounded queue above this is only a handful
+    // of frames, so it returns quickly instead of processing a huge backlog.
+    opts.onFlush?.();
     await encoder.flush();
     if (encodeError) throw encodeError;
     muxer.finalize();

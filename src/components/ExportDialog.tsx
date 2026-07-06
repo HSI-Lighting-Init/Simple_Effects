@@ -64,10 +64,15 @@ export default function ExportDialog({
     fps: number,
     burnFps: boolean,
     bitrate: number,
+    rateMode: "quality" | "bitrate",
   ) => void;
   onClose: () => void;
 }) {
   const [format, setFormat] = useState<"mp4" | "webm">("mp4");
+  // Rate control: "quality" drives the encoder by a 1–5 compression level
+  // (constant quality / variable size); "bitrate" targets an exact bits/s (so
+  // the file size ≈ bitrate × duration). Only one control is shown at a time.
+  const [rateMode, setRateMode] = useState<"quality" | "bitrate">("quality");
   const [level, setLevel] = useState(2);
   const [fps, setFps] = useState(defaultFps);
   const [burnFps, setBurnFps] = useState(false);
@@ -95,15 +100,21 @@ export default function ExportDialog({
   const mbps = bitrate / 1_000_000;
   const isPreset = BITRATE_PRESETS.includes(Math.round(mbps));
 
+  // The bitrate the output actually targets: the user's value in bitrate mode,
+  // or the one derived from the compression level in quality mode. Quality-mode
+  // MP4 uses CRF (variable size), so its size estimate is only approximate.
+  const effBitrate = rateMode === "bitrate" ? bitrate : bitrateForLevel(level);
+  const sizeApprox = rateMode === "quality" && format === "mp4";
+
   // Estimated output size ≈ bitrate × duration (video only; export has no audio
   // track). Estimated render time ≈ frame count × last measured ms/frame.
   const { sizeStr, timeStr, frames } = useMemo(() => {
     const durSec = durationMs / 1000;
-    const sizeBytes = (bitrate * durSec) / 8;
+    const sizeBytes = (effBitrate * durSec) / 8;
     const nFrames = Math.max(1, Math.ceil(durSec * fps));
     const est = (nFrames * readMsPerFrame()) / 1000;
     return { sizeStr: formatBytes(sizeBytes), timeStr: formatDuration(est), frames: nFrames };
-  }, [bitrate, durationMs, fps]);
+  }, [effBitrate, durationMs, fps]);
 
   // Quick reference: the estimated file size at each compression level, so the
   // trade-off is visible without dragging the slider through all five.
@@ -162,64 +173,89 @@ export default function ExportDialog({
           </label>
 
           <label className="insp-field">
-            Compression — level {level}
-            <input
-              type="range"
-              min={1}
-              max={5}
-              step={1}
-              value={level}
-              onChange={(e) => onLevel(Number(e.target.value))}
-            />
-            <span className="muted">{LEVELS[level - 1]}</span>
-            <div className="export-levels">
-              {levelSizes.map((s, i) => (
-                <span
-                  key={i}
-                  className={"export-level" + (i + 1 === level ? " active" : "")}
-                  title={LEVELS[i]}
-                  onClick={() => onLevel(i + 1)}
-                >
-                  L{i + 1} · {s}
-                </span>
-              ))}
+            Rate control
+            <div className="seg">
+              <button
+                className={"seg-btn" + (rateMode === "quality" ? " active" : "")}
+                onClick={() => setRateMode("quality")}
+              >
+                Quality (level)
+              </button>
+              <button
+                className={"seg-btn" + (rateMode === "bitrate" ? " active" : "")}
+                onClick={() => setRateMode("bitrate")}
+              >
+                Bitrate (target size)
+              </button>
             </div>
+            <span className="muted">
+              {rateMode === "quality"
+                ? "Constant quality — file size varies with the content."
+                : "Targets an exact bitrate — file size ≈ bitrate × duration."}
+            </span>
           </label>
 
-          <label className="insp-field">
-            Bitrate
-            <select
-              value={isPreset ? String(Math.round(mbps)) : "custom"}
-              onChange={(e) => {
-                setBitrateTouched(true);
-                if (e.target.value !== "custom") {
-                  setBitrate(Number(e.target.value) * 1_000_000);
-                }
-              }}
-            >
-              {BITRATE_PRESETS.map((m) => (
-                <option key={m} value={String(m)}>
-                  {m} Mbps
-                </option>
-              ))}
-              <option value="custom">Custom…</option>
-            </select>
-            {!isPreset && (
+          {rateMode === "quality" ? (
+            <label className="insp-field">
+              Compression — level {level}
               <input
-                type="number"
-                min={0.5}
-                max={200}
-                step={0.5}
-                value={Number(mbps.toFixed(1))}
+                type="range"
+                min={1}
+                max={5}
+                step={1}
+                value={level}
+                onChange={(e) => onLevel(Number(e.target.value))}
+              />
+              <span className="muted">{LEVELS[level - 1]}</span>
+              <div className="export-levels">
+                {levelSizes.map((s, i) => (
+                  <span
+                    key={i}
+                    className={"export-level" + (i + 1 === level ? " active" : "")}
+                    title={LEVELS[i]}
+                    onClick={() => onLevel(i + 1)}
+                  >
+                    L{i + 1} · ~{s}
+                  </span>
+                ))}
+              </div>
+            </label>
+          ) : (
+            <label className="insp-field">
+              Bitrate
+              <select
+                value={isPreset ? String(Math.round(mbps)) : "custom"}
                 onChange={(e) => {
                   setBitrateTouched(true);
-                  const v = Math.max(0.1, Number(e.target.value) || 0);
-                  setBitrate(Math.round(v * 1_000_000));
+                  if (e.target.value !== "custom") {
+                    setBitrate(Number(e.target.value) * 1_000_000);
+                  }
                 }}
-              />
-            )}
-            <span className="muted">{mbps.toFixed(1)} Mbps target</span>
-          </label>
+              >
+                {BITRATE_PRESETS.map((m) => (
+                  <option key={m} value={String(m)}>
+                    {m} Mbps
+                  </option>
+                ))}
+                <option value="custom">Custom…</option>
+              </select>
+              {!isPreset && (
+                <input
+                  type="number"
+                  min={0.5}
+                  max={200}
+                  step={0.5}
+                  value={Number(mbps.toFixed(1))}
+                  onChange={(e) => {
+                    setBitrateTouched(true);
+                    const v = Math.max(0.1, Number(e.target.value) || 0);
+                    setBitrate(Math.round(v * 1_000_000));
+                  }}
+                />
+              )}
+              <span className="muted">{mbps.toFixed(1)} Mbps target</span>
+            </label>
+          )}
 
           <div className="export-estimate">
             <div>
@@ -230,7 +266,7 @@ export default function ExportDialog({
             </div>
             <div>
               <span className="muted">Estimated size</span>
-              <strong>{sizeStr}</strong>
+              <strong>{sizeApprox ? `~${sizeStr}` : sizeStr}</strong>
             </div>
             <div>
               <span className="muted">Estimated render</span>
@@ -275,7 +311,7 @@ export default function ExportDialog({
             className="insp-btn active"
             disabled={needFfmpeg || checking || installing}
             onClick={() => {
-              onExport(format, level, fps, burnFps, bitrate);
+              onExport(format, level, fps, burnFps, bitrate, rateMode);
               onClose();
             }}
           >

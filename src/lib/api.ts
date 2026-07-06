@@ -561,7 +561,9 @@ export const exportVideo = (
   base64: string,
   path: string,
   format: "mp4" | "webm",
+  rateMode: "quality" | "bitrate",
   level: number,
+  bitrate: number,
   audio: AudioTrackSpec[],
   durationMs: number
 ) =>
@@ -569,7 +571,9 @@ export const exportVideo = (
     webmBase64: base64,
     path,
     format,
+    rateMode,
     level,
+    bitrate,
     audio,
     durationMs,
   });

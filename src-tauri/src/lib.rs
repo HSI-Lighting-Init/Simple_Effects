@@ -2735,15 +2735,19 @@ fn audio_filter_complex(audio: &[AudioTrack], duration_ms: u32) -> Option<String
 
 /// Save the exported video. `webm_base64` is the recorded (video-only) WebM.
 /// `format` "webm" writes it as-is when there's no audio, else remuxes with an
-/// Opus track; "mp4" transcodes to H.264 (+ AAC audio). `level` 1..5 sets the
-/// compression (1 = near-original / largest, 5 = highest compression / smallest).
-/// `audio` are the comp's audio clips to mix in; muxing needs ffmpeg.
+/// Opus track; "mp4" transcodes to H.264 (+ AAC audio). `rate_mode` picks the
+/// H.264 rate control: "bitrate" targets `bitrate` bits/s (output size ≈ bitrate
+/// × duration, matching the dialog's estimate); "quality" uses CRF from the 1..5
+/// `level` (constant quality, content-dependent size). `audio` are the comp's
+/// audio clips to mix in; muxing needs ffmpeg.
 #[tauri::command]
 fn export_video(
     webm_base64: String,
     path: String,
     format: String,
+    rate_mode: String,
     level: u8,
+    bitrate: u32,
     audio: Vec<AudioTrack>,
     duration_ms: u32,
 ) -> Result<(), String> {
@@ -2772,6 +2776,15 @@ fn export_video(
     let tmp = std::env::temp_dir().join(format!("simple_effects_export_{}.webm", std::process::id()));
     std::fs::write(&tmp, &bytes).map_err(|e| format!("temp write: {e}"))?;
 
+    // Two H.264 rate-control modes, chosen in the export dialog:
+    //  • "bitrate" — constrained average bitrate, so output size ≈ bitrate ×
+    //    duration (matches the dialog's estimate).
+    //  • "quality" — CRF (constant quality) from the 1..5 compression level;
+    //    size varies with content. This is ffmpeg's default look.
+    let by_bitrate = rate_mode == "bitrate";
+    let bitrate = bitrate.max(100_000);
+    let bv = bitrate.to_string();
+    let bufsize = (bitrate as u64 * 2).min(u32::MAX as u64).to_string();
     let crf = match level {
         1 => "16",
         2 => "20",
@@ -2798,10 +2811,13 @@ fn export_video(
             cmd.args(["-c:a", "libopus", "-b:a", "192k"]);
         }
     } else {
-        cmd.args([
-            "-c:v", "libx264", "-crf", crf, "-preset", "medium", "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-        ]);
+        cmd.args(["-c:v", "libx264"]);
+        if by_bitrate {
+            cmd.args(["-b:v", bv.as_str(), "-maxrate", bv.as_str(), "-bufsize", bufsize.as_str()]);
+        } else {
+            cmd.args(["-crf", crf]);
+        }
+        cmd.args(["-preset", "medium", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
         if filter.is_some() {
             cmd.args(["-c:a", "aac", "-b:a", "192k"]);
         }

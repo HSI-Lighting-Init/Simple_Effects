@@ -149,6 +149,7 @@ import {
 import {
   encodeDeterministicWebm,
   isDeterministicSupported,
+  bitrateForLevel,
 } from "./lib/deterministicExport";
 import type { Project } from "./bindings/Project";
 import type { ResolvedLayer } from "./bindings/ResolvedLayer";
@@ -779,20 +780,29 @@ export default function App() {
   }, [addMediaPaths]);
 
   const onAddText = useCallback(async () => {
-    const p = await addTextLayer("سلام", 140);
-    setProject(p);
+    const above = selectedIdRef.current;
+    let p = await addTextLayer("سلام", 140);
     const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
-    if (newId != null) setSelectedId(newId);
+    // Slot at the playhead, directly above the previously selected layer.
+    if (newId != null) {
+      p = await placeLayer(newId, Math.round(timeRef.current), above);
+      setSelectedId(newId);
+    }
+    setProject(p);
     await applyTime(timeRef.current);
     recordAction("add_text", { layerId: newId });
   }, [applyTime, recordAction]);
 
   // Add a whole-comp adjustment layer (seeded with a shiny-clouds effect).
   const onAddAdjustment = useCallback(async () => {
-    const p = await addAdjustmentLayer();
-    setProject(p);
+    const above = selectedIdRef.current;
+    let p = await addAdjustmentLayer();
     const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
-    if (newId != null) setSelectedId(newId);
+    if (newId != null) {
+      p = await placeLayer(newId, Math.round(timeRef.current), above);
+      setSelectedId(newId);
+    }
+    setProject(p);
     durationRef.current = p.durationMs;
     await applyTime(timeRef.current);
     recordAction("add_adjustment", { layerId: newId });
@@ -882,10 +892,14 @@ export default function App() {
   // Add an invisible 3D box/cylinder object and select it.
   const onAddShape = useCallback(
     async (shape: SurfaceShape) => {
-      const p = await addShapeLayer(shape);
-      setProject(p);
+      const above = selectedIdRef.current;
+      let p = await addShapeLayer(shape);
       const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
-      if (newId != null) setSelectedId(newId);
+      if (newId != null) {
+        p = await placeLayer(newId, Math.round(timeRef.current), above);
+        setSelectedId(newId);
+      }
+      setProject(p);
       await applyTime(timeRef.current);
       recordAction("add_shape", { shape, layerId: newId });
     },
@@ -895,10 +909,14 @@ export default function App() {
   // Create a multi-frame grid (rows×cols) and select it.
   const onAddFrameGrid = useCallback(
     async (rows: number, cols: number) => {
-      const p = await addFrameGrid(rows, cols);
-      setProject(p);
+      const above = selectedIdRef.current;
+      let p = await addFrameGrid(rows, cols);
       const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
-      if (newId != null) setSelectedId(newId);
+      if (newId != null) {
+        p = await placeLayer(newId, Math.round(timeRef.current), above);
+        setSelectedId(newId);
+      }
+      setProject(p);
       await applyTime(timeRef.current);
       recordAction("add_frame_grid", { rows, cols, layerId: newId });
     },
@@ -1912,8 +1930,13 @@ export default function App() {
       fps: number,
       burnFps: boolean,
       bitrate: number,
+      rateMode: "quality" | "bitrate",
     ) => {
       if (exportingRef.current) return;
+      // The bitrate the frame encoder targets: the user's value in bitrate mode,
+      // or one derived from the compression level in quality mode (WebCodecs has
+      // no CRF, so quality mode still needs a generous target for the WebM pass).
+      const encodeBitrate = rateMode === "bitrate" ? bitrate : bitrateForLevel(level);
       // Render the whole comp, not a group's inner scope.
       const rootP = await ensureRootScope();
       let p = rootP ?? projectRef.current;
@@ -1990,7 +2013,7 @@ export default function App() {
             : "video/webm";
           const rec = new MediaRecorder(canvas.captureStream(fps), {
             mimeType: mime,
-            videoBitsPerSecond: bitrate,
+            videoBitsPerSecond: encodeBitrate,
           });
           const chunks: BlobPart[] = [];
           rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
@@ -2043,7 +2066,7 @@ export default function App() {
               height: p.height,
               fps,
               durationMs: duration,
-              bitrate,
+              bitrate: encodeBitrate,
               renderFrame: async (tMs) => {
                 // Evaluate this exact frame and push it to the preview via a NORMAL
                 // state update. We deliberately do NOT use flushSync here: react-konva
@@ -2094,6 +2117,7 @@ export default function App() {
                   setExportMsg(`Rendering frame-accurate… ${pct}%`);
                 }
               },
+              onFlush: () => setExportMsg("Finalizing video…"),
               shouldAbort: () => !exportingRef.current,
             });
             blob = new Blob([bytes], { type: "video/webm" });
@@ -2155,7 +2179,10 @@ export default function App() {
               : "Saving…"
         );
         const base64 = await blobToBase64(blob);
-        await exportVideo(base64, path, format, level, audioTracks, p.durationMs);
+        // MP4 transcode: in "bitrate" mode target the user's bitrate (size ≈
+        // bitrate × duration); in "quality" mode use CRF from the compression
+        // level (constant quality, variable size). WebM is copied through as-is.
+        await exportVideo(base64, path, format, rateMode, level, bitrate, audioTracks, p.durationMs);
         // Calibrate the render-time estimate: record how long this export took
         // per frame so the dialog can predict the next one more accurately.
         const msPerFrame = (performance.now() - renderStartedAt) / totalFrames;
