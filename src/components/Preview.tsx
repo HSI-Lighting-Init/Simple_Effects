@@ -15,6 +15,7 @@ import {
   Image as KImage,
   Shape,
   Circle,
+  RegularPolygon,
   Line,
   Text,
   Transformer,
@@ -764,6 +765,107 @@ function ImageNode({
       opacity={r.opacity}
       {...interaction}
     />
+  );
+}
+
+// A 2D vector shape (rectangle / circle / regular polygon) with a fill, a
+// border, an outer glow and a drop shadow — all sampled by the evaluator at this
+// time (so keyframed colours/knobs animate). The glow is a second copy of the
+// shape drawn behind the main one, using its 0-offset shadow as a coloured halo
+// (Konva allows only one shadow per node, so glow + drop-shadow need two nodes).
+// The whole thing lives in a Group carrying the layer transform, so selection /
+// drag / scale / rotate + keyframe-on-commit work exactly like the other layers.
+function Shape2DNode({
+  r,
+  interaction,
+  registerRef,
+}: {
+  r: ResolvedLayer;
+  interaction: Interaction;
+  registerRef: NodeRef;
+}) {
+  const s2 = r.shape2d;
+  if (!s2) return null;
+  const w = s2.width;
+  const h = s2.height;
+  const rad = Math.min(w, h) / 2;
+
+  // Build the chosen primitive with an arbitrary extra prop bag (fill/stroke/
+  // shadow), centred on the group origin.
+  const make = (key: string, extra: Record<string, unknown>): ReactElement => {
+    if (s2.shape === "rectangle")
+      return (
+        <Rect
+          key={key}
+          width={w}
+          height={h}
+          offsetX={w / 2}
+          offsetY={h / 2}
+          cornerRadius={s2.cornerRadius}
+          {...extra}
+        />
+      );
+    if (s2.shape === "circle") return <Circle key={key} radius={rad} {...extra} />;
+    return <RegularPolygon key={key} sides={Math.max(3, s2.sides)} radius={rad} {...extra} />;
+  };
+
+  const filled = s2.filled;
+  const hasBorder = s2.borderWidth > 0;
+  const hasShadow = s2.shadowBlur > 0 || s2.shadowOffsetX !== 0 || s2.shadowOffsetY !== 0;
+  const hasGlow = s2.glowSize > 0 && s2.glowOpacity > 0;
+
+  // The glow is a copy drawn behind the main shape casting a 0-offset coloured
+  // shadow. For a filled shape it's a filled copy (the opaque main hides its
+  // body, leaving the halo); for a hollow shape it's a stroked copy so the halo
+  // hugs the outline instead of filling the empty interior.
+  const glowProps = filled
+    ? { fill: rgbaCss(s2.glowColor), shadowForStrokeEnabled: false }
+    : {
+        fillEnabled: false,
+        stroke: rgbaCss(s2.glowColor),
+        strokeWidth: Math.max(2, s2.borderWidth),
+        shadowForStrokeEnabled: true,
+      };
+
+  const mainProps: Record<string, unknown> = {
+    // Filled → the fill colour; hollow → a fully transparent fill so the interior
+    // stays empty yet the whole shape is still clickable to select/drag.
+    fill: filled ? rgbaCss(s2.fill) : "rgba(0,0,0,0)",
+    ...(hasBorder ? { stroke: rgbaCss(s2.borderColor), strokeWidth: s2.borderWidth } : {}),
+    ...(hasShadow
+      ? {
+          shadowColor: rgbaCss(s2.shadowColor),
+          shadowBlur: s2.shadowBlur,
+          shadowOffsetX: s2.shadowOffsetX,
+          shadowOffsetY: s2.shadowOffsetY,
+          shadowOpacity: s2.shadowOpacity,
+        }
+      : {}),
+  };
+
+  return (
+    <Group
+      ref={registerRef}
+      x={r.x}
+      y={r.y}
+      scaleX={r.scaleX}
+      scaleY={r.scaleY}
+      rotation={r.rotation}
+      opacity={r.opacity}
+      {...interaction}
+    >
+      {hasGlow &&
+        make("glow", {
+          listening: false,
+          shadowColor: rgbaCss(s2.glowColor),
+          shadowBlur: s2.glowSize,
+          shadowOpacity: s2.glowOpacity,
+          shadowOffsetX: 0,
+          shadowOffsetY: 0,
+          ...glowProps,
+        })}
+      {make("main", mainProps)}
+    </Group>
   );
 }
 
@@ -2154,6 +2256,10 @@ export default function Preview({
   const [panY, setPanY] = useState(0);
   const nodeRefs = useRef<Record<number, Konva.Node>>({});
   const trRef = useRef<Konva.Transformer>(null);
+  // On-screen size (px) of the Transformer handles. Shrinks for small objects so
+  // the anchors scale down with the object and don't cover it (see the attach
+  // effect below, which measures the selected node).
+  const [anchorPx, setAnchorPx] = useState(9);
 
   useLayoutEffect(() => {
     const el = wrapRef.current;
@@ -2316,6 +2422,14 @@ export default function Preview({
     const node =
       decomposeId == null && selectedId != null ? nodeRefs.current[selectedId] ?? null : null;
     tr.nodes(node ? [node] : []);
+    if (node) {
+      // Measure the selected node's on-screen size and shrink the handles for
+      // small objects (down to 3px) so they scale with the object and don't
+      // obscure it; cap at 9px for normal/large ones.
+      const rect = node.getClientRect({ skipShadow: true, skipStroke: true });
+      const minDim = Math.min(rect.width, rect.height);
+      setAnchorPx(Math.max(3, Math.min(9, minDim * 0.28)));
+    }
     tr.getLayer()?.batchDraw();
   }, [selectedId, decomposeId, resolved, images, playing, scale, project]);
 
@@ -2383,6 +2497,8 @@ export default function Preview({
           {...inter}
         />
       );
+    } else if (k.kind === "shape2d") {
+      node = <Shape2DNode r={r} interaction={inter} registerRef={reg} />;
     } else if (k.kind === "text") {
       node = (
         <TextGlyphs
@@ -2589,12 +2705,16 @@ export default function Preview({
             {!playing && (
               <Transformer
                 ref={trRef}
-                anchorSize={9 * h}
-                anchorStrokeWidth={1.5 * h}
-                anchorCornerRadius={2 * h}
-                borderStrokeWidth={1.5 * h}
-                rotateAnchorOffset={26 * h}
-                padding={2 * h}
+                // Konva keeps the Transformer at a constant SCREEN size regardless
+                // of the layer zoom, so these are plain screen px (NOT counter-
+                // scaled by 1/scale — doing that made the handles balloon when
+                // zoomed out). `anchorPx` still shrinks them for small objects.
+                anchorSize={anchorPx}
+                anchorStrokeWidth={Math.max(1, 1.5 * (anchorPx / 9))}
+                anchorCornerRadius={2 * (anchorPx / 9)}
+                borderStrokeWidth={1.5}
+                rotateAnchorOffset={Math.max(16, anchorPx * 2.6)}
+                padding={2}
                 ignoreStroke
                 flipEnabled={false}
                 rotationSnaps={[0, 90, 180, 270]}

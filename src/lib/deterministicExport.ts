@@ -53,8 +53,17 @@ export async function encodeDeterministicWebm(opts: DeterministicOpts): Promise<
   const { canvas, width, height, fps, durationMs, bitrate, renderFrame } = opts;
   if (!isDeterministicSupported()) throw new Error("WebCodecs not available");
 
-  const support = await VideoEncoder.isConfigSupported({ codec: VP9_CODEC, width, height, bitrate, framerate: fps });
-  if (!support.supported) throw new Error("VP9 encode config not supported");
+  // Prefer constant bitrate so the WebM output size tracks the target (variable
+  // bitrate undershoots badly on simple content); fall back to the default if the
+  // platform can't do CBR VP9. For MP4 the intermediate is re-encoded by ffmpeg
+  // anyway, so this mainly makes direct WebM exports match the size estimate.
+  const baseCfg: VideoEncoderConfig = { codec: VP9_CODEC, width, height, bitrate, framerate: fps };
+  let config: VideoEncoderConfig = { ...baseCfg, bitrateMode: "constant" };
+  if (!(await VideoEncoder.isConfigSupported(config)).supported) {
+    config = baseCfg;
+    if (!(await VideoEncoder.isConfigSupported(config)).supported)
+      throw new Error("VP9 encode config not supported");
+  }
 
   const muxer = new Muxer({
     target: new ArrayBufferTarget(),
@@ -69,7 +78,7 @@ export async function encodeDeterministicWebm(opts: DeterministicOpts): Promise<
       encodeError = e;
     },
   });
-  encoder.configure({ codec: VP9_CODEC, width, height, bitrate, framerate: fps });
+  encoder.configure(config);
 
   const frameCount = Math.max(1, Math.round((durationMs / 1000) * fps));
   const frameDurUs = Math.round(1_000_000 / fps);

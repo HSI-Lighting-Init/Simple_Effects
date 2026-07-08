@@ -11,6 +11,8 @@ import type { FontFace } from "../bindings/FontFace";
 import type { Rgba } from "../bindings/Rgba";
 import type { Effect } from "../bindings/Effect";
 import type { SurfaceShape } from "../bindings/SurfaceShape";
+import type { Shape2DStyle } from "../bindings/Shape2DStyle";
+import type { VectorShape } from "../bindings/VectorShape";
 import type { ConstrainMode } from "../bindings/ConstrainMode";
 import type { TextStyle } from "../bindings/TextStyle";
 import type { TextAnimator } from "../bindings/TextAnimator";
@@ -233,6 +235,14 @@ export const setTextAnim = (layerId: number, anim: LetterAnimation | null) =>
 /** Add an invisible 3D box/cylinder object that images can be pinned to. */
 export const addShapeLayer = (shape: SurfaceShape) =>
   invoke<Project>("add_shape_layer", { shape });
+
+/** Add a 2D vector shape (rectangle/circle/polygon) with fill/border/glow/shadow. */
+export const addShape2dLayer = (shape: VectorShape) =>
+  invoke<Project>("add_shape2d_layer", { shape });
+
+/** Replace a Shape2D layer's paint style (colours + keyframe tracks) wholesale. */
+export const setShape2d = (layerId: number, style: Shape2DStyle) =>
+  invoke<Project>("set_shape2d", { layerId, style });
 
 /** Add a multi-frame grid (rows×cols) of image cells. */
 export const addFrameGrid = (rows: number, cols: number) =>

@@ -10,6 +10,7 @@ import type { LetterAnimation } from "./LetterAnimation";
 import type { LetterOverride } from "./LetterOverride";
 import type { LinkedEffectGroup } from "./LinkedEffectGroup";
 import type { Rgba } from "./Rgba";
+import type { Shape2DStyle } from "./Shape2DStyle";
 import type { SurfaceShape } from "./SurfaceShape";
 import type { TextAnimator } from "./TextAnimator";
 import type { TextLayerStyles } from "./TextLayerStyles";
@@ -128,4 +129,4 @@ lineColorKeys: Array<ColorKey>,
  * single photo) instead of its own `src`, and each cell's effect stack
  * applies to that slice. `None` = per-cell images (the classic mode).
  */
-background: string | null, } | { "kind": "video", src: string, width: number, height: number, durationMs: number, } | { "kind": "audio", src: string, durationMs: number, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", };
+background: string | null, } | { "kind": "video", src: string, width: number, height: number, durationMs: number, } | { "kind": "audio", src: string, durationMs: number, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", } | { "kind": "shape2d", style: Shape2DStyle, };

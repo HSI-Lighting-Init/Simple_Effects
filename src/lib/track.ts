@@ -62,6 +62,21 @@ export function upsertKey(track: Track, tMs: number, value: number): Track {
   return { keys, default: track.keys.length ? track.default : value };
 }
 
+/** Whether a colour-key list carries any keyframes (its "stopwatch" is on). */
+export function isColorKeyed(keys: ColorKey[]): boolean {
+  return keys.length > 0;
+}
+
+/** Insert or replace the colour keyframe at `tMs`, keeping keys time-sorted.
+ * Mirrors `upsertKey` for colours (used by the shape border/glow/shadow pickers
+ * to key a colour at the playhead). */
+export function upsertColorKey(keys: ColorKey[], tMs: number, color: Rgba): ColorKey[] {
+  const next = keys.filter((k) => k.timeMs !== tMs);
+  next.push({ timeMs: tMs, color, easing: "easeInOut" });
+  next.sort((a, b) => a.timeMs - b.timeMs);
+  return next;
+}
+
 function mix(a: number, b: number, t: number): number {
   return Math.round(Math.max(0, Math.min(255, a + (b - a) * t)));
 }

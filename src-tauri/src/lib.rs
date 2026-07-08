@@ -18,8 +18,8 @@ use tauri::{Manager, State};
 use eval::ResolvedLayer;
 use model::{
     ColorKey, ConstrainMode, Decal, Easing, Effect, FrameCell, GridVertex, Keyframe, Layer,
-    LayerKind, LetterAnimation, LetterOverride, LinkedEffectGroup, Project, Rgba, SurfaceShape,
-    Track, Transform, TransformEdit, Transition, TransitionKind,
+    LayerKind, LetterAnimation, LetterOverride, LinkedEffectGroup, Project, Rgba, Shape2DStyle,
+    SurfaceShape, Track, Transform, TransformEdit, Transition, TransitionKind, VectorShape,
 };
 use text::{Font, FontFace, ShapedText};
 
@@ -1387,6 +1387,63 @@ fn add_shape_layer(state: State<AppState>, shape: SurfaceShape) -> Project {
     project.clone()
 }
 
+/// Add a 2D vector shape (rectangle / circle / polygon) centred in the comp,
+/// sized to ~30% of it, with a plain fill (no border/glow/shadow yet). Select it
+/// and style it in the inspector. Undoable.
+#[tauri::command]
+fn add_shape2d_layer(state: State<AppState>, shape: String) -> Result<Project, String> {
+    let vs = match shape.as_str() {
+        "rectangle" => VectorShape::Rectangle,
+        "circle" => VectorShape::Circle,
+        "polygon" => VectorShape::Polygon,
+        _ => return Err(format!("unknown shape '{shape}'")),
+    };
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let next_id = max_layer_id(&project.layers) + 1;
+    let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
+    let end_ms = default_new_layer_end(project.duration_ms);
+    let size = (project.width.min(project.height) as f32) * 0.3;
+    let name = match vs {
+        VectorShape::Rectangle => "Rectangle",
+        VectorShape::Circle => "Circle",
+        VectorShape::Polygon => "Polygon",
+    };
+    project.layers.push(Layer {
+        id: next_id,
+        name: name.into(),
+        start_ms: 0,
+        end_ms,
+        kind: LayerKind::Shape2D { style: Shape2DStyle::new(vs, size) },
+        transform: Transform::at(cx, cy),
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+    Ok(project.clone())
+}
+
+/// Replace a `Shape2D` layer's paint style wholesale (the frontend owns the
+/// keyframe editing — it builds the colour-key lists and tracks and sends the
+/// finished style, mirroring how text animators are set). Undoable.
+#[tauri::command]
+fn set_shape2d(state: State<AppState>, layer_id: u32, style: Shape2DStyle) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Shape2D { style: s, .. } => *s = style,
+        _ => return Err("not a shape2d layer".into()),
+    }
+    Ok(project.clone())
+}
+
 /// Return only the paths that still exist as files on disk. Used to prune the
 /// persisted media bin on startup so moved/deleted files drop out of it.
 #[tauri::command]
@@ -2733,13 +2790,27 @@ fn audio_filter_complex(audio: &[AudioTrack], duration_ms: u32) -> Option<String
     Some(fc)
 }
 
+/// Target video bitrate (bits/s) for a 1..5 compression level (1 = near-original
+/// / largest, 5 = highest compression / smallest). Mirrors the frontend's
+/// `bitrateForLevel` so the dialog's size estimate matches the encoder.
+fn bitrate_for_level(level: u8) -> u32 {
+    let mbps = match level {
+        1 => 24,
+        2 => 14,
+        3 => 8,
+        4 => 5,
+        _ => 3,
+    };
+    mbps * 1_000_000
+}
+
 /// Save the exported video. `webm_base64` is the recorded (video-only) WebM.
 /// `format` "webm" writes it as-is when there's no audio, else remuxes with an
 /// Opus track; "mp4" transcodes to H.264 (+ AAC audio). `rate_mode` picks the
-/// H.264 rate control: "bitrate" targets `bitrate` bits/s (output size ≈ bitrate
-/// × duration, matching the dialog's estimate); "quality" uses CRF from the 1..5
-/// `level` (constant quality, content-dependent size). `audio` are the comp's
-/// audio clips to mix in; muxing needs ffmpeg.
+/// H.264 rate control (always constrained ABR so size is predictable): "bitrate"
+/// targets `bitrate` bits/s; "quality" targets the 1..5 `level`'s preset bitrate.
+/// Either way output size ≈ target × duration, matching the dialog's estimate.
+/// `audio` are the comp's audio clips to mix in; muxing needs ffmpeg.
 #[tauri::command]
 fn export_video(
     webm_base64: String,
@@ -2776,22 +2847,16 @@ fn export_video(
     let tmp = std::env::temp_dir().join(format!("simple_effects_export_{}.webm", std::process::id()));
     std::fs::write(&tmp, &bytes).map_err(|e| format!("temp write: {e}"))?;
 
-    // Two H.264 rate-control modes, chosen in the export dialog:
-    //  • "bitrate" — constrained average bitrate, so output size ≈ bitrate ×
-    //    duration (matches the dialog's estimate).
-    //  • "quality" — CRF (constant quality) from the 1..5 compression level;
-    //    size varies with content. This is ffmpeg's default look.
-    let by_bitrate = rate_mode == "bitrate";
-    let bitrate = bitrate.max(100_000);
-    let bv = bitrate.to_string();
-    let bufsize = (bitrate as u64 * 2).min(u32::MAX as u64).to_string();
-    let crf = match level {
-        1 => "16",
-        2 => "20",
-        3 => "23",
-        4 => "27",
-        _ => "32",
-    };
+    // Both export modes target a bitrate so the output size is predictable and
+    // matches the dialog's estimate (size ≈ bitrate × duration):
+    //  • "bitrate" — the user's exact bitrate.
+    //  • "quality" — the compression level's preset bitrate (1 = near-original …
+    //    5 = smallest). Earlier this used CRF (constant quality), whose size is
+    //    content-dependent and ignored the estimate entirely — a level-5 render
+    //    came out far smaller than predicted. Constrained ABR fixes that.
+    let target = if rate_mode == "bitrate" { bitrate } else { bitrate_for_level(level) }.max(100_000);
+    let bv = target.to_string();
+    let bufsize = (target as u64 * 2).min(u32::MAX as u64).to_string();
 
     let mut cmd = std::process::Command::new(&ffmpeg);
     cmd.args(["-y", "-i"]).arg(&tmp);
@@ -2811,13 +2876,11 @@ fn export_video(
             cmd.args(["-c:a", "libopus", "-b:a", "192k"]);
         }
     } else {
-        cmd.args(["-c:v", "libx264"]);
-        if by_bitrate {
-            cmd.args(["-b:v", bv.as_str(), "-maxrate", bv.as_str(), "-bufsize", bufsize.as_str()]);
-        } else {
-            cmd.args(["-crf", crf]);
-        }
-        cmd.args(["-preset", "medium", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
+        cmd.args([
+            "-c:v", "libx264", "-b:v", bv.as_str(), "-maxrate", bv.as_str(),
+            "-bufsize", bufsize.as_str(), "-preset", "medium", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+        ]);
         if filter.is_some() {
             cmd.args(["-c:a", "aac", "-b:a", "192k"]);
         }
@@ -2860,6 +2923,16 @@ fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
             f(rotation_x);
             f(rotation_y);
             f(rotation_z);
+        }
+        LayerKind::Shape2D { style } => {
+            f(&mut style.corner_radius);
+            f(&mut style.border_width);
+            f(&mut style.glow_size);
+            f(&mut style.glow_opacity);
+            f(&mut style.shadow_blur);
+            f(&mut style.shadow_offset_x);
+            f(&mut style.shadow_offset_y);
+            f(&mut style.shadow_opacity);
         }
         LayerKind::FrameGrid { vertices, cells, linked, .. } => {
             for v in vertices.iter_mut() {
@@ -3129,6 +3202,8 @@ pub fn run() {
             clear_letter_overrides,
             set_decompose_key,
             add_shape_layer,
+            add_shape2d_layer,
+            set_shape2d,
             add_frame_grid,
             filter_existing_files,
             set_cell_image,

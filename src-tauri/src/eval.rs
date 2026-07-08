@@ -12,8 +12,8 @@ use ts_rs::TS;
 
 use crate::model::{
     AnimSelector, ColorKey, Easing, Effect, FitMode, GridVertex, Layer, LayerKind, LetterAnimation,
-    LetterPreset, LinkedEffectGroup, Project, RangeShape, Rgba, SelectorKind, TextAnimator, Track,
-    TransitionKind,
+    LetterPreset, LinkedEffectGroup, Project, RangeShape, Rgba, SelectorKind, Shape2DStyle,
+    TextAnimator, Track, TransitionKind, VectorShape,
 };
 use crate::surface::{self, QuadVertex, ResolvedShapeFrame, ResolvedSurface, ShapeState, SurfaceQuad, Vec2};
 
@@ -56,6 +56,59 @@ pub struct ResolvedLayer {
     /// Resolved child layers when this is a `Group` (precomp) — the frontend
     /// renders them nested under this layer's transform. `None` otherwise.
     pub group: Option<ResolvedGroup>,
+    /// Resolved 2D vector shape (fill/border/glow/shadow, every colour + knob
+    /// sampled at this time) when this is a `Shape2D` layer. `None` otherwise.
+    pub shape2d: Option<ResolvedShape2D>,
+}
+
+/// A `Shape2D` resolved at one instant: the geometry plus every paint property
+/// sampled at this time (colours interpolated from their key lists, numeric
+/// knobs from their tracks). camelCase → Konva-friendly on the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ResolvedShape2D {
+    pub shape: VectorShape,
+    pub width: f32,
+    pub height: f32,
+    pub sides: u32,
+    pub corner_radius: f32,
+    /// false = hollow (outline only).
+    pub filled: bool,
+    pub fill: Rgba,
+    pub border_width: f32,
+    pub border_color: Rgba,
+    pub glow_color: Rgba,
+    pub glow_size: f32,
+    pub glow_opacity: f32,
+    pub shadow_color: Rgba,
+    pub shadow_blur: f32,
+    pub shadow_offset_x: f32,
+    pub shadow_offset_y: f32,
+    pub shadow_opacity: f32,
+}
+
+/// Sample every keyframeable property of a `Shape2D` style at `t_ms`.
+fn resolve_shape2d(s: &Shape2DStyle, t_ms: u32) -> ResolvedShape2D {
+    ResolvedShape2D {
+        shape: s.shape,
+        width: s.width.max(1.0),
+        height: s.height.max(1.0),
+        sides: s.sides.max(3),
+        corner_radius: sample_track(&s.corner_radius, t_ms).max(0.0),
+        filled: s.filled,
+        fill: sample_color(&s.fill_keys, s.fill, t_ms),
+        border_width: sample_track(&s.border_width, t_ms).max(0.0),
+        border_color: sample_color(&s.border_color_keys, s.border_color, t_ms),
+        glow_color: sample_color(&s.glow_color_keys, s.glow_color, t_ms),
+        glow_size: sample_track(&s.glow_size, t_ms).max(0.0),
+        glow_opacity: sample_track(&s.glow_opacity, t_ms).clamp(0.0, 1.0),
+        shadow_color: sample_color(&s.shadow_color_keys, s.shadow_color, t_ms),
+        shadow_blur: sample_track(&s.shadow_blur, t_ms).max(0.0),
+        shadow_offset_x: sample_track(&s.shadow_offset_x, t_ms),
+        shadow_offset_y: sample_track(&s.shadow_offset_y, t_ms),
+        shadow_opacity: sample_track(&s.shadow_opacity, t_ms).clamp(0.0, 1.0),
+    }
 }
 
 /// A nested composition resolved at one instant: its child layers, each already
@@ -876,6 +929,12 @@ fn resolve_layers(
                 _ => None,
             };
 
+            // Shape2D → its paint properties sampled at this time.
+            let shape2d = match &layer.kind {
+                LayerKind::Shape2D { style } => Some(resolve_shape2d(style, t_ms)),
+                _ => None,
+            };
+
             // A decal is baked into comp space, so its image-layer transform is
             // identity (only opacity still applies). Everything else uses its own
             // resolved transform.
@@ -897,6 +956,7 @@ fn resolve_layers(
                 transition: resolve_transition(layer, t_ms),
                 frame_grid,
                 group,
+                shape2d,
             }
         })
         .collect()

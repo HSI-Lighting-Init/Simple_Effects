@@ -3,6 +3,7 @@ import type { LetterTransform } from "./LetterTransform";
 import type { ResolvedEffect } from "./ResolvedEffect";
 import type { ResolvedFrameGrid } from "./ResolvedFrameGrid";
 import type { ResolvedGroup } from "./ResolvedGroup";
+import type { ResolvedShape2D } from "./ResolvedShape2D";
 import type { ResolvedShapeFrame } from "./ResolvedShapeFrame";
 import type { ResolvedSurface } from "./ResolvedSurface";
 import type { ResolvedTransition } from "./ResolvedTransition";
@@ -56,4 +57,9 @@ frameGrid: ResolvedFrameGrid | null,
  * Resolved child layers when this is a `Group` (precomp) — the frontend
  * renders them nested under this layer's transform. `None` otherwise.
  */
-group: ResolvedGroup | null, };
+group: ResolvedGroup | null, 
+/**
+ * Resolved 2D vector shape (fill/border/glow/shadow, every colour + knob
+ * sampled at this time) when this is a `Shape2D` layer. `None` otherwise.
+ */
+shape2d: ResolvedShape2D | null, };

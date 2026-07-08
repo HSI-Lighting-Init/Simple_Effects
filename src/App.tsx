@@ -38,6 +38,8 @@ import {
   enterGroup,
   exitGroup,
   addShapeLayer,
+  addShape2dLayer,
+  setShape2d,
   setCellImage,
   clearCellImage,
   setGridBackground,
@@ -159,6 +161,8 @@ import type { Font } from "./bindings/Font";
 import type { Rgba } from "./bindings/Rgba";
 import type { Effect } from "./bindings/Effect";
 import type { SurfaceShape } from "./bindings/SurfaceShape";
+import type { VectorShape } from "./bindings/VectorShape";
+import type { Shape2DStyle } from "./bindings/Shape2DStyle";
 import type { TextStyle } from "./bindings/TextStyle";
 import type { TextAnimator } from "./bindings/TextAnimator";
 import type { TextLayerStyles } from "./bindings/TextLayerStyles";
@@ -902,6 +906,36 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("add_shape", { shape, layerId: newId });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Add a 2D vector shape (rectangle/circle/polygon) at the playhead, above the
+  // selected layer — same placement flow as the other layer types.
+  const onAddShape2d = useCallback(
+    async (shape: VectorShape) => {
+      const above = selectedIdRef.current;
+      let p = await addShape2dLayer(shape);
+      const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
+      if (newId != null) {
+        p = await placeLayer(newId, Math.round(timeRef.current), above);
+        setSelectedId(newId);
+      }
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("add_shape2d", { shape, layerId: newId });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Edit a Shape2D layer's paint style (fill/border/glow/shadow — the inspector
+  // builds the colour keys + tracks and sends the whole style).
+  const onSetShape2d = useCallback(
+    async (layerId: number, style: Shape2DStyle) => {
+      const p = await setShape2d(layerId, style);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("set_shape2d", { layerId });
     },
     [applyTime, recordAction]
   );
@@ -2945,6 +2979,10 @@ export default function App() {
         { label: "Text", onClick: onAddText },
         { label: "Image…", onClick: onOpenImage },
         { separator: true },
+        { label: "Rectangle", onClick: () => onAddShape2d("rectangle") },
+        { label: "Circle", onClick: () => onAddShape2d("circle") },
+        { label: "Polygon", onClick: () => onAddShape2d("polygon") },
+        { separator: true },
         { label: "3D Box", onClick: () => onAddShape("box") },
         { label: "3D Cylinder", onClick: () => onAddShape("cylinder") },
         { separator: true },
@@ -3183,6 +3221,8 @@ export default function App() {
         <Inspector
           layer={selectedLayer}
           timeMs={time}
+          compWidth={project.width}
+          compHeight={project.height}
           fonts={fonts}
           onRefreshFonts={refreshFonts}
           decomposed={selectedLayer != null && decomposeId === selectedLayer.id}
@@ -3199,6 +3239,7 @@ export default function App() {
           onSetGpuFxStatic={onSetGpuFxStatic}
           onShapeParams={onShapeParams}
           onShapeRotKey={onShapeRotKey}
+          onSetShape2d={onSetShape2d}
           onAttachToShape={onAttachToShape}
           onKeyDecal={onKeyDecal}
           onSetDecalFace={onSetDecalFace}

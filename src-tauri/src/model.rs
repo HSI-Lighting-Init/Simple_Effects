@@ -261,6 +261,11 @@ pub enum LayerKind {
     /// over the layer's time span. Currently drives the GPU "shiny clouds"
     /// overlay; the frontend composites it over the layers below.
     Adjustment {},
+    /// A 2D vector shape (rectangle, circle, or regular polygon) with a fill, a
+    /// border, an outer glow and a drop shadow — each colour keyframeable and the
+    /// numeric knobs on keyframe tracks. `style` carries the shape type, its base
+    /// size, and all paint properties (the layer transform scales/rotates it).
+    Shape2D { style: Shape2DStyle },
 }
 
 fn default_weight() -> u16 {
@@ -884,6 +889,112 @@ pub struct TextLayerStyles {
 pub enum SurfaceShape {
     Box,
     Cylinder,
+}
+
+/// The 2D vector primitive a `Shape2D` layer draws.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum VectorShape {
+    Rectangle,
+    Circle,
+    Polygon,
+}
+
+/// The paint style of a `Shape2D` layer. Every colour is keyframeable via its
+/// `*_keys` list (empty = the static base colour, mirroring text colour); every
+/// numeric knob is a keyframeable `Track`. Fields default to sensible values so
+/// older projects and the frontend builder stay in sync.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct Shape2DStyle {
+    pub shape: VectorShape,
+    /// Base bounding-box size in comp px (the layer transform scales/rotates on
+    /// top). Adjustable with the width/height sliders.
+    #[serde(default = "default_shape_size")]
+    pub width: f32,
+    #[serde(default = "default_shape_size")]
+    pub height: f32,
+    /// Regular-polygon side count (>= 3). Ignored for rectangle/circle.
+    #[serde(default = "default_sides")]
+    pub sides: u32,
+    /// Rectangle corner radius (px). Ignored for circle/polygon.
+    #[serde(default)]
+    pub corner_radius: Track,
+    /// false = hollow (outline only, no fill) — the border/glow still draw.
+    #[serde(default = "default_true")]
+    pub filled: bool,
+    // --- Fill ---
+    pub fill: Rgba,
+    #[serde(default, rename = "fillKeys")]
+    pub fill_keys: Vec<ColorKey>,
+    // --- Border / stroke ---
+    #[serde(default)]
+    pub border_width: Track,
+    pub border_color: Rgba,
+    #[serde(default, rename = "borderColorKeys")]
+    pub border_color_keys: Vec<ColorKey>,
+    // --- Outer glow (a coloured halo around the shape) ---
+    pub glow_color: Rgba,
+    #[serde(default, rename = "glowColorKeys")]
+    pub glow_color_keys: Vec<ColorKey>,
+    #[serde(default)]
+    pub glow_size: Track,
+    #[serde(default = "one_track")]
+    pub glow_opacity: Track,
+    // --- Drop shadow ---
+    pub shadow_color: Rgba,
+    #[serde(default, rename = "shadowColorKeys")]
+    pub shadow_color_keys: Vec<ColorKey>,
+    #[serde(default)]
+    pub shadow_blur: Track,
+    #[serde(default)]
+    pub shadow_offset_x: Track,
+    #[serde(default)]
+    pub shadow_offset_y: Track,
+    #[serde(default = "one_track")]
+    pub shadow_opacity: Track,
+}
+
+fn default_sides() -> u32 {
+    6
+}
+fn default_shape_size() -> f32 {
+    300.0
+}
+fn default_true() -> bool {
+    true
+}
+
+impl Shape2DStyle {
+    /// A new shape style with a light fill, no border/glow/shadow yet, and
+    /// sensible defaults ready for the user to style.
+    pub fn new(shape: VectorShape, size: f32) -> Self {
+        Shape2DStyle {
+            shape,
+            width: size,
+            height: size,
+            sides: default_sides(),
+            corner_radius: Track::constant(if shape == VectorShape::Rectangle { 24.0 } else { 0.0 }),
+            filled: true,
+            fill: Rgba { r: 90, g: 150, b: 240, a: 255 },
+            fill_keys: vec![],
+            border_width: Track::constant(0.0),
+            border_color: Rgba { r: 255, g: 255, b: 255, a: 255 },
+            border_color_keys: vec![],
+            glow_color: Rgba { r: 120, g: 200, b: 255, a: 255 },
+            glow_color_keys: vec![],
+            glow_size: Track::constant(0.0),
+            glow_opacity: Track::constant(1.0),
+            shadow_color: Rgba { r: 0, g: 0, b: 0, a: 255 },
+            shadow_color_keys: vec![],
+            shadow_blur: Track::constant(0.0),
+            shadow_offset_x: Track::constant(0.0),
+            shadow_offset_y: Track::constant(0.0),
+            shadow_opacity: Track::constant(1.0),
+        }
+    }
 }
 
 /// Pins a layer (image or text) to a `Shape3D` so it renders as a decal on the

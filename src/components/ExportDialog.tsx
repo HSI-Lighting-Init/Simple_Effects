@@ -101,10 +101,9 @@ export default function ExportDialog({
   const isPreset = BITRATE_PRESETS.includes(Math.round(mbps));
 
   // The bitrate the output actually targets: the user's value in bitrate mode,
-  // or the one derived from the compression level in quality mode. Quality-mode
-  // MP4 uses CRF (variable size), so its size estimate is only approximate.
+  // or the compression level's preset bitrate in quality mode. Both modes encode
+  // at that target (constrained ABR), so the size estimate holds for both.
   const effBitrate = rateMode === "bitrate" ? bitrate : bitrateForLevel(level);
-  const sizeApprox = rateMode === "quality" && format === "mp4";
 
   // Estimated output size ≈ bitrate × duration (video only; export has no audio
   // track). Estimated render time ≈ frame count × last measured ms/frame.
@@ -190,8 +189,8 @@ export default function ExportDialog({
             </div>
             <span className="muted">
               {rateMode === "quality"
-                ? "Constant quality — file size varies with the content."
-                : "Targets an exact bitrate — file size ≈ bitrate × duration."}
+                ? "Preset levels — file size ≈ the level's bitrate × duration."
+                : "Exact bitrate — file size ≈ bitrate × duration."}
             </span>
           </label>
 
@@ -266,7 +265,7 @@ export default function ExportDialog({
             </div>
             <div>
               <span className="muted">Estimated size</span>
-              <strong>{sizeApprox ? `~${sizeStr}` : sizeStr}</strong>
+              <strong>{sizeStr}</strong>
             </div>
             <div>
               <span className="muted">Estimated render</span>

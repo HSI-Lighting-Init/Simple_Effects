@@ -17,7 +17,10 @@ import type { AnimProps } from "../bindings/AnimProps";
 import type { Track } from "../bindings/Track";
 import type { FontFace } from "../bindings/FontFace";
 import { fontStyles } from "../lib/api";
-import { sampleTrack, constTrack, upsertKey, isKeyed } from "../lib/track";
+import { sampleTrack, constTrack, upsertKey, isKeyed, sampleColor, isColorKeyed, upsertColorKey } from "../lib/track";
+import type { ColorKey } from "../bindings/ColorKey";
+import type { Shape2DStyle } from "../bindings/Shape2DStyle";
+import type { VectorShape } from "../bindings/VectorShape";
 import type { SelectorKind } from "../bindings/SelectorKind";
 import type { RangeShape } from "../bindings/RangeShape";
 import type { TextLayerStyles } from "../bindings/TextLayerStyles";
@@ -151,16 +154,8 @@ function TextStyleSection({
       </label>
 
       <div className="insp-sep">Typography</div>
-      <div className="row2">
-        <label className="insp-field">
-          Tracking (px)
-          <input type="number" step={0.5} value={s.tracking} onChange={(e) => patch({ tracking: Number(e.target.value) })} />
-        </label>
-        <label className="insp-field">
-          Baseline (px)
-          <input type="number" step={0.5} value={s.baselineShift} onChange={(e) => patch({ baselineShift: Number(e.target.value) })} />
-        </label>
-      </div>
+      {effSlider("Tracking (px)", s.tracking, -50, 100, 0.5, (v) => patch({ tracking: v }))}
+      {effSlider("Baseline (px)", s.baselineShift, -100, 100, 0.5, (v) => patch({ baselineShift: v }))}
       {style && (
         <button className="insp-btn" onClick={() => onSet(layerId, null)}>
           Reset to plain
@@ -245,12 +240,23 @@ function makeAnimPreset(kind: "fade" | "rise" | "scale" | "wiggle", tMs: number)
   return { selector, props };
 }
 
-// Compact labelled number input.
+// Slider bounds for a number field: use the provided min/max (defaulting to a
+// 0..100 range) and always widen to include the current value, so the thumb is
+// reachable and a value outside the nominal range is never clamped by the track.
+function sliderBounds(value: number, min?: number, max?: number): [number, number] {
+  return [Math.min(min ?? 0, value), Math.max(max ?? 100, value)];
+}
+
+// Compact labelled number field: a slider plus a number box (drag or type).
 function NumField({ label, value, step = 1, min, max, onChange }: { label: string; value: number; step?: number; min?: number; max?: number; onChange: (v: number) => void }) {
+  const [lo, hi] = sliderBounds(value, min, max);
   return (
     <label className="an-num">
-      <span>{label}</span>
-      <input type="number" value={value} step={step} min={min} max={max} onChange={(e) => onChange(Number(e.target.value))} />
+      <span className="an-num-label">
+        <span className="an-num-name">{label}</span>
+        <input className="an-num-box" type="number" value={value} step={step} min={min} max={max} onChange={(e) => e.target.value !== "" && onChange(Number(e.target.value))} />
+      </span>
+      <input type="range" min={lo} max={hi} step={step} value={Math.max(lo, Math.min(hi, value))} onChange={(e) => onChange(Number(e.target.value))} />
     </label>
   );
 }
@@ -281,6 +287,59 @@ function KeyNumField({
   const disp = Math.round(val * 1000) / 1000;
   const setVal = (v: number) => onChange(keyed ? upsertKey(track, tMs, v) : constTrack(v));
   const toggle = () => onChange(keyed ? constTrack(val) : upsertKey(constTrack(val), tMs, val));
+  const [lo, hi] = sliderBounds(val, min, max);
+  return (
+    <label className="an-num">
+      <span className="an-num-label">
+        <span className="an-num-name">
+          {label}
+          <button
+            type="button"
+            className={"kf-dot" + (keyed ? " on" : "")}
+            title={keyed ? `Keyframed (${track.keys.length}) — click to freeze at this value` : "Keyframe at the playhead"}
+            onClick={(e) => {
+              e.preventDefault();
+              toggle();
+            }}
+          >
+            ◆
+          </button>
+        </span>
+        <input className="an-num-box" type="number" value={disp} step={step} min={min} max={max} onChange={(e) => setVal(Number(e.target.value))} />
+      </span>
+      <input type="range" min={lo} max={hi} step={step} value={Math.max(lo, Math.min(hi, val))} onChange={(e) => setVal(Number(e.target.value))} />
+    </label>
+  );
+}
+
+// A keyframeable colour field: a swatch plus a ◆ stopwatch. Editing the swatch
+// sets the base colour, or upserts a key at the playhead when keyed; the dot
+// toggles keyframing on/off. The colour shown is the value sampled at `tMs`.
+// Mirrors KeyNumField, for colours.
+function ColorKeyField({
+  label,
+  color,
+  keys,
+  tMs,
+  onChange,
+}: {
+  label: string;
+  color: Rgba;
+  keys: ColorKey[];
+  tMs: number;
+  onChange: (color: Rgba, keys: ColorKey[]) => void;
+}) {
+  const keyed = isColorKeyed(keys);
+  const cur = sampleColor(keys, color, tMs);
+  const setColor = (rgb: { r: number; g: number; b: number }) => {
+    const c: Rgba = { ...rgb, a: 255 };
+    if (keyed) onChange(color, upsertColorKey(keys, tMs, c));
+    else onChange(c, keys);
+  };
+  const toggle = () => {
+    if (keyed) onChange(cur, []); // freeze at the current colour
+    else onChange(color, upsertColorKey([], tMs, cur));
+  };
   return (
     <label className="an-num">
       <span className="an-num-label">
@@ -288,7 +347,7 @@ function KeyNumField({
         <button
           type="button"
           className={"kf-dot" + (keyed ? " on" : "")}
-          title={keyed ? `Keyframed (${track.keys.length}) — click to freeze at this value` : "Keyframe at the playhead"}
+          title={keyed ? `Keyframed (${keys.length}) — click to freeze at this colour` : "Keyframe the colour at the playhead"}
           onClick={(e) => {
             e.preventDefault();
             toggle();
@@ -297,8 +356,98 @@ function KeyNumField({
           ◆
         </button>
       </span>
-      <input type="number" value={disp} step={step} min={min} max={max} onChange={(e) => setVal(Number(e.target.value))} />
+      <input type="color" value={rgbaToHex(cur)} onChange={(e) => setColor(hexToRgba(e.target.value))} />
     </label>
+  );
+}
+
+// Inspector for a 2D vector shape (rectangle / circle / polygon). Every colour is
+// keyframeable (fill / border / glow / shadow) and the numeric knobs sit on
+// keyframe tracks. Edits the whole Shape2DStyle and sends it back wholesale.
+function Shape2DSection({
+  layerId,
+  style,
+  timeMs,
+  onSet,
+}: {
+  layerId: number;
+  style: Shape2DStyle;
+  timeMs: number;
+  onSet: (layerId: number, style: Shape2DStyle) => void;
+}) {
+  const set = (patch: Partial<Shape2DStyle>) => onSet(layerId, { ...style, ...patch });
+  const SHAPES: VectorShape[] = ["rectangle", "circle", "polygon"];
+  return (
+    <>
+      <Section title="Shape">
+        <label className="insp-field">
+          Type
+          <div className="seg">
+            {SHAPES.map((s) => (
+              <button
+                key={s}
+                className={"seg-btn" + (style.shape === s ? " active" : "")}
+                onClick={() => set({ shape: s })}
+              >
+                {s[0].toUpperCase() + s.slice(1)}
+              </button>
+            ))}
+          </div>
+        </label>
+        {style.shape === "polygon" && (
+          <NumField label="Sides" value={style.sides} min={3} max={30} onChange={(v) => set({ sides: Math.max(3, Math.round(v)) })} />
+        )}
+        {effSlider("Width", style.width, 4, 4000, 1, (v) => set({ width: v }))}
+        {effSlider("Height", style.height, 4, 4000, 1, (v) => set({ height: v }))}
+        {style.shape === "rectangle" && (
+          <KeyNumField label="Corner radius" track={style.cornerRadius} tMs={timeMs} min={0} max={500} onChange={(t) => set({ cornerRadius: t })} />
+        )}
+        <label className="insp-field">
+          Fill style
+          <div className="seg">
+            <button className={"seg-btn" + (style.filled ? " active" : "")} onClick={() => set({ filled: true })}>
+              Filled
+            </button>
+            <button
+              className={"seg-btn" + (!style.filled ? " active" : "")}
+              onClick={() =>
+                set({
+                  filled: false,
+                  // Give a hollow shape a visible outline if it has none yet.
+                  borderWidth: isKeyed(style.borderWidth) || sampleTrack(style.borderWidth, timeMs) > 0
+                    ? style.borderWidth
+                    : constTrack(6),
+                })
+              }
+            >
+              Hollow
+            </button>
+          </div>
+        </label>
+        {style.filled && (
+          <ColorKeyField label="Fill" color={style.fill} keys={style.fillKeys} tMs={timeMs} onChange={(c, k) => set({ fill: c, fillKeys: k })} />
+        )}
+      </Section>
+
+      <Section title="Border">
+        <KeyNumField label="Width" track={style.borderWidth} tMs={timeMs} min={0} max={200} onChange={(t) => set({ borderWidth: t })} />
+        <ColorKeyField label="Colour" color={style.borderColor} keys={style.borderColorKeys} tMs={timeMs} onChange={(c, k) => set({ borderColor: c, borderColorKeys: k })} />
+      </Section>
+
+      <Section title="Glow">
+        <ColorKeyField label="Colour" color={style.glowColor} keys={style.glowColorKeys} tMs={timeMs} onChange={(c, k) => set({ glowColor: c, glowColorKeys: k })} />
+        <KeyNumField label="Size" track={style.glowSize} tMs={timeMs} min={0} max={200} onChange={(t) => set({ glowSize: t })} />
+        <KeyNumField label="Opacity" track={style.glowOpacity} tMs={timeMs} min={0} max={1} step={0.05} onChange={(t) => set({ glowOpacity: t })} />
+      </Section>
+
+      <Section title="Shadow">
+        <ColorKeyField label="Colour" color={style.shadowColor} keys={style.shadowColorKeys} tMs={timeMs} onChange={(c, k) => set({ shadowColor: c, shadowColorKeys: k })} />
+        <KeyNumField label="Blur" track={style.shadowBlur} tMs={timeMs} min={0} max={200} onChange={(t) => set({ shadowBlur: t })} />
+        <KeyNumField label="Offset X" track={style.shadowOffsetX} tMs={timeMs} min={-300} max={300} onChange={(t) => set({ shadowOffsetX: t })} />
+        <KeyNumField label="Offset Y" track={style.shadowOffsetY} tMs={timeMs} min={-300} max={300} onChange={(t) => set({ shadowOffsetY: t })} />
+        <KeyNumField label="Opacity" track={style.shadowOpacity} tMs={timeMs} min={0} max={1} step={0.05} onChange={(t) => set({ shadowOpacity: t })} />
+      </Section>
+    </>
   );
 }
 
@@ -350,9 +499,9 @@ function TextAnimatorsSection({
             {sel.kind === "range" && (
               <>
                 <div className="an-grid">
-                  <KeyNumField label="Start %" track={sel.start} tMs={timeMs} onChange={(t) => setSel(i, { start: t })} />
-                  <KeyNumField label="End %" track={sel.end} tMs={timeMs} onChange={(t) => setSel(i, { end: t })} />
-                  <KeyNumField label="Offset %" track={sel.offset} tMs={timeMs} onChange={(t) => setSel(i, { offset: t })} />
+                  <KeyNumField label="Start %" track={sel.start} tMs={timeMs} min={0} max={100} onChange={(t) => setSel(i, { start: t })} />
+                  <KeyNumField label="End %" track={sel.end} tMs={timeMs} min={0} max={100} onChange={(t) => setSel(i, { end: t })} />
+                  <KeyNumField label="Offset %" track={sel.offset} tMs={timeMs} min={-100} max={100} onChange={(t) => setSel(i, { offset: t })} />
                   <KeyNumField label="Smooth %" track={sel.smoothness} tMs={timeMs} min={0} max={100} onChange={(t) => setSel(i, { smoothness: t })} />
                   <KeyNumField label="Ease Hi" track={sel.easeHigh} tMs={timeMs} min={-100} max={100} onChange={(t) => setSel(i, { easeHigh: t })} />
                   <KeyNumField label="Ease Lo" track={sel.easeLow} tMs={timeMs} min={-100} max={100} onChange={(t) => setSel(i, { easeLow: t })} />
@@ -372,7 +521,7 @@ function TextAnimatorsSection({
             )}
             {sel.kind === "wiggly" && (
               <div className="an-grid">
-                <KeyNumField label="Wiggles/s" track={sel.wigglesPerSec} tMs={timeMs} step={0.5} min={0} onChange={(t) => setSel(i, { wigglesPerSec: t })} />
+                <KeyNumField label="Wiggles/s" track={sel.wigglesPerSec} tMs={timeMs} step={0.5} min={0} max={20} onChange={(t) => setSel(i, { wigglesPerSec: t })} />
                 <KeyNumField label="Amount %" track={sel.amount} tMs={timeMs} min={0} max={100} onChange={(t) => setSel(i, { amount: t })} />
                 <KeyNumField label="Correl %" track={sel.correlation} tMs={timeMs} min={0} max={100} onChange={(t) => setSel(i, { correlation: t })} />
                 <NumField label="Seed" value={sel.seed} min={1} onChange={(v) => setSel(i, { seed: Math.max(1, Math.round(v)) })} />
@@ -380,18 +529,18 @@ function TextAnimatorsSection({
             )}
             <div className="an-sep">Animate</div>
             <div className="an-grid">
-              <KeyNumField label="Pos X" track={p.position[0]} tMs={timeMs} onChange={(t) => setProps(i, { position: [t, p.position[1]] })} />
-              <KeyNumField label="Pos Y" track={p.position[1]} tMs={timeMs} onChange={(t) => setProps(i, { position: [p.position[0], t] })} />
-              <KeyNumField label="Scale %" track={p.scale} tMs={timeMs} onChange={(t) => setProps(i, { scale: t })} />
-              <KeyNumField label="Rotate°" track={p.rotation} tMs={timeMs} onChange={(t) => setProps(i, { rotation: t })} />
+              <KeyNumField label="Pos X" track={p.position[0]} tMs={timeMs} min={-500} max={500} onChange={(t) => setProps(i, { position: [t, p.position[1]] })} />
+              <KeyNumField label="Pos Y" track={p.position[1]} tMs={timeMs} min={-500} max={500} onChange={(t) => setProps(i, { position: [p.position[0], t] })} />
+              <KeyNumField label="Scale %" track={p.scale} tMs={timeMs} min={0} max={400} onChange={(t) => setProps(i, { scale: t })} />
+              <KeyNumField label="Rotate°" track={p.rotation} tMs={timeMs} min={-360} max={360} onChange={(t) => setProps(i, { rotation: t })} />
               <KeyNumField label="Opacity %" track={p.opacity} tMs={timeMs} min={0} max={100} onChange={(t) => setProps(i, { opacity: t })} />
-              <KeyNumField label="Tracking" track={p.tracking} tMs={timeMs} step={0.5} onChange={(t) => setProps(i, { tracking: t })} />
-              <KeyNumField label="Skew°" track={p.skew} tMs={timeMs} onChange={(t) => setProps(i, { skew: t })} />
-              <KeyNumField label="Skew Axis°" track={p.skewAxis} tMs={timeMs} onChange={(t) => setProps(i, { skewAxis: t })} />
-              <KeyNumField label="Blur px" track={p.blur} tMs={timeMs} step={0.5} min={0} onChange={(t) => setProps(i, { blur: t })} />
-              <KeyNumField label="Rot X° (3D)" track={p.rotationX} tMs={timeMs} onChange={(t) => setProps(i, { rotationX: t })} />
-              <KeyNumField label="Rot Y° (3D)" track={p.rotationY} tMs={timeMs} onChange={(t) => setProps(i, { rotationY: t })} />
-              <KeyNumField label="Pos Z (3D)" track={p.positionZ} tMs={timeMs} onChange={(t) => setProps(i, { positionZ: t })} />
+              <KeyNumField label="Tracking" track={p.tracking} tMs={timeMs} step={0.5} min={-100} max={100} onChange={(t) => setProps(i, { tracking: t })} />
+              <KeyNumField label="Skew°" track={p.skew} tMs={timeMs} min={-90} max={90} onChange={(t) => setProps(i, { skew: t })} />
+              <KeyNumField label="Skew Axis°" track={p.skewAxis} tMs={timeMs} min={-180} max={180} onChange={(t) => setProps(i, { skewAxis: t })} />
+              <KeyNumField label="Blur px" track={p.blur} tMs={timeMs} step={0.5} min={0} max={100} onChange={(t) => setProps(i, { blur: t })} />
+              <KeyNumField label="Rot X° (3D)" track={p.rotationX} tMs={timeMs} min={-360} max={360} onChange={(t) => setProps(i, { rotationX: t })} />
+              <KeyNumField label="Rot Y° (3D)" track={p.rotationY} tMs={timeMs} min={-360} max={360} onChange={(t) => setProps(i, { rotationY: t })} />
+              <KeyNumField label="Pos Z (3D)" track={p.positionZ} tMs={timeMs} min={-1000} max={1000} onChange={(t) => setProps(i, { positionZ: t })} />
             </div>
             <label className="ts-check">
               <input
@@ -467,9 +616,9 @@ function TextLayerStylesSection({
       {perChar3d && (
         <>
           <div className="an-grid">
-            <NumField label="Rot X°" value={perCharRx} onChange={(v) => onSet3d(layerId, true, v, perCharRy, perCharSpread)} />
-            <NumField label="Rot Y°" value={perCharRy} onChange={(v) => onSet3d(layerId, true, perCharRx, v, perCharSpread)} />
-            <NumField label="Spread°/char" value={perCharSpread} onChange={(v) => onSet3d(layerId, true, perCharRx, perCharRy, v)} />
+            <NumField label="Rot X°" value={perCharRx} min={-360} max={360} onChange={(v) => onSet3d(layerId, true, v, perCharRy, perCharSpread)} />
+            <NumField label="Rot Y°" value={perCharRy} min={-360} max={360} onChange={(v) => onSet3d(layerId, true, perCharRx, v, perCharSpread)} />
+            <NumField label="Spread°/char" value={perCharSpread} min={-90} max={90} onChange={(v) => onSet3d(layerId, true, perCharRx, perCharRy, v)} />
           </div>
           <p className="insp-hint">Base 3D tilts every glyph about its own centre; Spread fans the rotation across characters. Animate it further with an animator's Rot X/Y + Pos Z.</p>
         </>
@@ -484,9 +633,9 @@ function TextLayerStylesSection({
       {s.dropShadow && (
         <div className="an-grid">
           <NumField label="Opacity %" value={s.dropShadow.opacity} min={0} max={100} onChange={(v) => patch({ dropShadow: { ...s.dropShadow!, opacity: v } })} />
-          <NumField label="Angle°" value={s.dropShadow.angle} onChange={(v) => patch({ dropShadow: { ...s.dropShadow!, angle: v } })} />
-          <NumField label="Distance" value={s.dropShadow.distance} onChange={(v) => patch({ dropShadow: { ...s.dropShadow!, distance: v } })} />
-          <NumField label="Size" value={s.dropShadow.size} min={0} onChange={(v) => patch({ dropShadow: { ...s.dropShadow!, size: v } })} />
+          <NumField label="Angle°" value={s.dropShadow.angle} min={0} max={360} onChange={(v) => patch({ dropShadow: { ...s.dropShadow!, angle: v } })} />
+          <NumField label="Distance" value={s.dropShadow.distance} min={0} max={200} onChange={(v) => patch({ dropShadow: { ...s.dropShadow!, distance: v } })} />
+          <NumField label="Size" value={s.dropShadow.size} min={0} max={200} onChange={(v) => patch({ dropShadow: { ...s.dropShadow!, size: v } })} />
         </div>
       )}
 
@@ -499,7 +648,7 @@ function TextLayerStylesSection({
       {s.outerGlow && (
         <div className="an-grid">
           <NumField label="Opacity %" value={s.outerGlow.opacity} min={0} max={100} onChange={(v) => patch({ outerGlow: { ...s.outerGlow!, opacity: v } })} />
-          <NumField label="Size" value={s.outerGlow.size} min={0} onChange={(v) => patch({ outerGlow: { ...s.outerGlow!, size: v } })} />
+          <NumField label="Size" value={s.outerGlow.size} min={0} max={200} onChange={(v) => patch({ outerGlow: { ...s.outerGlow!, size: v } })} />
           <NumField label="Range %" value={s.outerGlow.range} min={0} max={100} onChange={(v) => patch({ outerGlow: { ...s.outerGlow!, range: v } })} />
         </div>
       )}
@@ -513,7 +662,7 @@ function TextLayerStylesSection({
       {s.innerGlow && (
         <div className="an-grid">
           <NumField label="Opacity %" value={s.innerGlow.opacity} min={0} max={100} onChange={(v) => patch({ innerGlow: { ...s.innerGlow!, opacity: v } })} />
-          <NumField label="Size" value={s.innerGlow.size} min={0} onChange={(v) => patch({ innerGlow: { ...s.innerGlow!, size: v } })} />
+          <NumField label="Size" value={s.innerGlow.size} min={0} max={200} onChange={(v) => patch({ innerGlow: { ...s.innerGlow!, size: v } })} />
         </div>
       )}
 
@@ -534,10 +683,10 @@ function TextLayerStylesSection({
             </select>
           </label>
           <div className="an-grid">
-            <NumField label="Depth %" value={s.bevel.depth} onChange={(v) => patch({ bevel: { ...s.bevel!, depth: v } })} />
-            <NumField label="Size" value={s.bevel.size} min={0} onChange={(v) => patch({ bevel: { ...s.bevel!, size: v } })} />
-            <NumField label="Soften" value={s.bevel.soften} min={0} onChange={(v) => patch({ bevel: { ...s.bevel!, soften: v } })} />
-            <NumField label="Angle°" value={s.bevel.angle} onChange={(v) => patch({ bevel: { ...s.bevel!, angle: v } })} />
+            <NumField label="Depth %" value={s.bevel.depth} min={0} max={300} onChange={(v) => patch({ bevel: { ...s.bevel!, depth: v } })} />
+            <NumField label="Size" value={s.bevel.size} min={0} max={100} onChange={(v) => patch({ bevel: { ...s.bevel!, size: v } })} />
+            <NumField label="Soften" value={s.bevel.soften} min={0} max={100} onChange={(v) => patch({ bevel: { ...s.bevel!, soften: v } })} />
+            <NumField label="Angle°" value={s.bevel.angle} min={0} max={360} onChange={(v) => patch({ bevel: { ...s.bevel!, angle: v } })} />
           </div>
         </>
       )}
@@ -551,7 +700,7 @@ function TextLayerStylesSection({
         <>
           <div className="an-grid">
             <NumField label="Opacity %" value={s.gradient.opacity} min={0} max={100} onChange={(v) => patch({ gradient: { ...s.gradient!, opacity: v } })} />
-            <NumField label="Angle°" value={s.gradient.angle} onChange={(v) => patch({ gradient: { ...s.gradient!, angle: v } })} />
+            <NumField label="Angle°" value={s.gradient.angle} min={0} max={360} onChange={(v) => patch({ gradient: { ...s.gradient!, angle: v } })} />
           </div>
           <label className="insp-field">
             Blend
@@ -766,18 +915,11 @@ function TextInspector({
         </select>
       </label>
 
+      {effSlider("Size (height)", size, 8, 400, 1, (v) => {
+        setSize(v);
+        onContent(layerId, content, v);
+      })}
       <div className="row2">
-        <label className="insp-field">
-          Size (height)
-          <input
-            type="number"
-            min={8}
-            max={400}
-            value={size}
-            onChange={(e) => setSize(Number(e.target.value))}
-            onBlur={commitContent}
-          />
-        </label>
         <label className="insp-field">
           <span className="field-label-row">
             Colour
@@ -832,46 +974,11 @@ function TextInspector({
 
       {anim && (
         <>
-          {anim.preset === "scatterIn" && (
-            <label className="insp-field">
-              Explode area (px radius)
-              <input
-                type="number"
-                min={0}
-                max={4000}
-                step={20}
-                value={Math.round(anim.areaPx)}
-                onChange={(e) => setTiming({ areaPx: Number(e.target.value) })}
-              />
-            </label>
-          )}
-          <label className="insp-field">
-            Start (ms)
-            <input
-              type="number"
-              min={0}
-              value={anim.startMs}
-              onChange={(e) => setTiming({ startMs: Number(e.target.value) })}
-            />
-          </label>
-          <label className="insp-field">
-            Letter duration (ms)
-            <input
-              type="number"
-              min={1}
-              value={anim.durationMs}
-              onChange={(e) => setTiming({ durationMs: Number(e.target.value) })}
-            />
-          </label>
-          <label className="insp-field">
-            Stagger per letter (ms)
-            <input
-              type="number"
-              min={0}
-              value={anim.staggerMs}
-              onChange={(e) => setTiming({ staggerMs: Number(e.target.value) })}
-            />
-          </label>
+          {anim.preset === "scatterIn" &&
+            effSlider("Explode area (px)", anim.areaPx, 0, 4000, 20, (v) => setTiming({ areaPx: v }))}
+          {effSlider("Start (ms)", anim.startMs, 0, 5000, 10, (v) => setTiming({ startMs: Math.round(v) }))}
+          {effSlider("Letter duration (ms)", anim.durationMs, 1, 3000, 10, (v) => setTiming({ durationMs: Math.round(v) }))}
+          {effSlider("Stagger per letter (ms)", anim.staggerMs, 0, 1000, 5, (v) => setTiming({ staggerMs: Math.round(v) }))}
           <p className="insp-hint">Scrub or press Play to see the letters animate.</p>
         </>
       )}
@@ -1028,60 +1135,16 @@ function ShapeInspector({
           onChange={(e) => set({ perspective: Number(e.target.value) })}
         />
       </label>
-      <label className="insp-field">
-        Focal length
-        <input
-          type="number"
-          min={100}
-          max={5000}
-          step={50}
-          value={Math.round(params.focalLength)}
-          onChange={(e) => set({ focalLength: Number(e.target.value) })}
-        />
-      </label>
+      {effSlider("Focal length", params.focalLength, 100, 5000, 50, (v) => set({ focalLength: v }))}
 
       <div className="insp-sep">Size</div>
-      <div className="row2">
-        <label className="insp-field">
-          Width
-          <input
-            type="number"
-            min={1}
-            value={Math.round(params.width)}
-            onChange={(e) => set({ width: Number(e.target.value) })}
-          />
-        </label>
-        <label className="insp-field">
-          Height
-          <input
-            type="number"
-            min={1}
-            value={Math.round(params.height)}
-            onChange={(e) => set({ height: Number(e.target.value) })}
-          />
-        </label>
-      </div>
+      {effSlider("Width", params.width, 1, 4000, 1, (v) => set({ width: v }))}
+      {effSlider("Height", params.height, 1, 4000, 1, (v) => set({ height: v }))}
       {shape === "box" ? (
-        <label className="insp-field">
-          Depth
-          <input
-            type="number"
-            min={0}
-            value={Math.round(params.depth)}
-            onChange={(e) => set({ depth: Number(e.target.value) })}
-          />
-        </label>
+        effSlider("Depth", params.depth, 0, 4000, 1, (v) => set({ depth: v }))
       ) : (
         <>
-          <label className="insp-field">
-            Radius
-            <input
-              type="number"
-              min={1}
-              value={Math.round(params.radius)}
-              onChange={(e) => set({ radius: Number(e.target.value) })}
-            />
-          </label>
+          {effSlider("Radius", params.radius, 1, 4000, 1, (v) => set({ radius: v }))}
           <label className="insp-field">
             Coverage {Math.round(params.coverage)}°
             <input
@@ -1467,32 +1530,20 @@ function effSlider(
 function TransformSection({
   layerId,
   tr,
+  compW,
+  compH,
   onCommit,
 }: {
   layerId: number;
   tr: { x: number; y: number; scaleX: number; scaleY: number; rotation: number; opacity: number };
+  compW: number;
+  compH: number;
   onCommit: (layerId: number, edit: TransformEdit) => void;
 }) {
-  const numField = (label: string, val: number, key: "x" | "y") => (
-    <label className="insp-field insp-slider" style={{ flex: 1 }}>
-      <span className="insp-slider-head">
-        <span>{label}</span>
-        <input
-          className="insp-num wide"
-          type="number"
-          step={1}
-          value={Math.round(val)}
-          onChange={(e) => e.target.value !== "" && onCommit(layerId, { [key]: Math.round(Number(e.target.value)) })}
-        />
-      </span>
-    </label>
-  );
   return (
     <Section title="Transform / Position">
-      <div className="row2">
-        {numField("Position X", tr.x, "x")}
-        {numField("Position Y", tr.y, "y")}
-      </div>
+      {effSlider("Position X", tr.x, -compW, compW * 2, 1, (v) => onCommit(layerId, { x: Math.round(v) }))}
+      {effSlider("Position Y", tr.y, -compH, compH * 2, 1, (v) => onCommit(layerId, { y: Math.round(v) }))}
       {effSlider("Scale X", tr.scaleX, 0.05, 5, 0.05, (v) => onCommit(layerId, { scaleX: v }))}
       {effSlider("Scale Y", tr.scaleY, 0.05, 5, 0.05, (v) => onCommit(layerId, { scaleY: v }))}
       {effSlider("Rotation°", tr.rotation, -360, 360, 1, (v) => onCommit(layerId, { rotation: v }))}
@@ -1952,18 +2003,11 @@ function TransitionsSection({
             />
             {value !== "none" && (
               <>
-                <div className="row2">
-                  <input
-                    type="number"
-                    min={0}
-                    max={10000}
-                    step={50}
-                    value={durMs}
-                    title="Duration (ms)"
-                    onChange={(e) =>
-                      onSet(layer.id, slot, "dissolve", Number(e.target.value), direction, value, paramsJson)
-                    }
-                  />
+                {effSlider("Duration (ms)", durMs, 0, 10000, 50, (v) =>
+                  onSet(layer.id, slot, "dissolve", Math.round(v), direction, value, paramsJson)
+                )}
+                <label className="insp-field">
+                  Direction
                   <select
                     value={direction}
                     title="Direction (used by directional transitions)"
@@ -1976,7 +2020,7 @@ function TransitionsSection({
                     <option value={2}>From top</option>
                     <option value={3}>From bottom</option>
                   </select>
-                </div>
+                </label>
                 <TransitionVars
                   id={value}
                   paramsJson={paramsJson}
@@ -2000,6 +2044,8 @@ function TransitionsSection({
 interface Props {
   layer: Layer | null;
   timeMs: number;
+  compWidth: number;
+  compHeight: number;
   fonts: string[];
   onRefreshFonts: () => void;
   decomposed: boolean;
@@ -2021,6 +2067,7 @@ interface Props {
     value: number,
     seedStart: boolean
   ) => void;
+  onSetShape2d: (layerId: number, style: Shape2DStyle) => void;
   onAttachToShape: (layerId: number, shapeId: number | null, face: number) => void;
   onKeyDecal: (
     layerId: number,
@@ -2492,16 +2539,11 @@ function CellTransitionsSection({
             />
             {value !== "none" && (
               <>
-                <div className="row2">
-                  <input
-                    type="number"
-                    min={0}
-                    max={10000}
-                    step={50}
-                    value={durMs}
-                    title="Duration (ms)"
-                    onChange={(e) => onSet(layerId, cell, slot, Number(e.target.value), direction, value, paramsJson)}
-                  />
+                {effSlider("Duration (ms)", durMs, 0, 10000, 50, (v) =>
+                  onSet(layerId, cell, slot, Math.round(v), direction, value, paramsJson)
+                )}
+                <label className="insp-field">
+                  Direction
                   <select
                     value={direction}
                     title="Direction"
@@ -2512,7 +2554,7 @@ function CellTransitionsSection({
                     <option value={2}>From top</option>
                     <option value={3}>From bottom</option>
                   </select>
-                </div>
+                </label>
                 <TransitionVars
                   id={value}
                   paramsJson={paramsJson}
@@ -2588,16 +2630,11 @@ function AllCellsTransitionsSection({
             />
             {value !== "none" && (
               <>
-                <div className="row2">
-                  <input
-                    type="number"
-                    min={0}
-                    max={10000}
-                    step={50}
-                    value={durMs}
-                    title="Duration (ms)"
-                    onChange={(e) => onSet(layerId, slot, Number(e.target.value), direction, value, paramsJson)}
-                  />
+                {effSlider("Duration (ms)", durMs, 0, 10000, 50, (v) =>
+                  onSet(layerId, slot, Math.round(v), direction, value, paramsJson)
+                )}
+                <label className="insp-field">
+                  Direction
                   <select
                     value={direction}
                     title="Direction"
@@ -2608,7 +2645,7 @@ function AllCellsTransitionsSection({
                     <option value={2}>From top</option>
                     <option value={3}>From bottom</option>
                   </select>
-                </div>
+                </label>
                 <TransitionVars
                   id={value}
                   paramsJson={paramsJson}
@@ -2767,6 +2804,8 @@ function LinkedEffectsSection({
 export default function Inspector({
   layer,
   timeMs,
+  compWidth,
+  compHeight,
   fonts,
   onRefreshFonts,
   decomposed,
@@ -2783,6 +2822,7 @@ export default function Inspector({
   onSetGpuFxStatic,
   onShapeParams,
   onShapeRotKey,
+  onSetShape2d,
   onAttachToShape,
   onKeyDecal,
   onSetDecalFace,
@@ -2870,7 +2910,7 @@ export default function Inspector({
       <div className="panel-title">{layer ? layer.name : "Inspector"}</div>
       {!layer && <span className="muted">Select a layer to edit it.</span>}
       {layer && transformNow && (
-        <TransformSection layerId={layer.id} tr={transformNow} onCommit={onCommitTransform} />
+        <TransformSection layerId={layer.id} tr={transformNow} compW={compWidth} compH={compHeight} onCommit={onCommitTransform} />
       )}
       {layer && layer.kind.kind === "text" && (
         <TextInspector
@@ -2930,6 +2970,9 @@ export default function Inspector({
           onShapeParams={onShapeParams}
           onShapeRotKey={onShapeRotKey}
         />
+      )}
+      {layer && layer.kind.kind === "shape2d" && (
+        <Shape2DSection layerId={layer.id} style={layer.kind.style} timeMs={timeMs} onSet={onSetShape2d} />
       )}
       {decalControls}
       {layer && layer.kind.kind === "image" && (
