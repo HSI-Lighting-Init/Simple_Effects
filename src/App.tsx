@@ -342,6 +342,12 @@ export default function App() {
   const selectedIdRef = useRef<number | null>(null);
   const selectedIdsRef = useRef<number[]>([]);
   const lastSeekRecRef = useRef(0);
+  // Monotonic counter for style edits (shape2d / shape3d params). Each edit does
+  // an optimistic project update, then awaits the backend. Because invoke
+  // responses can arrive out of order, an earlier edit's response could land
+  // after a later one and overwrite it (dropping the newer keyframe). The guard
+  // makes the post-await setProject apply only when it's still the latest edit.
+  const styleEditSeq = useRef(0);
 
   useEffect(() => { projectRef.current = project; }, [project]);
   useEffect(() => { resolvedRef.current = resolved; }, [resolved]);
@@ -943,6 +949,7 @@ export default function App() {
       // the async round-trip returns. Without this, keyframing a second property
       // right after a first can build on the pre-round-trip style and clobber the
       // first keyframe.
+      const seq = ++styleEditSeq.current;
       setProject((prev) =>
         prev
           ? {
@@ -956,7 +963,9 @@ export default function App() {
           : prev
       );
       const p = await setShape2d(layerId, style);
-      setProject(p);
+      // Ignore a response that a newer edit has already superseded (out-of-order
+      // invoke resolution would otherwise revert the newer keyframe).
+      if (seq === styleEditSeq.current) setProject(p);
       await applyTime(timeRef.current);
       recordAction("set_shape2d", { layerId });
     },
@@ -1247,6 +1256,7 @@ export default function App() {
       // with the new keyframe state before the round-trip returns — otherwise
       // keyframing a second dimension right after a first can clobber it (same
       // guard as onSetShape2d).
+      const seq = ++styleEditSeq.current;
       setProject((prev) =>
         prev
           ? {
@@ -1281,7 +1291,7 @@ export default function App() {
         params.coverage,
         params.radius
       );
-      setProject(p);
+      if (seq === styleEditSeq.current) setProject(p);
       await applyTime(timeRef.current);
       recordAction("shape_params", { layerId, params });
     },

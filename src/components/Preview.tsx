@@ -15,6 +15,7 @@ import {
   Image as KImage,
   Shape,
   Circle,
+  Ellipse,
   RegularPolygon,
   Arrow,
   Line,
@@ -839,7 +840,10 @@ function Shape2DNode({
           {...extra}
         />
       );
-    if (s2.shape === "circle") return <Circle key={key} radius={rad} {...extra} />;
+    // Circle uses width/height independently (an ellipse) so keyframing EITHER
+    // dimension changes it; equal width/height renders a perfect circle.
+    if (s2.shape === "circle")
+      return <Ellipse key={key} radiusX={w / 2} radiusY={h / 2} {...extra} />;
     return <RegularPolygon key={key} sides={Math.max(3, s2.sides)} radius={rad} {...extra} />;
   };
 
