@@ -376,7 +376,8 @@ function Shape2DSection({
   onSet: (layerId: number, style: Shape2DStyle) => void;
 }) {
   const set = (patch: Partial<Shape2DStyle>) => onSet(layerId, { ...style, ...patch });
-  const SHAPES: VectorShape[] = ["rectangle", "circle", "polygon"];
+  const SHAPES: VectorShape[] = ["rectangle", "circle", "polygon", "arrow"];
+  const isArrow = style.shape === "arrow";
   return (
     <>
       <Section title="Shape">
@@ -397,42 +398,49 @@ function Shape2DSection({
         {style.shape === "polygon" && (
           <NumField label="Sides" value={style.sides} min={3} max={30} onChange={(v) => set({ sides: Math.max(3, Math.round(v)) })} />
         )}
-        {effSlider("Width", style.width, 4, 4000, 1, (v) => set({ width: v }))}
-        {effSlider("Height", style.height, 4, 4000, 1, (v) => set({ height: v }))}
+        {effSlider(isArrow ? "Length" : "Width", style.width, 4, 4000, 1, (v) => set({ width: v }))}
+        {effSlider(isArrow ? "Thickness" : "Height", style.height, 4, 4000, 1, (v) => set({ height: v }))}
         {style.shape === "rectangle" && (
           <KeyNumField label="Corner radius" track={style.cornerRadius} tMs={timeMs} min={0} max={500} onChange={(t) => set({ cornerRadius: t })} />
         )}
-        <label className="insp-field">
-          Fill style
-          <div className="seg">
-            <button className={"seg-btn" + (style.filled ? " active" : "")} onClick={() => set({ filled: true })}>
-              Filled
-            </button>
-            <button
-              className={"seg-btn" + (!style.filled ? " active" : "")}
-              onClick={() =>
-                set({
-                  filled: false,
-                  // Give a hollow shape a visible outline if it has none yet.
-                  borderWidth: isKeyed(style.borderWidth) || sampleTrack(style.borderWidth, timeMs) > 0
-                    ? style.borderWidth
-                    : constTrack(6),
-                })
-              }
-            >
-              Hollow
-            </button>
-          </div>
-        </label>
-        {style.filled && (
-          <ColorKeyField label="Fill" color={style.fill} keys={style.fillKeys} tMs={timeMs} onChange={(c, k) => set({ fill: c, fillKeys: k })} />
+        {isArrow && (
+          <KeyNumField label="Bend" track={style.bend} tMs={timeMs} min={-1000} max={1000} onChange={(t) => set({ bend: t })} />
+        )}
+        {!isArrow && (
+          <label className="insp-field">
+            Fill style
+            <div className="seg">
+              <button className={"seg-btn" + (style.filled ? " active" : "")} onClick={() => set({ filled: true })}>
+                Filled
+              </button>
+              <button
+                className={"seg-btn" + (!style.filled ? " active" : "")}
+                onClick={() =>
+                  set({
+                    filled: false,
+                    // Give a hollow shape a visible outline if it has none yet.
+                    borderWidth: isKeyed(style.borderWidth) || sampleTrack(style.borderWidth, timeMs) > 0
+                      ? style.borderWidth
+                      : constTrack(6),
+                  })
+                }
+              >
+                Hollow
+              </button>
+            </div>
+          </label>
+        )}
+        {(style.filled || isArrow) && (
+          <ColorKeyField label={isArrow ? "Colour" : "Fill"} color={style.fill} keys={style.fillKeys} tMs={timeMs} onChange={(c, k) => set({ fill: c, fillKeys: k })} />
         )}
       </Section>
 
-      <Section title="Border">
-        <KeyNumField label="Width" track={style.borderWidth} tMs={timeMs} min={0} max={200} onChange={(t) => set({ borderWidth: t })} />
-        <ColorKeyField label="Colour" color={style.borderColor} keys={style.borderColorKeys} tMs={timeMs} onChange={(c, k) => set({ borderColor: c, borderColorKeys: k })} />
-      </Section>
+      {!isArrow && (
+        <Section title="Border">
+          <KeyNumField label="Width" track={style.borderWidth} tMs={timeMs} min={0} max={200} onChange={(t) => set({ borderWidth: t })} />
+          <ColorKeyField label="Colour" color={style.borderColor} keys={style.borderColorKeys} tMs={timeMs} onChange={(c, k) => set({ borderColor: c, borderColorKeys: k })} />
+        </Section>
+      )}
 
       <Section title="Glow">
         <ColorKeyField label="Colour" color={style.glowColor} keys={style.glowColorKeys} tMs={timeMs} onChange={(c, k) => set({ glowColor: c, glowColorKeys: k })} />

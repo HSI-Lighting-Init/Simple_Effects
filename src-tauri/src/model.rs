@@ -899,6 +899,9 @@ pub enum VectorShape {
     Rectangle,
     Circle,
     Polygon,
+    /// A horizontal arrow (tail at left, head at right) spanning `width`, with
+    /// `height` as its overall thickness. Rotate the layer to aim it.
+    Arrow,
 }
 
 /// The paint style of a `Shape2D` layer. Every colour is keyframeable via its
@@ -922,6 +925,10 @@ pub struct Shape2DStyle {
     /// Rectangle corner radius (px). Ignored for circle/polygon.
     #[serde(default)]
     pub corner_radius: Track,
+    /// Arrow curvature (px): perpendicular offset of the shaft's midpoint, so the
+    /// arrow bows into an arc. 0 = straight. Keyframeable. Ignored by other shapes.
+    #[serde(default)]
+    pub bend: Track,
     /// false = hollow (outline only, no fill) — the border/glow still draw.
     #[serde(default = "default_true")]
     pub filled: bool,
@@ -971,12 +978,15 @@ impl Shape2DStyle {
     /// A new shape style with a light fill, no border/glow/shadow yet, and
     /// sensible defaults ready for the user to style.
     pub fn new(shape: VectorShape, size: f32) -> Self {
+        // An arrow reads better wider than it is thick.
+        let (width, height) = if shape == VectorShape::Arrow { (size, size * 0.5) } else { (size, size) };
         Shape2DStyle {
             shape,
-            width: size,
-            height: size,
+            width,
+            height,
             sides: default_sides(),
             corner_radius: Track::constant(if shape == VectorShape::Rectangle { 24.0 } else { 0.0 }),
+            bend: Track::constant(0.0),
             filled: true,
             fill: Rgba { r: 90, g: 150, b: 240, a: 255 },
             fill_keys: vec![],

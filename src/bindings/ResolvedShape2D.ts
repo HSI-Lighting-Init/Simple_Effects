@@ -9,6 +9,10 @@ import type { VectorShape } from "./VectorShape";
  */
 export type ResolvedShape2D = { shape: VectorShape, width: number, height: number, sides: number, cornerRadius: number, 
 /**
+ * Arrow curvature (px). 0 = straight.
+ */
+bend: number, 
+/**
  * false = hollow (outline only).
  */
 filled: boolean, fill: Rgba, borderWidth: number, borderColor: Rgba, glowColor: Rgba, glowSize: number, glowOpacity: number, shadowColor: Rgba, shadowBlur: number, shadowOffsetX: number, shadowOffsetY: number, shadowOpacity: number, };

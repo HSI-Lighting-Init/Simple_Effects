@@ -3,4 +3,4 @@
 /**
  * The 2D vector primitive a `Shape2D` layer draws.
  */
-export type VectorShape = "rectangle" | "circle" | "polygon";
+export type VectorShape = "rectangle" | "circle" | "polygon" | "arrow";

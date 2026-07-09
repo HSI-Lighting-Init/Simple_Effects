@@ -1396,6 +1396,7 @@ fn add_shape2d_layer(state: State<AppState>, shape: String) -> Result<Project, S
         "rectangle" => VectorShape::Rectangle,
         "circle" => VectorShape::Circle,
         "polygon" => VectorShape::Polygon,
+        "arrow" => VectorShape::Arrow,
         _ => return Err(format!("unknown shape '{shape}'")),
     };
     let mut project = state.project.lock().unwrap();
@@ -1408,6 +1409,7 @@ fn add_shape2d_layer(state: State<AppState>, shape: String) -> Result<Project, S
         VectorShape::Rectangle => "Rectangle",
         VectorShape::Circle => "Circle",
         VectorShape::Polygon => "Polygon",
+        VectorShape::Arrow => "Arrow",
     };
     project.layers.push(Layer {
         id: next_id,
@@ -2926,6 +2928,7 @@ fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
         }
         LayerKind::Shape2D { style } => {
             f(&mut style.corner_radius);
+            f(&mut style.bend);
             f(&mut style.border_width);
             f(&mut style.glow_size);
             f(&mut style.glow_opacity);

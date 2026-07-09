@@ -25,6 +25,11 @@ sides: number,
  */
 cornerRadius: Track, 
 /**
+ * Arrow curvature (px): perpendicular offset of the shaft's midpoint, so the
+ * arrow bows into an arc. 0 = straight. Keyframeable. Ignored by other shapes.
+ */
+bend: Track, 
+/**
  * false = hollow (outline only, no fill) — the border/glow still draw.
  */
 filled: boolean, fill: Rgba, fillKeys: Array<ColorKey>, borderWidth: Track, borderColor: Rgba, borderColorKeys: Array<ColorKey>, glowColor: Rgba, glowColorKeys: Array<ColorKey>, glowSize: Track, glowOpacity: Track, shadowColor: Rgba, shadowColorKeys: Array<ColorKey>, shadowBlur: Track, shadowOffsetX: Track, shadowOffsetY: Track, shadowOpacity: Track, };

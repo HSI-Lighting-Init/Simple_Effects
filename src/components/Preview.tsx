@@ -16,6 +16,7 @@ import {
   Shape,
   Circle,
   RegularPolygon,
+  Arrow,
   Line,
   Text,
   Transformer,
@@ -789,10 +790,43 @@ function Shape2DNode({
   const w = s2.width;
   const h = s2.height;
   const rad = Math.min(w, h) / 2;
+  const isArrow = s2.shape === "arrow";
 
   // Build the chosen primitive with an arbitrary extra prop bag (fill/stroke/
   // shadow), centred on the group origin.
   const make = (key: string, extra: Record<string, unknown>): ReactElement => {
+    if (isArrow) {
+      // Horizontal arrow spanning `width`; `height` is the head width, the shaft
+      // a fraction of it. `bend` bows the shaft into an arc (a quadratic curve
+      // whose midpoint is offset perpendicular). Rotate the layer to aim it.
+      const shaft = Math.max(2, h * 0.4);
+      const headLen = Math.max(8, Math.min(w * 0.5, h * 1.3));
+      let points: number[];
+      if (Math.abs(s2.bend) < 0.5) {
+        points = [-w / 2, 0, w / 2, 0];
+      } else {
+        const N = 24;
+        const ctrlY = -2 * s2.bend; // control point → apex offset ≈ bend
+        points = [];
+        for (let i = 0; i <= N; i++) {
+          const t = i / N;
+          const mt = 1 - t;
+          points.push(mt * mt * (-w / 2) + t * t * (w / 2), 2 * mt * t * ctrlY);
+        }
+      }
+      return (
+        <Arrow
+          key={key}
+          points={points}
+          pointerLength={headLen}
+          pointerWidth={h}
+          strokeWidth={shaft}
+          lineCap="round"
+          lineJoin="round"
+          {...extra}
+        />
+      );
+    }
     if (s2.shape === "rectangle")
       return (
         <Rect
@@ -813,35 +847,40 @@ function Shape2DNode({
   const hasBorder = s2.borderWidth > 0;
   const hasShadow = s2.shadowBlur > 0 || s2.shadowOffsetX !== 0 || s2.shadowOffsetY !== 0;
   const hasGlow = s2.glowSize > 0 && s2.glowOpacity > 0;
+  const shadow = hasShadow
+    ? {
+        shadowColor: rgbaCss(s2.shadowColor),
+        shadowBlur: s2.shadowBlur,
+        shadowOffsetX: s2.shadowOffsetX,
+        shadowOffsetY: s2.shadowOffsetY,
+        shadowOpacity: s2.shadowOpacity,
+      }
+    : {};
 
   // The glow is a copy drawn behind the main shape casting a 0-offset coloured
-  // shadow. For a filled shape it's a filled copy (the opaque main hides its
-  // body, leaving the halo); for a hollow shape it's a stroked copy so the halo
-  // hugs the outline instead of filling the empty interior.
-  const glowProps = filled
-    ? { fill: rgbaCss(s2.glowColor), shadowForStrokeEnabled: false }
-    : {
-        fillEnabled: false,
-        stroke: rgbaCss(s2.glowColor),
-        strokeWidth: Math.max(2, s2.borderWidth),
-        shadowForStrokeEnabled: true,
-      };
+  // shadow. An arrow (and a filled shape) glows from a coloured copy the opaque
+  // main hides, leaving the halo; a hollow shape glows from a stroked copy so the
+  // halo hugs the outline instead of filling the empty interior.
+  const glowProps = isArrow
+    ? { fill: rgbaCss(s2.glowColor), stroke: rgbaCss(s2.glowColor), shadowForStrokeEnabled: true }
+    : filled
+      ? { fill: rgbaCss(s2.glowColor), shadowForStrokeEnabled: false }
+      : {
+          fillEnabled: false,
+          stroke: rgbaCss(s2.glowColor),
+          strokeWidth: Math.max(2, s2.borderWidth),
+          shadowForStrokeEnabled: true,
+        };
 
-  const mainProps: Record<string, unknown> = {
-    // Filled → the fill colour; hollow → a fully transparent fill so the interior
-    // stays empty yet the whole shape is still clickable to select/drag.
-    fill: filled ? rgbaCss(s2.fill) : "rgba(0,0,0,0)",
-    ...(hasBorder ? { stroke: rgbaCss(s2.borderColor), strokeWidth: s2.borderWidth } : {}),
-    ...(hasShadow
-      ? {
-          shadowColor: rgbaCss(s2.shadowColor),
-          shadowBlur: s2.shadowBlur,
-          shadowOffsetX: s2.shadowOffsetX,
-          shadowOffsetY: s2.shadowOffsetY,
-          shadowOpacity: s2.shadowOpacity,
-        }
-      : {}),
-  };
+  const mainProps: Record<string, unknown> = isArrow
+    ? { fill: rgbaCss(s2.fill), stroke: rgbaCss(s2.fill), ...shadow }
+    : {
+        // Filled → the fill colour; hollow → a fully transparent fill so the
+        // interior stays empty yet the shape is still clickable to select/drag.
+        fill: filled ? rgbaCss(s2.fill) : "rgba(0,0,0,0)",
+        ...(hasBorder ? { stroke: rgbaCss(s2.borderColor), strokeWidth: s2.borderWidth } : {}),
+        ...shadow,
+      };
 
   return (
     <Group

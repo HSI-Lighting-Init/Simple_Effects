@@ -932,6 +932,23 @@ export default function App() {
   // builds the colour keys + tracks and sends the whole style).
   const onSetShape2d = useCallback(
     async (layerId: number, style: Shape2DStyle) => {
+      // Optimistically reflect the edit in the layer immediately, so the
+      // inspector re-renders with the new style (keyframe state + tracks) before
+      // the async round-trip returns. Without this, keyframing a second property
+      // right after a first can build on the pre-round-trip style and clobber the
+      // first keyframe.
+      setProject((prev) =>
+        prev
+          ? {
+              ...prev,
+              layers: prev.layers.map((l) =>
+                l.id === layerId && l.kind.kind === "shape2d"
+                  ? { ...l, kind: { ...l.kind, style } }
+                  : l
+              ),
+            }
+          : prev
+      );
       const p = await setShape2d(layerId, style);
       setProject(p);
       await applyTime(timeRef.current);
@@ -2982,6 +2999,7 @@ export default function App() {
         { label: "Rectangle", onClick: () => onAddShape2d("rectangle") },
         { label: "Circle", onClick: () => onAddShape2d("circle") },
         { label: "Polygon", onClick: () => onAddShape2d("polygon") },
+        { label: "Arrow", onClick: () => onAddShape2d("arrow") },
         { separator: true },
         { label: "3D Box", onClick: () => onAddShape("box") },
         { label: "3D Cylinder", onClick: () => onAddShape("cylinder") },

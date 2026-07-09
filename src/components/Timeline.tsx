@@ -69,12 +69,26 @@ function pushEffectTracks(effects: Effect[], tracks: Track[]) {
 function keyframeTimes(l: Layer): number[] {
   const t = l.transform;
   const tracks = [t.x, t.y, t.scaleX, t.scaleY, t.rotation, t.opacity];
-  if (l.kind.kind === "text") tracks.push(l.kind.decompose);
+  const set = new Set<number>();
+  if (l.kind.kind === "text") {
+    tracks.push(l.kind.decompose);
+    for (const k of l.kind.colorKeys) set.add(k.timeMs);
+  }
   if (l.kind.kind === "shape3d")
     tracks.push(l.kind.rotation_x, l.kind.rotation_y, l.kind.rotation_z);
+  if (l.kind.kind === "shape2d") {
+    const s = l.kind.style;
+    tracks.push(
+      s.cornerRadius, s.bend, s.borderWidth, s.glowSize, s.glowOpacity,
+      s.shadowBlur, s.shadowOffsetX, s.shadowOffsetY, s.shadowOpacity
+    );
+    // Keyframeable colours (fill / border / glow / shadow) carry their own key
+    // lists, so collect their times too.
+    for (const keys of [s.fillKeys, s.borderColorKeys, s.glowColorKeys, s.shadowColorKeys])
+      for (const k of keys) set.add(k.timeMs);
+  }
   if (l.attach) tracks.push(l.attach.u, l.attach.v, l.attach.scale, l.attach.rotation);
   pushEffectTracks(l.effects, tracks);
-  const set = new Set<number>();
   for (const tr of tracks) for (const k of tr.keys) set.add(k.timeMs);
   return [...set];
 }

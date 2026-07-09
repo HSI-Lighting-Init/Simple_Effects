@@ -73,6 +73,8 @@ pub struct ResolvedShape2D {
     pub height: f32,
     pub sides: u32,
     pub corner_radius: f32,
+    /// Arrow curvature (px). 0 = straight.
+    pub bend: f32,
     /// false = hollow (outline only).
     pub filled: bool,
     pub fill: Rgba,
@@ -96,6 +98,7 @@ fn resolve_shape2d(s: &Shape2DStyle, t_ms: u32) -> ResolvedShape2D {
         height: s.height.max(1.0),
         sides: s.sides.max(3),
         corner_radius: sample_track(&s.corner_radius, t_ms).max(0.0),
+        bend: sample_track(&s.bend, t_ms),
         filled: s.filled,
         fill: sample_color(&s.fill_keys, s.fill, t_ms),
         border_width: sample_track(&s.border_width, t_ms).max(0.0),
@@ -1354,6 +1357,37 @@ mod tests {
         // The set of displaced letters must change over time (it animates).
         assert_ne!(early, mid, "offset keyframe should change the selection over time");
         assert_ne!(mid, late, "offset keyframe should keep sweeping");
+    }
+
+    #[test]
+    fn shape2d_bend_keyframes_animate() {
+        use crate::model::{Layer, LayerKind, Shape2DStyle, Transform, VectorShape};
+        let mut style = Shape2DStyle::new(VectorShape::Arrow, 300.0);
+        style.bend = Track {
+            default: 0.0,
+            keys: vec![
+                Keyframe { time_ms: 0, value: 0.0, easing: Easing::Linear },
+                Keyframe { time_ms: 1000, value: 100.0, easing: Easing::Linear },
+            ],
+        };
+        let layer = Layer {
+            id: 1,
+            name: "Arrow".into(),
+            start_ms: 0,
+            end_ms: 4000,
+            kind: LayerKind::Shape2D { style },
+            transform: Transform::at(100.0, 100.0),
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            transition_in: None,
+            transition_out: None,
+        };
+        let p = Project { width: 1920, height: 1080, fps: 30, duration_ms: 4000, layers: vec![layer], media: vec![] };
+        let bend_at = |t: u32| evaluate(&p, t, &HashMap::new(), &HashMap::new())[0].shape2d.clone().unwrap().bend;
+        assert_eq!(bend_at(0), 0.0);
+        assert!((bend_at(500) - 50.0).abs() < 1.0, "midpoint should be ~50: {}", bend_at(500));
+        assert_eq!(bend_at(1000), 100.0);
     }
 
     #[test]
