@@ -1366,16 +1366,16 @@ fn add_shape_layer(state: State<AppState>, shape: SurfaceShape) -> Project {
         end_ms,
         kind: LayerKind::Shape3D {
             shape,
-            width: w,
-            height: h,
-            depth: w.min(h) * 0.7,
+            width: Track::constant(w),
+            height: Track::constant(h),
+            depth: Track::constant(w.min(h) * 0.7),
             rotation_x: Track::constant(0.0),
             rotation_y: Track::constant(0.0),
             rotation_z: Track::constant(0.0),
-            perspective: 0.35,
-            focal_length: 1200.0,
-            coverage: 360.0,
-            radius: w.min(h) * 0.5,
+            perspective: Track::constant(0.35),
+            focal_length: Track::constant(1200.0),
+            coverage: Track::constant(360.0),
+            radius: Track::constant(w.min(h) * 0.5),
         },
         transform: Transform::at(cx, cy),
         hidden: false,
@@ -1862,20 +1862,23 @@ fn split_cell(state: State<AppState>, layer_id: u32, cell: u32) -> Result<Projec
     Ok(project.clone())
 }
 
-/// Set a `Shape3D` layer's static parameters (dimensions + camera). Rotations are
-/// keyframed separately (`set_shape_rotation_key`). Undoable.
+/// Set a `Shape3D` layer's dimension + camera parameters. Each is a keyframeable
+/// `Track` (the frontend upserts a key at the playhead when the stopwatch is on,
+/// mirroring `set_shape2d`). Rotations are keyed separately
+/// (`set_shape_rotation_key`). Clamping happens at sample time in the evaluator.
+/// Undoable.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn set_shape_params(
     state: State<AppState>,
     layer_id: u32,
-    width: f32,
-    height: f32,
-    depth: f32,
-    perspective: f32,
-    focal_length: f32,
-    coverage: f32,
-    radius: f32,
+    width: Track,
+    height: Track,
+    depth: Track,
+    perspective: Track,
+    focal_length: Track,
+    coverage: Track,
+    radius: Track,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
@@ -1895,13 +1898,13 @@ fn set_shape_params(
             radius: r,
             ..
         } => {
-            *w = width.max(1.0);
-            *h = height.max(1.0);
-            *d = depth.max(0.0);
-            *p = perspective.clamp(0.0, 1.0);
-            *f = focal_length.max(50.0);
-            *c = coverage.clamp(1.0, 360.0);
-            *r = radius.max(1.0);
+            *w = width;
+            *h = height;
+            *d = depth;
+            *p = perspective;
+            *f = focal_length;
+            *c = coverage;
+            *r = radius;
         }
         _ => return Err("not a shape layer".into()),
     }
@@ -2759,6 +2762,10 @@ pub struct AudioTrack {
     pub start_ms: u32,
     #[serde(rename = "playMs")]
     pub play_ms: u32,
+    /// Where in the source file this clip starts (ms). Non-zero when a partial
+    /// export begins partway through the clip. Defaults to 0 for a full export.
+    #[serde(rename = "sourceInMs", default)]
+    pub source_in_ms: u32,
 }
 
 /// Build the ffmpeg `-filter_complex` graph that trims each audio clip to its
@@ -2773,10 +2780,13 @@ fn audio_filter_complex(audio: &[AudioTrack], duration_ms: u32) -> Option<String
     let mut fc = String::new();
     for (i, a) in audio.iter().enumerate() {
         let inp = i + 1; // input 0 is the video
+        let src_in = a.source_in_ms as f64 / 1000.0;
         let play = a.play_ms as f64 / 1000.0;
-        // Trim from the clip start, restamp to zero, then delay to the comp start.
+        // Trim [source_in, source_in + play] out of the file, restamp to zero, then
+        // delay to the clip's start in the exported timeline.
         fc.push_str(&format!(
-            "[{inp}:a]atrim=0:{play:.3},asetpts=PTS-STARTPTS,adelay={delay}:all=1[a{i}];",
+            "[{inp}:a]atrim={src_in:.3}:{end:.3},asetpts=PTS-STARTPTS,adelay={delay}:all=1[a{i}];",
+            end = src_in + play,
             delay = a.start_ms
         ));
     }
@@ -2921,12 +2931,34 @@ fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
                 f(&mut p.scale);
             }
         }
-        LayerKind::Shape3D { rotation_x, rotation_y, rotation_z, .. } => {
+        LayerKind::Shape3D {
+            width,
+            height,
+            depth,
+            rotation_x,
+            rotation_y,
+            rotation_z,
+            perspective,
+            focal_length,
+            coverage,
+            radius,
+            ..
+        } => {
+            f(width);
+            f(height);
+            f(depth);
             f(rotation_x);
             f(rotation_y);
             f(rotation_z);
+            f(perspective);
+            f(focal_length);
+            f(coverage);
+            f(radius);
         }
         LayerKind::Shape2D { style } => {
+            f(&mut style.width);
+            f(&mut style.height);
+            f(&mut style.sides);
             f(&mut style.corner_radius);
             f(&mut style.bend);
             f(&mut style.border_width);

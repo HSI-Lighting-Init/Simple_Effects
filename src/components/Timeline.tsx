@@ -1,7 +1,7 @@
 // The timeline. One track per layer (top layer on top), so every image you add
 // gets its own row. Blocks show each layer's [startMs, endMs] range; diamonds
 // mark keyframes; the playhead is draggable to scrub.
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Project } from "../bindings/Project";
 import type { Layer } from "../bindings/Layer";
 import type { FrameCell } from "../bindings/FrameCell";
@@ -75,10 +75,15 @@ function keyframeTimes(l: Layer): number[] {
     for (const k of l.kind.colorKeys) set.add(k.timeMs);
   }
   if (l.kind.kind === "shape3d")
-    tracks.push(l.kind.rotation_x, l.kind.rotation_y, l.kind.rotation_z);
+    tracks.push(
+      l.kind.width, l.kind.height, l.kind.depth,
+      l.kind.rotation_x, l.kind.rotation_y, l.kind.rotation_z,
+      l.kind.perspective, l.kind.focal_length, l.kind.coverage, l.kind.radius
+    );
   if (l.kind.kind === "shape2d") {
     const s = l.kind.style;
     tracks.push(
+      s.width, s.height, s.sides,
       s.cornerRadius, s.bend, s.borderWidth, s.glowSize, s.glowOpacity,
       s.shadowBlur, s.shadowOffsetX, s.shadowOffsetY, s.shadowOpacity
     );
@@ -143,6 +148,10 @@ interface Props {
   labelsW: number;
   /** Commit a new layers-column width (dragged the divider). */
   onResizeLabels: (w: number) => void;
+  /** The section of the comp to export [inMs, outMs], or null for the whole comp. */
+  exportRange: { inMs: number; outMs: number } | null;
+  /** Set (or clear, with null) the export range. */
+  onSetExportRange: (r: { inMs: number; outMs: number } | null) => void;
 }
 
 export default function Timeline({
@@ -170,6 +179,8 @@ export default function Timeline({
   onEnterGroup,
   labelsW,
   onResizeLabels,
+  exportRange,
+  onSetExportRange,
 }: Props) {
   const tracksRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -232,13 +243,65 @@ export default function Timeline({
     if (e.ctrlKey || e.metaKey) return;
     if (scrollRef.current) scrollRef.current.scrollTop += e.deltaY;
   };
-  const zoomBy = (factor: number) => setZoom((z) => Math.min(40, Math.max(1, z * factor)));
-  // Ctrl/⌘ + wheel zooms the timeline; plain wheel scrolls (native).
-  const onWheel = (e: React.WheelEvent) => {
-    if (!(e.ctrlKey || e.metaKey)) return;
-    e.preventDefault();
-    zoomBy(e.deltaY < 0 ? 1.2 : 1 / 1.2);
+  // Zoom while keeping one point fixed on screen. `zoomAnchorRef` records the
+  // timeline fraction to pin and the screen x (px from the tracks' left edge) it
+  // should stay at; a layout effect re-derives scrollLeft once the new width is in.
+  const zoomAnchorRef = useRef<{ frac: number; screenX: number } | null>(null);
+  const zoomAround = (factor: number, screenX?: number) => {
+    const s = scrollRef.current;
+    setZoom((z) => {
+      const nz = Math.min(40, Math.max(1, z * factor));
+      if (s && nz !== z) {
+        const cw = s.clientWidth || 1;
+        // Default anchor: the playhead's current on-screen position.
+        const ax = screenX ?? (time / dur) * cw * z - s.scrollLeft;
+        const frac = (s.scrollLeft + ax) / (cw * z);
+        zoomAnchorRef.current = { frac, screenX: ax };
+      }
+      return nz;
+    });
   };
+  const zoomBy = (factor: number) => zoomAround(factor);
+  // After a zoom, pin the recorded anchor by adjusting the horizontal scroll (so
+  // zooming grows/shrinks around the playhead or cursor, not the left edge).
+  useLayoutEffect(() => {
+    const s = scrollRef.current;
+    const a = zoomAnchorRef.current;
+    if (!s || !a) return;
+    zoomAnchorRef.current = null;
+    const cw = s.clientWidth || 1;
+    s.scrollLeft = a.frac * cw * zoom - a.screenX;
+    onTracksScroll(); // keep the frozen ruler/labels in sync this frame
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoom]);
+  // Wheel over the tracks area: Ctrl/⌘ zooms; a plain vertical wheel scrolls the
+  // timeline HORIZONTALLY (time) whenever it's zoomed/overflowing — that's the axis
+  // you navigate. Shift-wheel or a horizontal wheel keeps native behaviour, and
+  // when nothing overflows horizontally the wheel scrolls layers vertically as
+  // usual. Attached natively (not via React's passive onWheel) so preventDefault
+  // takes effect.
+  useEffect(() => {
+    const s = scrollRef.current;
+    if (!s) return;
+    const handler = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        // Anchor the zoom under the cursor (natural "zoom where you point").
+        const cursorX = e.clientX - s.getBoundingClientRect().left;
+        zoomAround(e.deltaY < 0 ? 1.2 : 1 / 1.2, cursorX);
+        return;
+      }
+      if (e.shiftKey) return; // let the browser scroll the other axis
+      const horiz = s.scrollWidth > s.clientWidth + 1;
+      if (horiz && e.deltaY !== 0 && Math.abs(e.deltaY) >= Math.abs(e.deltaX)) {
+        s.scrollLeft += e.deltaY;
+        e.preventDefault();
+      }
+    };
+    s.addEventListener("wheel", handler, { passive: false });
+    return () => s.removeEventListener("wheel", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const layers = [...project.layers].reverse();
 
   // Drop layer `dragId` so it sits just *under* `targetId` in z-order. Works in
@@ -561,6 +624,15 @@ export default function Timeline({
       return next;
     });
 
+  // Convert an absolute clientX into comp ms over the (scrolling) track width.
+  const msFromX = (clientX: number): number => {
+    const el = tracksRef.current;
+    if (!el) return 0;
+    const r = el.getBoundingClientRect();
+    const pct = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    return Math.round(pct * dur);
+  };
+
   const onMouseDown = (e: React.MouseEvent) => {
     // Prevent the browser from starting a text selection on the ruler's tick
     // labels — dragging a selection also auto-scrolls the timeline.
@@ -573,6 +645,66 @@ export default function Timeline({
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
+  };
+
+  // Shift-drag across the ruler to select the export range. A near-zero drag
+  // (a click) clears any range back to the whole comp.
+  const MIN_RANGE_MS = 10;
+  const startRangeSelect = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const anchor = msFromX(e.clientX);
+    let cur = anchor;
+    onSetExportRange({ inMs: anchor, outMs: anchor });
+    const move = (ev: MouseEvent) => {
+      cur = msFromX(ev.clientX);
+      onSetExportRange({ inMs: Math.min(anchor, cur), outMs: Math.max(anchor, cur) });
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      const inMs = Math.min(anchor, cur);
+      const outMs = Math.max(anchor, cur);
+      onSetExportRange(outMs - inMs < MIN_RANGE_MS ? null : { inMs, outMs });
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
+  // Drag one edge of an existing export range.
+  const startRangeEdge = (e: React.MouseEvent, edge: "in" | "out") => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!exportRange) return;
+    const fixed = edge === "in" ? exportRange.outMs : exportRange.inMs;
+    const move = (ev: MouseEvent) => {
+      const m = msFromX(ev.clientX);
+      if (edge === "in") onSetExportRange({ inMs: Math.min(m, fixed - MIN_RANGE_MS), outMs: fixed });
+      else onSetExportRange({ inMs: fixed, outMs: Math.max(m, fixed + MIN_RANGE_MS) });
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
+  // Corner buttons: set the in/out point to the playhead, or clear the range.
+  const setRangeIn = () => {
+    const outMs = exportRange?.outMs ?? dur;
+    onSetExportRange({ inMs: Math.max(0, Math.min(time, outMs - MIN_RANGE_MS)), outMs });
+  };
+  const setRangeOut = () => {
+    const inMs = exportRange?.inMs ?? 0;
+    onSetExportRange({ inMs, outMs: Math.min(dur, Math.max(time, inMs + MIN_RANGE_MS)) });
+  };
+
+  // Ruler press: Shift-drag paints the export range (the section that gets
+  // rendered); a plain press scrubs the playhead.
+  const onRulerMouseDown = (e: React.MouseEvent) => {
+    if (e.shiftKey) startRangeSelect(e);
+    else onMouseDown(e);
   };
 
   // Rubber-band select: drag across empty track space to draw a box; every layer
@@ -665,6 +797,18 @@ export default function Timeline({
       <div className="tl-grid" style={{ gridTemplateColumns: `${labelsW}px 1fr` }}>
         <div className="tl-corner">
           <span className="tl-corner-label">Layers</span>
+          <span className="tl-range-btns">
+            <button onClick={setRangeIn} title="Set export range start at the playhead (or Shift-drag the ruler)">[</button>
+            <button onClick={setRangeOut} title="Set export range end at the playhead">]</button>
+            <button
+              className={exportRange ? "active" : ""}
+              onClick={() => onSetExportRange(null)}
+              disabled={!exportRange}
+              title={exportRange ? "Clear export range (export whole comp)" : "No export range — whole comp exports"}
+            >
+              ⤫
+            </button>
+          </span>
           <span className="tl-zoom">
             <button onClick={() => zoomBy(1 / 1.5)} title="Zoom out (Ctrl+wheel)">−</button>
             <button onClick={() => setZoom(1)} title="Reset zoom">
@@ -674,8 +818,32 @@ export default function Timeline({
           </span>
         </div>
 
-        <div className="tl-ruler" ref={rulerRef} onMouseDown={onMouseDown} title="Click or drag to move the playhead">
+        <div
+          className="tl-ruler"
+          ref={rulerRef}
+          onMouseDown={onRulerMouseDown}
+          title="Click or drag to move the playhead · Shift-drag to select the export range"
+        >
           <div className="tl-ruler-inner" ref={rulerInnerRef} style={{ width: `${zoom * 100}%` }}>
+            {exportRange && (
+              <div
+                className="tl-range"
+                style={{
+                  left: `${(exportRange.inMs / dur) * 100}%`,
+                  width: `${((exportRange.outMs - exportRange.inMs) / dur) * 100}%`,
+                }}
+                title={`Export range ${(exportRange.inMs / 1000).toFixed(2)}s – ${(exportRange.outMs / 1000).toFixed(2)}s`}
+              >
+                <span
+                  className="tl-range-handle tl-range-in"
+                  onMouseDown={(e) => startRangeEdge(e, "in")}
+                />
+                <span
+                  className="tl-range-handle tl-range-out"
+                  onMouseDown={(e) => startRangeEdge(e, "out")}
+                />
+              </div>
+            )}
             {minorTicks.map((t) => (
               <span
                 key={`m${t}`}
@@ -795,7 +963,6 @@ export default function Timeline({
           className="tl-tracks-scroll"
           ref={scrollRef}
           onScroll={onTracksScroll}
-          onWheel={onWheel}
         >
           <div
             className={"tl-tracks-inner" + (razor ? " razor" : "")}
@@ -914,6 +1081,15 @@ export default function Timeline({
               </Fragment>
             );
           })}
+            {exportRange && (
+              <div
+                className="tl-range-band"
+                style={{
+                  left: `${(exportRange.inMs / dur) * 100}%`,
+                  width: `${((exportRange.outMs - exportRange.inMs) / dur) * 100}%`,
+                }}
+              />
+            )}
             <div className="tl-playhead" style={{ left: `${(time / dur) * 100}%` }} />
             {marquee && (
               <div

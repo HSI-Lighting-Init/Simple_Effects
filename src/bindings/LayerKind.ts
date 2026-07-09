@@ -21,27 +21,33 @@ import type { Track } from "./Track";
  * What a layer actually draws. Internally tagged so the TS side is a clean
  * discriminated union on `kind`.
  */
-export type LayerKind = { "kind": "image", src: string, width: number, height: number, } | { "kind": "shape3d", shape: SurfaceShape, width: number, height: number, 
+export type LayerKind = { "kind": "image", src: string, width: number, height: number, } | { "kind": "shape3d", shape: SurfaceShape, 
 /**
- * Box depth (px). Ignored for cylinders.
+ * Box/cylinder dimensions (px). Keyframeable — animate the size over the
+ * clip. Bare numbers in older projects deserialize as constant tracks.
  */
-depth: number, rotation_x: Track, rotation_y: Track, rotation_z: Track, 
+width: Track, height: Track, 
 /**
- * 0 = orthographic, 1 = full perspective foreshortening.
+ * Box depth (px). Ignored for cylinders. Keyframeable.
  */
-perspective: number, 
+depth: Track, rotation_x: Track, rotation_y: Track, rotation_z: Track, 
 /**
- * Camera distance (px-ish). Larger = flatter perspective.
+ * 0 = orthographic, 1 = full perspective foreshortening. Keyframeable.
  */
-focal_length: number, 
+perspective: Track, 
+/**
+ * Camera distance (px-ish). Larger = flatter perspective. Keyframeable.
+ */
+focal_length: Track, 
 /**
  * Cylinder: degrees of circumference shown (0..360). Ignored for boxes.
+ * Keyframeable.
  */
-coverage: number, 
+coverage: Track, 
 /**
- * Cylinder: radius (px). Ignored for boxes.
+ * Cylinder: radius (px). Ignored for boxes. Keyframeable.
  */
-radius: number, } | { "kind": "text", content: string, 
+radius: Track, } | { "kind": "text", content: string, 
 /**
  * Font size in px (the letter "height").
  */

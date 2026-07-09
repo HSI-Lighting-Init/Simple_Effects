@@ -2,6 +2,7 @@
 // bindings generated from the Rust model (`cargo test` regenerates them).
 import { invoke } from "@tauri-apps/api/core";
 import type { Project } from "../bindings/Project";
+import type { Track } from "../bindings/Track";
 import type { ResolvedLayer } from "../bindings/ResolvedLayer";
 import type { TransformEdit } from "../bindings/TransformEdit";
 import type { ShapedText } from "../bindings/ShapedText";
@@ -345,16 +346,17 @@ export const mergeCell = (layerId: number, cell: number, dir: "right" | "down") 
 export const splitCell = (layerId: number, cell: number) =>
   invoke<Project>("split_cell", { layerId, cell });
 
-/** Set a shape's dimensions + camera (rotations are keyframed separately). */
+/** Set a shape's dimensions + camera. Each is a keyframeable Track (rotations
+ *  are keyed separately). */
 export const setShapeParams = (
   layerId: number,
-  width: number,
-  height: number,
-  depth: number,
-  perspective: number,
-  focalLength: number,
-  coverage: number,
-  radius: number
+  width: Track,
+  height: Track,
+  depth: Track,
+  perspective: Track,
+  focalLength: Track,
+  coverage: Track,
+  radius: Track
 ) =>
   invoke<Project>("set_shape_params", {
     layerId,
@@ -560,11 +562,13 @@ export const installFfmpeg = () => invoke<string>("install_ffmpeg");
  * ffmpeg H.264). `level` 1..5 = compression (1 near-original/largest,
  * 5 highest-compression/smallest).
  */
-/** One audio clip to mux into the export: source path, comp start, play length. */
+/** One audio clip to mux into the export: source path, comp start, play length,
+ *  and where in the source file to start (`sourceInMs`, for partial-range export). */
 export interface AudioTrackSpec {
   path: string;
   startMs: number;
   playMs: number;
+  sourceInMs?: number;
 }
 
 export const exportVideo = (

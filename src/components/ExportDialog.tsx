@@ -49,6 +49,7 @@ function formatDuration(sec: number): string {
 export default function ExportDialog({
   defaultFps,
   durationMs,
+  rangeLabel,
   width,
   height,
   onExport,
@@ -56,6 +57,8 @@ export default function ExportDialog({
 }: {
   defaultFps: number;
   durationMs: number;
+  /** When exporting a selected section, the "in – out" label to show; else null. */
+  rangeLabel: string | null;
   width: number;
   height: number;
   onExport: (
@@ -142,6 +145,12 @@ export default function ExportDialog({
       <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-title">Export video</div>
         <div className="modal-body">
+          {rangeLabel && (
+            <div className="export-range-note">
+              Exporting selected range <strong>{rangeLabel}</strong> — clear it on the
+              timeline (⤫) to export the whole comp.
+            </div>
+          )}
           <label className="insp-field">
             Format
             <div className="seg">

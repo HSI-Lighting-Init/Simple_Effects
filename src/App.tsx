@@ -302,6 +302,12 @@ export default function App() {
   const [showCompSettings, setShowCompSettings] = useState(false);
   const [fxEditorId, setFxEditorId] = useState<number | null>(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
+  // Optional export range [inMs, outMs] — the section of the comp to render.
+  // Null = export the whole comp. Set by Shift-dragging the timeline ruler. A ref
+  // mirrors it so the export loop (a stable callback) can read the latest value.
+  const [exportRange, setExportRange] = useState<{ inMs: number; outMs: number } | null>(null);
+  const exportRangeRef = useRef(exportRange);
+  exportRangeRef.current = exportRange;
   // Live preview frame rate (measured during playback) and the FPS label burned
   // into the video while exporting (null = off).
   const [previewFps, setPreviewFps] = useState(0);
@@ -1237,6 +1243,34 @@ export default function App() {
   // Shape dimensions + camera (rotations are keyed separately).
   const onShapeParams = useCallback(
     async (layerId: number, params: ShapeParams) => {
+      // Optimistically apply the tracks to the layer so the inspector re-renders
+      // with the new keyframe state before the round-trip returns — otherwise
+      // keyframing a second dimension right after a first can clobber it (same
+      // guard as onSetShape2d).
+      setProject((prev) =>
+        prev
+          ? {
+              ...prev,
+              layers: prev.layers.map((l) =>
+                l.id === layerId && l.kind.kind === "shape3d"
+                  ? {
+                      ...l,
+                      kind: {
+                        ...l.kind,
+                        width: params.width,
+                        height: params.height,
+                        depth: params.depth,
+                        perspective: params.perspective,
+                        focal_length: params.focalLength,
+                        coverage: params.coverage,
+                        radius: params.radius,
+                      },
+                    }
+                  : l
+              ),
+            }
+          : prev
+      );
       const p = await setShapeParams(
         layerId,
         params.width,
@@ -2046,7 +2080,14 @@ export default function App() {
             { transitions, effectKinds, layers: subjectLayers }
           );
         }
-        const duration = p.durationMs;
+        // Export range: render only [inMs, outMs] of the comp (defaults to the
+        // whole comp). Frames are rendered at the ABSOLUTE comp time `inMs + tMs`,
+        // but the encoded video timeline starts at 0 — so `duration` here is the
+        // range LENGTH, and audio clips are shifted by `inMs` below.
+        const range = exportRangeRef.current;
+        const inMs = range ? Math.max(0, Math.min(range.inMs, p.durationMs)) : 0;
+        const outMs = range ? Math.max(inMs + 1, Math.min(range.outMs, p.durationMs)) : p.durationMs;
+        const duration = outMs - inMs;
         // Frame count for this render — used to calibrate the render-time estimate
         // shown in the export dialog on the next run.
         const totalFrames = Math.max(1, Math.ceil((duration / 1000) * fps));
@@ -2076,20 +2117,20 @@ export default function App() {
             const tick = async () => {
               const t = performance.now() - startWall;
               if (t >= duration) {
-                await applyTime(duration);
+                await applyTime(outMs);
                 if (probing) {
                   await awaitPaint();
-                  probePreview(canvas, duration);
+                  probePreview(canvas, outMs);
                 }
                 resolve();
                 return;
               }
               setExportMsg(`Rendering… ${Math.round((t / duration) * 100)}%`);
-              await applyTime(t);
+              await applyTime(inMs + t);
               if (probing && t - lastProbe >= 150) {
                 lastProbe = t;
                 await awaitPaint();
-                probePreview(canvas, t);
+                probePreview(canvas, inMs + t);
               }
               requestAnimationFrame(tick);
             };
@@ -2118,7 +2159,10 @@ export default function App() {
               fps,
               durationMs: duration,
               bitrate: encodeBitrate,
-              renderFrame: async (tMs) => {
+              renderFrame: async (relMs) => {
+                // The encoder counts from 0; shift into absolute comp time so a
+                // partial export renders the right section (inMs = 0 for a full comp).
+                const tMs = inMs + relMs;
                 // Evaluate this exact frame and push it to the preview via a NORMAL
                 // state update. We deliberately do NOT use flushSync here: react-konva
                 // renders the Stage's children through its OWN concurrent reconciler
@@ -2160,7 +2204,7 @@ export default function App() {
                 previewStageRef.current?.draw();
                 for (const st of Konva.stages) st.draw();
               },
-              onFrameRendered: probing ? (tMs) => probePreview(canvas, tMs) : undefined,
+              onFrameRendered: probing ? (relMs) => probePreview(canvas, inMs + relMs) : undefined,
               onProgress: (frac) => {
                 const pct = Math.round(frac * 100);
                 if (pct !== lastPct) {
@@ -2212,13 +2256,24 @@ export default function App() {
 
         // Collect the comp's audio clips so ffmpeg can mux them into the output:
         // each plays from its start at its comp offset, for its trimmed length.
+        // Clip each audio layer to the export range: `startMs` is its position in
+        // the exported timeline (0 at inMs), `sourceInMs` is how far into the file
+        // to start (so a clip that begins before the range plays from the middle).
         const audioTracks = p.layers
-          .filter((l) => l.kind.kind === "audio" && !l.hidden && l.startMs < p.durationMs)
+          .filter((l) => l.kind.kind === "audio" && !l.hidden && l.endMs > inMs && l.startMs < outMs)
           .map((l) => {
             const durMs = l.kind.kind === "audio" ? l.kind.durationMs : 0;
-            const span = Math.max(0, Math.min(l.endMs, p.durationMs) - l.startMs);
-            const playMs = durMs > 0 ? Math.min(span, durMs) : span;
-            return { path: l.kind.kind === "audio" ? l.kind.src : "", startMs: l.startMs, playMs };
+            const clipStart = Math.max(l.startMs, inMs);
+            const clipEnd = Math.min(l.endMs, outMs);
+            const sourceInMs = clipStart - l.startMs; // offset into the source file
+            let playMs = clipEnd - clipStart;
+            if (durMs > 0) playMs = Math.min(playMs, Math.max(0, durMs - sourceInMs));
+            return {
+              path: l.kind.kind === "audio" ? l.kind.src : "",
+              startMs: clipStart - inMs,
+              playMs,
+              sourceInMs,
+            };
           })
           .filter((a) => a.path && a.playMs > 0);
 
@@ -2233,7 +2288,7 @@ export default function App() {
         // MP4 transcode: in "bitrate" mode target the user's bitrate (size ≈
         // bitrate × duration); in "quality" mode use CRF from the compression
         // level (constant quality, variable size). WebM is copied through as-is.
-        await exportVideo(base64, path, format, rateMode, level, bitrate, audioTracks, p.durationMs);
+        await exportVideo(base64, path, format, rateMode, level, bitrate, audioTracks, duration);
         // Calibrate the render-time estimate: record how long this export took
         // per frame so the dialog can predict the next one more accurately.
         const msPerFrame = (performance.now() - renderStartedAt) / totalFrames;
@@ -3362,6 +3417,8 @@ export default function App() {
         onEnterGroup={onEnterGroup}
         labelsW={labelsW}
         onResizeLabels={(w) => setLayoutValue("labelsW", w)}
+        exportRange={exportRange}
+        onSetExportRange={setExportRange}
       />
 
       {showRecorder && (
@@ -3520,7 +3577,16 @@ export default function App() {
       {showExportDialog && (
         <ExportDialog
           defaultFps={project.fps}
-          durationMs={project.durationMs}
+          durationMs={
+            exportRange
+              ? Math.max(1, Math.min(exportRange.outMs, project.durationMs) - Math.max(0, exportRange.inMs))
+              : project.durationMs
+          }
+          rangeLabel={
+            exportRange
+              ? `${(exportRange.inMs / 1000).toFixed(2)}s – ${(exportRange.outMs / 1000).toFixed(2)}s`
+              : null
+          }
           width={project.width}
           height={project.height}
           onExport={onExport}

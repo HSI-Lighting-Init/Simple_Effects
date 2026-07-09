@@ -13,13 +13,15 @@ import type { VectorShape } from "./VectorShape";
 export type Shape2DStyle = { shape: VectorShape, 
 /**
  * Base bounding-box size in comp px (the layer transform scales/rotates on
- * top). Adjustable with the width/height sliders.
+ * top). Keyframeable — animate the shape's own width/height. Bare numbers in
+ * older projects deserialize as constant tracks.
  */
-width: number, height: number, 
+width: Track, height: Track, 
 /**
- * Regular-polygon side count (>= 3). Ignored for rectangle/circle.
+ * Regular-polygon side count (>= 3, rounded when sampled). Ignored for
+ * rectangle/circle. Keyframeable so the polygon can morph side counts.
  */
-sides: number, 
+sides: Track, 
 /**
  * Rectangle corner radius (px). Ignored for circle/polygon.
  */

@@ -115,21 +115,31 @@ pub enum LayerKind {
     /// `width`/`height`/`depth` set the box dimensions / cylinder size in comp px.
     Shape3D {
         shape: SurfaceShape,
-        width: f32,
-        height: f32,
-        /// Box depth (px). Ignored for cylinders.
-        depth: f32,
+        /// Box/cylinder dimensions (px). Keyframeable — animate the size over the
+        /// clip. Bare numbers in older projects deserialize as constant tracks.
+        #[serde(default, deserialize_with = "de_track")]
+        width: Track,
+        #[serde(default, deserialize_with = "de_track")]
+        height: Track,
+        /// Box depth (px). Ignored for cylinders. Keyframeable.
+        #[serde(default, deserialize_with = "de_track")]
+        depth: Track,
         rotation_x: Track,
         rotation_y: Track,
         rotation_z: Track,
-        /// 0 = orthographic, 1 = full perspective foreshortening.
-        perspective: f32,
-        /// Camera distance (px-ish). Larger = flatter perspective.
-        focal_length: f32,
+        /// 0 = orthographic, 1 = full perspective foreshortening. Keyframeable.
+        #[serde(default, deserialize_with = "de_track")]
+        perspective: Track,
+        /// Camera distance (px-ish). Larger = flatter perspective. Keyframeable.
+        #[serde(default, deserialize_with = "de_track")]
+        focal_length: Track,
         /// Cylinder: degrees of circumference shown (0..360). Ignored for boxes.
-        coverage: f32,
-        /// Cylinder: radius (px). Ignored for boxes.
-        radius: f32,
+        /// Keyframeable.
+        #[serde(default, deserialize_with = "de_track")]
+        coverage: Track,
+        /// Cylinder: radius (px). Ignored for boxes. Keyframeable.
+        #[serde(default, deserialize_with = "de_track")]
+        radius: Track,
     },
     /// A text run. `anim` opt-in drives per-letter animation from a preset;
     /// `parts` holds manual per-glyph move/rotate/scale (decompose mode).
@@ -914,14 +924,16 @@ pub enum VectorShape {
 pub struct Shape2DStyle {
     pub shape: VectorShape,
     /// Base bounding-box size in comp px (the layer transform scales/rotates on
-    /// top). Adjustable with the width/height sliders.
-    #[serde(default = "default_shape_size")]
-    pub width: f32,
-    #[serde(default = "default_shape_size")]
-    pub height: f32,
-    /// Regular-polygon side count (>= 3). Ignored for rectangle/circle.
-    #[serde(default = "default_sides")]
-    pub sides: u32,
+    /// top). Keyframeable — animate the shape's own width/height. Bare numbers in
+    /// older projects deserialize as constant tracks.
+    #[serde(default = "size_track", deserialize_with = "de_track")]
+    pub width: Track,
+    #[serde(default = "size_track", deserialize_with = "de_track")]
+    pub height: Track,
+    /// Regular-polygon side count (>= 3, rounded when sampled). Ignored for
+    /// rectangle/circle. Keyframeable so the polygon can morph side counts.
+    #[serde(default = "sides_track", deserialize_with = "de_track")]
+    pub sides: Track,
     /// Rectangle corner radius (px). Ignored for circle/polygon.
     #[serde(default)]
     pub corner_radius: Track,
@@ -970,6 +982,12 @@ fn default_sides() -> u32 {
 fn default_shape_size() -> f32 {
     300.0
 }
+fn size_track() -> Track {
+    Track::constant(default_shape_size())
+}
+fn sides_track() -> Track {
+    Track::constant(default_sides() as f32)
+}
 fn default_true() -> bool {
     true
 }
@@ -982,9 +1000,9 @@ impl Shape2DStyle {
         let (width, height) = if shape == VectorShape::Arrow { (size, size * 0.5) } else { (size, size) };
         Shape2DStyle {
             shape,
-            width,
-            height,
-            sides: default_sides(),
+            width: Track::constant(width),
+            height: Track::constant(height),
+            sides: Track::constant(default_sides() as f32),
             corner_radius: Track::constant(if shape == VectorShape::Rectangle { 24.0 } else { 0.0 }),
             bend: Track::constant(0.0),
             filled: true,

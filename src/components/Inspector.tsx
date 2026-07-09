@@ -396,10 +396,10 @@ function Shape2DSection({
           </div>
         </label>
         {style.shape === "polygon" && (
-          <NumField label="Sides" value={style.sides} min={3} max={30} onChange={(v) => set({ sides: Math.max(3, Math.round(v)) })} />
+          <KeyNumField label="Sides" track={style.sides} tMs={timeMs} min={3} max={30} onChange={(t) => set({ sides: t })} />
         )}
-        {effSlider(isArrow ? "Length" : "Width", style.width, 4, 4000, 1, (v) => set({ width: v }))}
-        {effSlider(isArrow ? "Thickness" : "Height", style.height, 4, 4000, 1, (v) => set({ height: v }))}
+        <KeyNumField label={isArrow ? "Length" : "Width"} track={style.width} tMs={timeMs} min={4} max={4000} onChange={(t) => set({ width: t })} />
+        <KeyNumField label={isArrow ? "Thickness" : "Height"} track={style.height} tMs={timeMs} min={4} max={4000} onChange={(t) => set({ height: t })} />
         {style.shape === "rectangle" && (
           <KeyNumField label="Corner radius" track={style.cornerRadius} tMs={timeMs} min={0} max={500} onChange={(t) => set({ cornerRadius: t })} />
         )}
@@ -1050,13 +1050,13 @@ function TextInspector({
 const FACE_LABELS = ["Front", "Back", "Left", "Right", "Top", "Bottom"];
 
 export interface ShapeParams {
-  width: number;
-  height: number;
-  depth: number;
-  perspective: number;
-  focalLength: number;
-  coverage: number;
-  radius: number;
+  width: Track;
+  height: Track;
+  depth: Track;
+  perspective: Track;
+  focalLength: Track;
+  coverage: Track;
+  radius: Track;
 }
 
 interface ShapeRef {
@@ -1073,6 +1073,7 @@ function ShapeInspector({
   shape,
   params,
   angles,
+  timeMs,
   onShapeParams,
   onShapeRotKey,
 }: {
@@ -1080,6 +1081,7 @@ function ShapeInspector({
   shape: SurfaceShape;
   params: ShapeParams;
   angles: { x: number; y: number; z: number } | null;
+  timeMs: number;
   onShapeParams: (layerId: number, p: ShapeParams) => void;
   onShapeRotKey: (
     layerId: number,
@@ -1132,38 +1134,18 @@ function ShapeInspector({
       </p>
 
       <div className="insp-sep">Camera</div>
-      <label className="insp-field">
-        Perspective {params.perspective.toFixed(2)}
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={params.perspective}
-          onChange={(e) => set({ perspective: Number(e.target.value) })}
-        />
-      </label>
-      {effSlider("Focal length", params.focalLength, 100, 5000, 50, (v) => set({ focalLength: v }))}
+      <KeyNumField label="Perspective" track={params.perspective} tMs={timeMs} min={0} max={1} step={0.01} onChange={(t) => set({ perspective: t })} />
+      <KeyNumField label="Focal length" track={params.focalLength} tMs={timeMs} min={100} max={5000} step={50} onChange={(t) => set({ focalLength: t })} />
 
-      <div className="insp-sep">Size</div>
-      {effSlider("Width", params.width, 1, 4000, 1, (v) => set({ width: v }))}
-      {effSlider("Height", params.height, 1, 4000, 1, (v) => set({ height: v }))}
+      <div className="insp-sep">Size (keyframeable)</div>
+      <KeyNumField label="Width" track={params.width} tMs={timeMs} min={1} max={4000} onChange={(t) => set({ width: t })} />
+      <KeyNumField label="Height" track={params.height} tMs={timeMs} min={1} max={4000} onChange={(t) => set({ height: t })} />
       {shape === "box" ? (
-        effSlider("Depth", params.depth, 0, 4000, 1, (v) => set({ depth: v }))
+        <KeyNumField label="Depth" track={params.depth} tMs={timeMs} min={0} max={4000} onChange={(t) => set({ depth: t })} />
       ) : (
         <>
-          {effSlider("Radius", params.radius, 1, 4000, 1, (v) => set({ radius: v }))}
-          <label className="insp-field">
-            Coverage {Math.round(params.coverage)}°
-            <input
-              type="range"
-              min={10}
-              max={360}
-              step={5}
-              value={params.coverage}
-              onChange={(e) => set({ coverage: Number(e.target.value) })}
-            />
-          </label>
+          <KeyNumField label="Radius" track={params.radius} tMs={timeMs} min={1} max={4000} onChange={(t) => set({ radius: t })} />
+          <KeyNumField label="Coverage°" track={params.coverage} tMs={timeMs} min={10} max={360} step={5} onChange={(t) => set({ coverage: t })} />
         </>
       )}
     </div>
@@ -2975,6 +2957,7 @@ export default function Inspector({
             radius: layer.kind.radius,
           }}
           angles={shapeAngles}
+          timeMs={timeMs}
           onShapeParams={onShapeParams}
           onShapeRotKey={onShapeRotKey}
         />
