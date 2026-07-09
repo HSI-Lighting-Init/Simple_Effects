@@ -1,0 +1,42 @@
+# Build the release bundle and silently (re)install it, so the Desktop / Start
+# Menu "Simple Effects" launcher runs the latest build in one step.
+#
+# Usage:  npm run deploy      (or)   powershell -ExecutionPolicy Bypass -File deploy.ps1
+#
+# Steps: close the running app -> `npm run tauri build` -> run the NSIS
+# installer with /S (silent) -> refresh the shareable installer on the Desktop.
+
+$ErrorActionPreference = "Stop"
+Set-Location -Path $PSScriptRoot
+
+Write-Host "==> Closing any running Simple Effects..." -ForegroundColor Cyan
+Get-Process simple-effects -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 600
+
+Write-Host "==> Building release bundle (npm run tauri build)..." -ForegroundColor Cyan
+npm run tauri build
+if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
+
+$setup = Get-ChildItem "src-tauri\target\release\bundle\nsis" -Filter "*-setup.exe" -ErrorAction SilentlyContinue |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $setup) { throw "no NSIS -setup.exe found under src-tauri\target\release\bundle\nsis" }
+
+Write-Host "==> Installing silently: $($setup.Name)" -ForegroundColor Cyan
+$p = Start-Process -FilePath $setup.FullName -ArgumentList "/S" -PassThru -Wait
+if ($p.ExitCode -ne 0) { throw "installer failed (exit $($p.ExitCode))" }
+
+# Refresh the shareable installer on the Desktop.
+$desktopSetup = Join-Path ([Environment]::GetFolderPath("Desktop")) "Simple Effects Setup.exe"
+Copy-Item $setup.FullName $desktopSetup -Force
+
+# Report where it landed (per-user install by default).
+$installed = "$env:LOCALAPPDATA\Simple Effects\simple-effects.exe"
+Write-Host ""
+Write-Host "==> Done." -ForegroundColor Green
+if (Test-Path $installed) {
+  Write-Host "    Installed: $installed"
+} else {
+  Write-Host "    Installed (check Start Menu 'Simple Effects')."
+}
+Write-Host "    Desktop installer refreshed: $desktopSetup"
+Write-Host "    Launch from the Desktop 'Simple Effects' shortcut or the Start Menu."
