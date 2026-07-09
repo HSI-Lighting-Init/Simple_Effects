@@ -488,10 +488,24 @@ pub struct Track {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct Keyframe {
+    /// Keyframe time in ms. Deserialized leniently (a fractional value from a
+    /// scrubbed playhead is rounded) so a keyframe minted at a non-integer ms
+    /// doesn't reject the whole payload — that silently broke keyframing.
+    #[serde(deserialize_with = "de_ms")]
     pub time_ms: u32,
     pub value: f32,
     /// Easing applied across the segment that STARTS at this keyframe.
     pub easing: Easing,
+}
+
+/// Deserialize a millisecond time that may arrive as a fractional number (the
+/// playhead is rarely on an exact ms after scrubbing). Rounds to the nearest u32.
+fn de_ms<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = f64::deserialize(d)?;
+    Ok(v.round().clamp(0.0, u32::MAX as f64) as u32)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
@@ -513,6 +527,7 @@ pub enum Easing {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct ColorKey {
+    #[serde(deserialize_with = "de_ms")]
     pub time_ms: u32,
     pub color: Rgba,
     pub easing: Easing,
@@ -1393,5 +1408,74 @@ impl Project {
             layers: vec![backdrop, accent, title],
             media: vec![],
         }
+    }
+}
+
+#[cfg(test)]
+mod shape2d_de_tests {
+    use super::*;
+
+    /// Reproduce what the frontend sends when width/height are keyframed: a full
+    /// Shape2DStyle (camelCase) whose `width` is a Track with keys. Must round-trip.
+    #[test]
+    fn keyed_shape2d_style_deserializes() {
+        let json = r#"{
+          "shape": "rectangle",
+          "width": { "keys": [
+              { "timeMs": 0, "value": 300, "easing": "linear" },
+              { "timeMs": 1000, "value": 600, "easing": "linear" }
+            ], "default": 300 },
+          "height": { "keys": [], "default": 300 },
+          "sides": { "keys": [], "default": 6 },
+          "cornerRadius": { "keys": [], "default": 24 },
+          "bend": { "keys": [], "default": 0 },
+          "filled": true,
+          "fill": { "r": 90, "g": 150, "b": 240, "a": 255 },
+          "fillKeys": [],
+          "borderWidth": { "keys": [], "default": 0 },
+          "borderColor": { "r": 255, "g": 255, "b": 255, "a": 255 },
+          "borderColorKeys": [],
+          "glowColor": { "r": 120, "g": 200, "b": 255, "a": 255 },
+          "glowColorKeys": [],
+          "glowSize": { "keys": [], "default": 0 },
+          "glowOpacity": { "keys": [], "default": 1 },
+          "shadowColor": { "r": 0, "g": 0, "b": 0, "a": 255 },
+          "shadowColorKeys": [],
+          "shadowBlur": { "keys": [], "default": 0 },
+          "shadowOffsetX": { "keys": [], "default": 0 },
+          "shadowOffsetY": { "keys": [], "default": 0 },
+          "shadowOpacity": { "keys": [], "default": 1 }
+        }"#;
+        let style: Shape2DStyle = serde_json::from_str(json).expect("keyed style should deserialize");
+        assert_eq!(style.width.keys.len(), 2, "width keys must survive");
+        assert_eq!(style.width.keys[1].value, 600.0);
+    }
+
+    /// A keyframe whose `timeMs` is fractional (the playhead is rarely on an exact
+    /// ms after scrubbing). `Keyframe.time_ms` is u32 — this must NOT reject the
+    /// whole command, or keyframing at a scrubbed time silently fails.
+    #[test]
+    fn fractional_keyframe_time_deserializes() {
+        let json = r#"{
+          "shape": "rectangle",
+          "width": { "keys": [ { "timeMs": 1033.3334, "value": 600, "easing": "linear" } ], "default": 300 },
+          "height": { "keys": [], "default": 300 },
+          "sides": { "keys": [], "default": 6 },
+          "cornerRadius": { "keys": [], "default": 24 },
+          "bend": { "keys": [], "default": 0 },
+          "filled": true,
+          "fill": { "r": 90, "g": 150, "b": 240, "a": 255 }, "fillKeys": [],
+          "borderWidth": { "keys": [], "default": 0 },
+          "borderColor": { "r": 255, "g": 255, "b": 255, "a": 255 }, "borderColorKeys": [],
+          "glowColor": { "r": 120, "g": 200, "b": 255, "a": 255 }, "glowColorKeys": [],
+          "glowSize": { "keys": [], "default": 0 }, "glowOpacity": { "keys": [], "default": 1 },
+          "shadowColor": { "r": 0, "g": 0, "b": 0, "a": 255 }, "shadowColorKeys": [],
+          "shadowBlur": { "keys": [], "default": 0 },
+          "shadowOffsetX": { "keys": [], "default": 0 }, "shadowOffsetY": { "keys": [], "default": 0 },
+          "shadowOpacity": { "keys": [], "default": 1 }
+        }"#;
+        let style: Shape2DStyle =
+            serde_json::from_str(json).expect("fractional keyframe time must round, not reject");
+        assert_eq!(style.width.keys[0].time_ms, 1033, "fractional time rounds to nearest ms");
     }
 }

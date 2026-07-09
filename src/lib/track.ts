@@ -56,8 +56,11 @@ export function isKeyed(track: Track): boolean {
  * Editing a keyed track upserts at the playhead; the `default` tracks the first
  * key so an empty track that gets its first key still reads sensibly. */
 export function upsertKey(track: Track, tMs: number, value: number): Track {
-  const keys = track.keys.filter((k) => k.timeMs !== tMs);
-  keys.push({ timeMs: tMs, value, easing: "linear" });
+  // Keyframe times are whole ms (the backend stores u32); the playhead is rarely
+  // on an exact ms after scrubbing, so round to keep the key on an integer tick.
+  const t = Math.round(tMs);
+  const keys = track.keys.filter((k) => k.timeMs !== t);
+  keys.push({ timeMs: t, value, easing: "linear" });
   keys.sort((a, b) => a.timeMs - b.timeMs);
   return { keys, default: track.keys.length ? track.default : value };
 }
@@ -71,8 +74,9 @@ export function isColorKeyed(keys: ColorKey[]): boolean {
  * Mirrors `upsertKey` for colours (used by the shape border/glow/shadow pickers
  * to key a colour at the playhead). */
 export function upsertColorKey(keys: ColorKey[], tMs: number, color: Rgba): ColorKey[] {
-  const next = keys.filter((k) => k.timeMs !== tMs);
-  next.push({ timeMs: tMs, color, easing: "easeInOut" });
+  const t = Math.round(tMs);
+  const next = keys.filter((k) => k.timeMs !== t);
+  next.push({ timeMs: t, color, easing: "easeInOut" });
   next.sort((a, b) => a.timeMs - b.timeMs);
   return next;
 }

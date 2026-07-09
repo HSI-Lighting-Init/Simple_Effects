@@ -432,8 +432,16 @@ export default function App() {
   );
 
   // Pull resolved transforms for a given time and push them to the preview.
+  // Generation guard: applyTime runs concurrently (rapid edits, playback), and
+  // evaluateAt responses can arrive out of order. Without this, an earlier call's
+  // setResolved could land AFTER a newer one and freeze the preview on a stale
+  // frame — e.g. keyframing a shape then dragging its size, where the pre-drag
+  // frame overwrites the dragged one. Only the most recent request paints.
+  const applySeqRef = useRef(0);
   const applyTime = useCallback(async (t: number) => {
+    const seq = ++applySeqRef.current;
     const layers = await evaluateAt(Math.round(t));
+    if (seq !== applySeqRef.current) return; // superseded by a newer applyTime
     const map: Record<number, ResolvedLayer> = {};
     for (const l of layers) map[l.id] = l;
     setResolved(map);
