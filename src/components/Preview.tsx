@@ -2382,6 +2382,9 @@ export default function Preview({
   // attached once, always reads current values without re-subscribing).
   const zoomRef = useRef({ scale, originX, originY, fitScale, userZoom, stageW, stageH, cw: project.width, ch: project.height, exporting });
   zoomRef.current = { scale, originX, originY, fitScale, userZoom, stageW, stageH, cw: project.width, ch: project.height, exporting };
+  // Live pan state + clamp bounds for the middle-mouse pan listener (attached once).
+  const panGeomRef = useRef({ panX, panY, overX, overY, exporting });
+  panGeomRef.current = { panX, panY, overX, overY, exporting };
 
   // Scroll-wheel zoom, anchored to the cursor (the comp point under the pointer
   // stays put). Native non-passive listener so we can preventDefault the page/OS
@@ -2412,6 +2415,45 @@ export default function Preview({
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // Middle-mouse drag pans the view anywhere in the preview (like most editors).
+  // Native listener so it works over layers too and can suppress the browser's
+  // middle-click autoscroll. Reads live pan/clamp geometry from `panGeomRef`.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 1) return; // middle button only
+      const g = panGeomRef.current;
+      if (g.exporting) return;
+      e.preventDefault(); // stop the OS/browser autoscroll bubble
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const px0 = g.panX;
+      const py0 = g.panY;
+      const move = (ev: MouseEvent) => {
+        const c = panGeomRef.current;
+        setPanX(Math.max(-c.overX, Math.min(c.overX, px0 + (ev.clientX - startX))));
+        setPanY(Math.max(-c.overY, Math.min(c.overY, py0 + (ev.clientY - startY))));
+      };
+      const up = () => {
+        window.removeEventListener("mousemove", move);
+        window.removeEventListener("mouseup", up);
+        document.body.style.cursor = "";
+      };
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+      document.body.style.cursor = "grabbing";
+    };
+    // Also cancel the auxclick so no autoscroll cursor appears.
+    const onAux = (e: MouseEvent) => e.button === 1 && e.preventDefault();
+    el.addEventListener("mousedown", onDown);
+    el.addEventListener("auxclick", onAux);
+    return () => {
+      el.removeEventListener("mousedown", onDown);
+      el.removeEventListener("auxclick", onAux);
+    };
   }, []);
 
   // Reset zoom/pan back to fit.
