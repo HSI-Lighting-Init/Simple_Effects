@@ -789,10 +789,10 @@ fn set_comp_size(state: State<AppState>, width: u32, height: u32) -> Project {
 /// Set the composition frame rate (fps) — the rate the video renders at.
 /// Clamped to a sane range. Undoable.
 #[tauri::command]
-fn set_comp_fps(state: State<AppState>, fps: u32) -> Project {
+fn set_comp_fps(state: State<AppState>, fps: f32) -> Project {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    project.fps = fps.clamp(1, 240);
+    project.fps = fps.clamp(1.0, 240.0);
     project.clone()
 }
 
@@ -855,6 +855,13 @@ fn set_layer_range(
                 k.time_ms = (k.time_ms as i64 + delta).max(0) as u32;
             }
         });
+        // A group carries its contents: moving it shifts every child's timing
+        // (ranges + keyframes) by the same delta, recursively.
+        if let LayerKind::Group { children } = &mut layer.kind {
+            for c in children.iter_mut() {
+                shift_layer_time(c, delta);
+            }
+        }
     }
     layer.start_ms = s;
     layer.end_ms = e;
@@ -1426,6 +1433,135 @@ fn add_shape2d_layer(state: State<AppState>, shape: String) -> Result<Project, S
         transition_in: None,
         transition_out: None,
     });
+    Ok(project.clone())
+}
+
+/// Template: build a rotating "cylinder carousel" from a set of images. Creates a
+/// cylinder and pins each image as a decal evenly spaced around it, then keyframes
+/// the cylinder's Y-rotation to SNAP from one image to the next — rotate to an
+/// image, hold for `pause_ms`, rotate to the next over `rotate_ms` — looping
+/// seamlessly (a full 360° over all N images). Optionally fades each image in/out
+/// with a transition `engine`. Sizes to the comp; extends the comp duration to fit
+/// one full loop. Undoable.
+#[tauri::command]
+fn create_cylinder_carousel(
+    state: State<AppState>,
+    images: Vec<String>,
+    pause_ms: u32,
+    rotate_ms: u32,
+    transition: Option<String>,
+) -> Result<Project, String> {
+    let n = images.len();
+    if n == 0 {
+        return Err("pick at least one image".into());
+    }
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+
+    let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
+    let comp_min = project.width.min(project.height) as f32;
+    let radius = comp_min * 0.42;
+    let height = comp_min * 0.6;
+
+    let cycle = (rotate_ms + pause_ms).max(1);
+    let total = cycle * n as u32; // one full loop back to the first image
+    let step = 360.0 / n as f32; // angular spacing between images
+    // Front-facing Y-rotation for image i (decal at u = (i+0.5)/n). The surface
+    // angle of a decal at u is (-180 + u*360)°; the rotation that brings it to the
+    // front (angle 0) is its negation. Image 0 sits at u = 0.5/n.
+    let front_ry = |i: usize| 180.0 - step * (i as f32 + 0.5);
+
+    // Snap keyframes: for each image, arrive → hold (pause) → ease-rotate to next.
+    let mut keys = Vec::with_capacity(2 * n + 1);
+    for i in 0..=n {
+        let angle = front_ry(0) - step * i as f32; // keep rotating one way (seamless loop)
+        let t_arrive = cycle * i as u32;
+        // Arrival key — its segment to the hold key is flat (same value).
+        keys.push(Keyframe { time_ms: t_arrive, value: angle, easing: Easing::Linear });
+        if i < n {
+            // Hold key — its segment eases the rotation to the next image.
+            keys.push(Keyframe {
+                time_ms: t_arrive + pause_ms,
+                value: angle,
+                easing: Easing::EaseInOut,
+            });
+        }
+    }
+    let rotation_y = Track { keys, default: front_ry(0) };
+
+    let base_id = max_layer_id(&project.layers);
+    let cyl_id = base_id + 1;
+    project.layers.push(Layer {
+        id: cyl_id,
+        name: "Carousel".into(),
+        start_ms: 0,
+        end_ms: total,
+        kind: LayerKind::Shape3D {
+            shape: SurfaceShape::Cylinder,
+            width: Track::constant(radius * 2.0),
+            height: Track::constant(height),
+            depth: Track::constant(radius * 2.0),
+            rotation_x: Track::constant(0.0),
+            rotation_y,
+            rotation_z: Track::constant(0.0),
+            perspective: Track::constant(0.35),
+            focal_length: Track::constant(1200.0),
+            coverage: Track::constant(360.0),
+            radius: Track::constant(radius),
+        },
+        transform: Transform::at(cx, cy),
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+
+    // Each image: an Image layer pinned to the cylinder as a decal at its slot.
+    let mk_fade = |eng: &str| Transition {
+        kind: TransitionKind::Dissolve,
+        dur_ms: 600,
+        direction: 0,
+        engine: Some(eng.to_string()),
+        params: None,
+    };
+    for (i, path) in images.iter().enumerate() {
+        let (iw, ih) = image::image_dimensions(path).unwrap_or((1, 1));
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("Image {}", i + 1));
+        let u = (i as f32 + 0.5) / n as f32;
+        let (tin, tout) = match &transition {
+            Some(eng) => (Some(mk_fade(eng)), Some(mk_fade(eng))),
+            None => (None, None),
+        };
+        project.layers.push(Layer {
+            id: cyl_id + 1 + i as u32,
+            name,
+            start_ms: 0,
+            end_ms: total,
+            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1) },
+            transform: Transform::at(cx, cy),
+            hidden: false,
+            attach: Some(Decal {
+                shape_id: cyl_id,
+                face: 0,
+                u: Track::constant(u),
+                v: Track::constant(0.5),
+                scale: Track::constant(0.85),
+                rotation: Track::constant(0.0),
+            }),
+            effects: vec![],
+            transition_in: tin,
+            transition_out: tout,
+        });
+    }
+
+    // Make sure the comp is long enough to show one full loop.
+    if project.duration_ms < total {
+        project.duration_ms = total;
+    }
     Ok(project.clone())
 }
 
@@ -2865,12 +3001,17 @@ fn export_video(
     // matches the dialog's estimate (size ≈ bitrate × duration):
     //  • "bitrate" — the user's exact bitrate.
     //  • "quality" — the compression level's preset bitrate (1 = near-original …
-    //    5 = smallest). Earlier this used CRF (constant quality), whose size is
-    //    content-dependent and ignored the estimate entirely — a level-5 render
-    //    came out far smaller than predicted. Constrained ABR fixes that.
+    //    5 = smallest).
+    // We drive x264 in CONSTANT bitrate (CBR), not capped ABR. Plain `-b:v`/
+    // `-maxrate` only cap the peak; on compressible content (flat colours, slow
+    // motion) x264 undershoots the average badly, so a 600 MB estimate came out
+    // ~57 MB and raising the bitrate barely changed the file. Pinning
+    // minrate = maxrate = b:v with `nal-hrd=cbr` forces x264 to actually spend the
+    // bits, so the output tracks the target and the estimate holds.
     let target = if rate_mode == "bitrate" { bitrate } else { bitrate_for_level(level) }.max(100_000);
     let bv = target.to_string();
-    let bufsize = (target as u64 * 2).min(u32::MAX as u64).to_string();
+    // 1-second VBV buffer → tight CBR that lands on the predicted size.
+    let bufsize = target.to_string();
 
     let mut cmd = std::process::Command::new(&ffmpeg);
     cmd.args(["-y", "-i"]).arg(&tmp);
@@ -2891,8 +3032,12 @@ fn export_video(
         }
     } else {
         cmd.args([
-            "-c:v", "libx264", "-b:v", bv.as_str(), "-maxrate", bv.as_str(),
-            "-bufsize", bufsize.as_str(), "-preset", "medium", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264",
+            "-b:v", bv.as_str(), "-minrate", bv.as_str(), "-maxrate", bv.as_str(),
+            "-bufsize", bufsize.as_str(),
+            // Force strict CBR so the file actually reaches the target bitrate.
+            "-x264-params", "nal-hrd=cbr:force-cfr=1",
+            "-preset", "medium", "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
         ]);
         if filter.is_some() {
@@ -2915,6 +3060,24 @@ fn export_video(
 
 /// Visit every keyframeable Track on a layer (transform + kind-specific + decal
 /// placement + effect params), so delete/clear can act on all of them at once.
+/// Shift a layer's whole timing by `delta` ms — its play range and every
+/// keyframe — recursing into group children so a group carries its contents when
+/// moved. Times are floored at 0.
+fn shift_layer_time(layer: &mut Layer, delta: i64) {
+    layer.start_ms = (layer.start_ms as i64 + delta).max(0) as u32;
+    layer.end_ms = (layer.end_ms as i64 + delta).max(0) as u32;
+    for_each_track_mut(layer, |tr| {
+        for k in tr.keys.iter_mut() {
+            k.time_ms = (k.time_ms as i64 + delta).max(0) as u32;
+        }
+    });
+    if let LayerKind::Group { children } = &mut layer.kind {
+        for c in children.iter_mut() {
+            shift_layer_time(c, delta);
+        }
+    }
+}
+
 fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
     let tf = &mut layer.transform;
     f(&mut tf.x);
@@ -3241,6 +3404,7 @@ pub fn run() {
             set_decompose_key,
             add_shape_layer,
             add_shape2d_layer,
+            create_cylinder_carousel,
             set_shape2d,
             add_frame_grid,
             filter_existing_files,

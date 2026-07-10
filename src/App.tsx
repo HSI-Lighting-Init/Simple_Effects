@@ -24,6 +24,7 @@ import CompSettings from "./components/CompSettings";
 import UiSizeDialog from "./components/UiSizeDialog";
 import EffectEditor from "./components/EffectEditor";
 import ExportDialog from "./components/ExportDialog";
+import TemplateDialog from "./components/TemplateDialog";
 import TransitionsDemo from "./components/TransitionsDemo";
 import {
   addEffect,
@@ -39,6 +40,7 @@ import {
   exitGroup,
   addShapeLayer,
   addShape2dLayer,
+  createCylinderCarousel,
   setShape2d,
   setCellImage,
   clearCellImage,
@@ -302,6 +304,7 @@ export default function App() {
   const [showCompSettings, setShowCompSettings] = useState(false);
   const [fxEditorId, setFxEditorId] = useState<number | null>(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
+  const [showTemplate, setShowTemplate] = useState(false);
   // Optional export range [inMs, outMs] — the section of the comp to render.
   // Null = export the whole comp. Set by Shift-dragging the timeline ruler. A ref
   // mirrors it so the export loop (a stable callback) can read the latest value.
@@ -717,6 +720,22 @@ export default function App() {
       if (list.length) await loadMediaThumbs(list);
     },
     [loadMediaThumbs]
+  );
+
+  // Build a cylinder-carousel template from a set of images (the New Template
+  // dialog). The backend assembles the cylinder + decals + snap keyframes; here we
+  // just load the new images for rendering and jump the playhead to the start.
+  const onCreateCarousel = useCallback(
+    async (images: string[], pauseMs: number, rotateMs: number, transition: string | null) => {
+      const p = await createCylinderCarousel(images, pauseMs, rotateMs, transition);
+      setProject(p);
+      durationRef.current = p.durationMs;
+      await resolveImages(p);
+      await loadProjectMedia(p);
+      seek(0);
+      recordAction("template_carousel", { count: images.length, pauseMs, rotateMs, transition });
+    },
+    [resolveImages, loadProjectMedia, seek, recordAction]
   );
 
   // Accepts dialog or OS-drop paths. Adds to the bin (dedup) and persists the new
@@ -1809,6 +1828,28 @@ export default function App() {
     [applyTime, recordAction]
   );
 
+  // Apply the same in/out transition to several layers at once (a multi-selection).
+  const onSetLayerTransitionMany = useCallback(
+    async (
+      ids: number[],
+      slot: "in" | "out",
+      kind: "none" | "dissolve" | "slide" | "wipe",
+      durMs: number,
+      direction: number,
+      engine?: string | null,
+      params?: string | null
+    ) => {
+      let p = projectRef.current;
+      for (const id of ids) {
+        p = await setLayerTransition(id, slot, kind, durMs, direction, engine, params);
+      }
+      if (p) setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("layer_transition_batch", { count: ids.length, slot, kind, engine });
+    },
+    [applyTime, recordAction]
+  );
+
   // Retime a keyframe by dragging its timeline diamond.
   const onMoveKeyframe = useCallback(
     async (layerId: number, fromMs: number, toMs: number) => {
@@ -1847,17 +1888,20 @@ export default function App() {
 
   // Change the composition resolution / orientation and/or its length.
   const onApplyComp = useCallback(
-    async (w: number, h: number, durationMs: number) => {
+    async (w: number, h: number, durationMs: number, fps: number) => {
       let p = await setCompSize(w, h);
       if (durationMs !== p.durationMs) {
         p = await setCompDuration(durationMs);
+      }
+      if (fps !== p.fps) {
+        p = await setCompFps(fps);
       }
       setProject(p);
       durationRef.current = p.durationMs;
       // Keep the playhead inside the (possibly shorter) comp.
       if (timeRef.current > p.durationMs) seek(p.durationMs);
       else await applyTime(timeRef.current);
-      recordAction("comp_settings", { w, h, durationMs: p.durationMs });
+      recordAction("comp_settings", { w, h, durationMs: p.durationMs, fps: p.fps });
     },
     [applyTime, seek, recordAction]
   );
@@ -1880,6 +1924,36 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("layer_range", { layerId, startMs, endMs });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Numerically set the timeline start and/or duration of the whole selection
+  // (Inspector's Timing section). A null field is left as each layer's current
+  // value; moving the start preserves each layer's span (a group carries its
+  // children, handled in set_layer_range).
+  const onSetTiming = useCallback(
+    async (startMs: number | null, durMs: number | null) => {
+      const ids = selectedIdsRef.current.length
+        ? selectedIdsRef.current
+        : selectedIdRef.current != null
+          ? [selectedIdRef.current]
+          : [];
+      const p0 = projectRef.current;
+      if (!ids.length || !p0) return;
+      const targets = ids
+        .map((id) => p0.layers.find((l) => l.id === id))
+        .filter((l): l is NonNullable<typeof l> => !!l);
+      let p = p0;
+      for (const l of targets) {
+        const span = Math.max(50, l.endMs - l.startMs);
+        const s = startMs ?? l.startMs;
+        const dur = durMs ?? span;
+        p = await setLayerRange(l.id, s, s + dur);
+      }
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("set_timing", { count: targets.length, startMs, durMs });
     },
     [applyTime, recordAction]
   );
@@ -2976,6 +3050,14 @@ export default function App() {
       onClick: () => onSetLayerTransition(lid, slot, "dissolve", 800, 0, id),
     })),
   ];
+  // Same list, but applied to every layer in a multi-selection at once.
+  const transitionBatchSubmenu = (ids: number[], slot: "in" | "out") => [
+    { label: "None", onClick: () => onSetLayerTransitionMany(ids, slot, "none", 800, 0, null) },
+    ...transitionShortlist.map(([id, label]) => ({
+      label,
+      onClick: () => onSetLayerTransitionMany(ids, slot, "dissolve", 800, 0, id),
+    })),
+  ];
 
   const menus: MenuDef[] = [
     {
@@ -3079,6 +3161,8 @@ export default function App() {
         { label: "3D Cylinder", onClick: () => onAddShape("cylinder") },
         { separator: true },
         { label: "Multi-Frame Grid…", onClick: () => setGridDialog({ rows: 2, cols: 2 }) },
+        { separator: true },
+        { label: "Template · Cylinder Carousel…", onClick: () => setShowTemplate(true) },
         { separator: true },
         { label: "Adjustment Layer (Shiny Clouds)", onClick: onAddAdjustment },
       ],
@@ -3245,7 +3329,7 @@ export default function App() {
           className="fps"
           title="Live preview frame rate while playing (target is the comp fps)"
         >
-          {playing ? `${previewFps} fps` : `${project.fps} fps`}
+          {playing ? `${previewFps} fps` : `${Math.round(project.fps * 1000) / 1000} fps`}
         </span>
         <span className="meta">
           {project.width}×{project.height}
@@ -3315,6 +3399,8 @@ export default function App() {
           timeMs={time}
           compWidth={project.width}
           compHeight={project.height}
+          selectedCount={selectedIds.length || (selectedLayer ? 1 : 0)}
+          onSetTiming={onSetTiming}
           fonts={fonts}
           onRefreshFonts={refreshFonts}
           decomposed={selectedLayer != null && decomposeId === selectedLayer.id}
@@ -3550,7 +3636,17 @@ export default function App() {
                         ]
                       : [{ label: "Effects — image layers only" }]),
                     ...(selectedIds.length >= 2
-                      ? [{ label: "⧉ Combine into group", onClick: () => onCombineLayers() }]
+                      ? [
+                          {
+                            label: `⇋ In transition → ${selectedIds.length} selected`,
+                            submenu: transitionBatchSubmenu(selectedIds, "in"),
+                          },
+                          {
+                            label: `⇋ Out transition → ${selectedIds.length} selected`,
+                            submenu: transitionBatchSubmenu(selectedIds, "out"),
+                          },
+                          { label: "⧉ Combine into group", onClick: () => onCombineLayers() },
+                        ]
                       : []),
                     ...(project.layers.find((l) => l.id === ctxMenu.layerId)?.kind.kind === "group"
                       ? [
@@ -3577,6 +3673,7 @@ export default function App() {
           width={project.width}
           height={project.height}
           durationMs={project.durationMs}
+          fps={project.fps}
           onApply={onApplyComp}
           onClose={() => setShowCompSettings(false)}
         />
@@ -3611,6 +3708,10 @@ export default function App() {
           onExport={onExport}
           onClose={() => setShowExportDialog(false)}
         />
+      )}
+
+      {showTemplate && (
+        <TemplateDialog onCreate={onCreateCarousel} onClose={() => setShowTemplate(false)} />
       )}
 
       {showTransitions && <TransitionsDemo onClose={() => setShowTransitions(false)} />}

@@ -1522,6 +1522,53 @@ function effSlider(
 // Layer position / transform: numeric X/Y (pixels, snapped to whole pixels) plus
 // scale / rotation / opacity sliders. Every change keyframes at the playhead (the
 // same path as dragging on the canvas), so it animates.
+// Set a layer's timeline position numerically: its start time and duration (in
+// seconds). With several layers selected, the edit applies to all of them (they
+// align to the same start / take the same duration).
+function TimingSection({
+  startMs,
+  endMs,
+  selectedCount,
+  onSetTiming,
+}: {
+  startMs: number;
+  endMs: number;
+  selectedCount: number;
+  onSetTiming: (startMs: number | null, durMs: number | null) => void;
+}) {
+  const startS = startMs / 1000;
+  const durS = Math.max(0, endMs - startMs) / 1000;
+  return (
+    <Section title="Timing (timeline)">
+      <div className="row2">
+        <label className="insp-field">
+          Start (s)
+          <input
+            type="number"
+            min={0}
+            step={0.1}
+            value={Math.round(startS * 1000) / 1000}
+            onChange={(e) => onSetTiming(Math.max(0, Math.round(Number(e.target.value) * 1000)), null)}
+          />
+        </label>
+        <label className="insp-field">
+          Duration (s)
+          <input
+            type="number"
+            min={0.05}
+            step={0.1}
+            value={Math.round(durS * 1000) / 1000}
+            onChange={(e) => onSetTiming(null, Math.max(50, Math.round(Number(e.target.value) * 1000)))}
+          />
+        </label>
+      </div>
+      {selectedCount > 1 && (
+        <span className="muted">Applies to all {selectedCount} selected layers.</span>
+      )}
+    </Section>
+  );
+}
+
 function TransformSection({
   layerId,
   tr,
@@ -2041,6 +2088,10 @@ interface Props {
   timeMs: number;
   compWidth: number;
   compHeight: number;
+  /** How many layers are selected (for the timing "applies to N" note). */
+  selectedCount: number;
+  /** Set the selection's start and/or duration (ms; null = leave unchanged). */
+  onSetTiming: (startMs: number | null, durMs: number | null) => void;
   fonts: string[];
   onRefreshFonts: () => void;
   decomposed: boolean;
@@ -2801,6 +2852,8 @@ export default function Inspector({
   timeMs,
   compWidth,
   compHeight,
+  selectedCount,
+  onSetTiming,
   fonts,
   onRefreshFonts,
   decomposed,
@@ -2904,6 +2957,14 @@ export default function Inspector({
     <aside className="inspector">
       <div className="panel-title">{layer ? layer.name : "Inspector"}</div>
       {!layer && <span className="muted">Select a layer to edit it.</span>}
+      {layer && (
+        <TimingSection
+          startMs={layer.startMs}
+          endMs={layer.endMs}
+          selectedCount={selectedCount}
+          onSetTiming={onSetTiming}
+        />
+      )}
       {layer && transformNow && (
         <TransformSection layerId={layer.id} tr={transformNow} compW={compWidth} compH={compHeight} onCommit={onCommitTransform} />
       )}

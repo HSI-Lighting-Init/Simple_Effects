@@ -12,23 +12,45 @@ const PRESETS: { label: string; w: number; h: number }[] = [
   { label: "3840 × 2160 — 4K Landscape", w: 3840, h: 2160 },
 ];
 
+// Standard editing frame rates (the comp/timeline runs at this rate).
+const FPS_OPTIONS = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60];
+
+/** Label a frame rate, tagging the common broadcast/film variants. */
+function fpsLabel(f: number): string {
+  const tag: Record<number, string> = {
+    23.976: " — Film (NTSC)",
+    24: " — Film",
+    25: " — PAL",
+    29.97: " — NTSC",
+    30: "",
+    50: " — PAL HFR",
+    59.94: " — NTSC HFR",
+    60: "",
+  };
+  const n = Number.isInteger(f) ? String(f) : f.toFixed(3).replace(/0+$/, "");
+  return `${n} fps${tag[f] ?? ""}`;
+}
+
 export default function CompSettings({
   width,
   height,
   durationMs,
+  fps,
   onApply,
   onClose,
 }: {
   width: number;
   height: number;
   durationMs: number;
-  onApply: (w: number, h: number, durationMs: number) => void;
+  fps: number;
+  onApply: (w: number, h: number, durationMs: number, fps: number) => void;
   onClose: () => void;
 }) {
   const [w, setW] = useState(width);
   const [h, setH] = useState(height);
   // Edited in seconds (friendlier), stored as ms.
   const [secs, setSecs] = useState(durationMs / 1000);
+  const [fpsVal, setFpsVal] = useState(fps);
   const orientation = w > h ? "Landscape" : w < h ? "Portrait" : "Square";
   const presetValue = PRESETS.some((p) => p.w === w && p.h === h) ? `${w}x${h}` : "";
 
@@ -93,17 +115,32 @@ export default function CompSettings({
               {w}×{h} · {orientation}
             </span>
           </div>
-          <label className="insp-field">
-            Duration (seconds)
-            <input
-              type="number"
-              min={0.1}
-              max={3600}
-              step={0.5}
-              value={secs}
-              onChange={(e) => setSecs(Number(e.target.value))}
-            />
-          </label>
+          <div className="row2">
+            <label className="insp-field">
+              Duration (seconds)
+              <input
+                type="number"
+                min={0.1}
+                max={3600}
+                step={0.5}
+                value={secs}
+                onChange={(e) => setSecs(Number(e.target.value))}
+              />
+            </label>
+            <label className="insp-field">
+              Frame rate
+              <select value={fpsVal} onChange={(e) => setFpsVal(Number(e.target.value))}>
+                {!FPS_OPTIONS.includes(fpsVal) && (
+                  <option value={fpsVal}>{fpsLabel(fpsVal)}</option>
+                )}
+                {FPS_OPTIONS.map((f) => (
+                  <option key={f} value={f}>
+                    {fpsLabel(f)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
         </div>
         <div className="modal-actions">
           <button className="insp-btn" onClick={onClose}>
@@ -112,7 +149,7 @@ export default function CompSettings({
           <button
             className="insp-btn active"
             onClick={() => {
-              onApply(Math.round(w), Math.round(h), Math.round(secs * 1000));
+              onApply(Math.round(w), Math.round(h), Math.round(secs * 1000), fpsVal);
               onClose();
             }}
           >

@@ -18,7 +18,7 @@ use crate::text::Font;
 pub struct Project {
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    pub fps: f32,
     pub duration_ms: u32,
     /// Drawn back-to-front: index 0 is the bottom layer.
     pub layers: Vec<Layer>,
@@ -1317,7 +1317,7 @@ impl Project {
         Project {
             width: 1920,
             height: 1080,
-            fps: 30,
+            fps: 30.0,
             duration_ms: 4000,
             layers: vec![],
             media: vec![],
@@ -1415,7 +1415,7 @@ impl Project {
         Project {
             width: w,
             height: h,
-            fps: 30,
+            fps: 30.0,
             duration_ms: 4000,
             layers: vec![backdrop, accent, title],
             media: vec![],

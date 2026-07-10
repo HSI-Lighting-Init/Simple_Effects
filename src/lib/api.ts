@@ -75,6 +75,22 @@ export const setLayerTransition = (
 export const reorderLayers = (order: number[]) =>
   invoke<Project>("reorder_layers", { order });
 
+/** Template: build a rotating cylinder carousel from `images`, snapping between
+ *  them (hold `pauseMs`, rotate `rotateMs`). `transition` optionally fades each
+ *  image in/out with that engine id. */
+export const createCylinderCarousel = (
+  images: string[],
+  pauseMs: number,
+  rotateMs: number,
+  transition: string | null
+) =>
+  invoke<Project>("create_cylinder_carousel", {
+    images,
+    pauseMs,
+    rotateMs,
+    transition,
+  });
+
 /** Save the whole project to a .sefx file (pretty JSON). */
 export const saveProjectFile = (path: string) =>
   invoke<void>("save_project_file", { path });

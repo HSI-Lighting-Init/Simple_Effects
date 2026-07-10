@@ -1777,6 +1777,58 @@ body {
   z-index: 0;
 }
 
+/* Template dialog: the chosen-images list. */
+.tmpl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px;
+}
+
+.tmpl-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.tmpl-idx {
+  width: 18px;
+  text-align: right;
+  color: var(--muted);
+}
+
+.tmpl-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tmpl-mini {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  cursor: pointer;
+}
+
+.tmpl-mini:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.tmpl-mini:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 /* "Exporting selected range …" banner in the export dialog. */
 .export-range-note {
   font-size: 12px;
@@ -2120,6 +2172,35 @@ body {
 
 .tl-block:hover .tl-trim {
   opacity: 1;
+}
+
+/* Transition wedges on a clip: a translucent ramp at the in/out edge so an
+   applied transition is visible on the timeline. */
+.tl-tr {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  pointer-events: none;
+  min-width: 6px;
+  max-width: 60%;
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.tl-tr-in {
+  left: 0;
+  border-radius: 4px 0 0 4px;
+  /* ramp up from the left edge */
+  -webkit-mask-image: linear-gradient(to right, #000, transparent);
+  mask-image: linear-gradient(to right, #000, transparent);
+}
+
+.tl-tr-out {
+  right: 0;
+  border-radius: 0 4px 4px 0;
+  /* ramp up toward the right edge */
+  -webkit-mask-image: linear-gradient(to left, #000, transparent);
+  mask-image: linear-gradient(to left, #000, transparent);
 }
 
 .tl-block-name {

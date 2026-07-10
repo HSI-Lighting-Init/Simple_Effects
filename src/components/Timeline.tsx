@@ -323,6 +323,9 @@ export default function Timeline({
   // the pointer and hit-test rows by their `data-layer-id`, committing on release
   // (so it's one undo step and a plain click still just selects).
   const startRowDrag = (e: React.MouseEvent, layer: Layer) => {
+    // Only the left button drags/selects — a right-click must leave the (possibly
+    // multi-) selection intact so its context menu can act on all selected layers.
+    if (e.button !== 0) return;
     // Let the eye/▼ and delete buttons handle their own clicks.
     if ((e.target as HTMLElement).closest("button")) return;
     // Ctrl/⌘/Shift-click adds to the multi-selection; a plain click on an already
@@ -385,6 +388,9 @@ export default function Timeline({
     mode: Drag["mode"]
   ) => {
     e.stopPropagation(); // this is a layer edit, not a playhead scrub
+    // Only the left button drags/selects — a right-click keeps the current
+    // (multi-)selection so its context menu can act on every selected layer.
+    if (e.button !== 0) return;
     if (razor) {
       splitAt(e.clientX, layer);
       return;
@@ -1019,6 +1025,22 @@ export default function Timeline({
                     title="Trim start"
                     onMouseDown={(e) => startBlockDrag(e, l, "start")}
                   />
+                  {/* Transition wedges — a visible in/out ramp so applied
+                      transitions (incl. batched ones) are confirmed at a glance. */}
+                  {l.transitionIn && (
+                    <span
+                      className="tl-tr tl-tr-in"
+                      style={{ width: `${Math.min(60, (l.transitionIn.durMs / span) * 100)}%` }}
+                      title={`In: ${l.transitionIn.engine ?? l.transitionIn.kind} · ${(l.transitionIn.durMs / 1000).toFixed(2)}s`}
+                    />
+                  )}
+                  {l.transitionOut && (
+                    <span
+                      className="tl-tr tl-tr-out"
+                      style={{ width: `${Math.min(60, (l.transitionOut.durMs / span) * 100)}%` }}
+                      title={`Out: ${l.transitionOut.engine ?? l.transitionOut.kind} · ${(l.transitionOut.durMs / 1000).toFixed(2)}s`}
+                    />
+                  )}
                   <span className="tl-block-name">{l.name}</span>
                   <span
                     className="tl-trim tl-trim-r"

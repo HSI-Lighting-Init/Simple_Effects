@@ -14,7 +14,12 @@ const LEVELS = [
   "Highest compression — smallest file",
 ];
 
-const FPS_OPTIONS = [24, 25, 30, 50, 60];
+const FPS_OPTIONS = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60];
+
+/** Compact fps label (trims trailing zeros on fractional rates). */
+function fpsText(f: number): string {
+  return `${Number.isInteger(f) ? f : f.toFixed(3).replace(/0+$/, "")} fps`;
+}
 
 // Preset bitrates offered in the dropdown (Mbps). "Custom" reveals a number box.
 const BITRATE_PRESETS = [3, 5, 8, 14, 24, 40, 60];
@@ -172,9 +177,10 @@ export default function ExportDialog({
           <label className="insp-field">
             Frame rate
             <select value={fps} onChange={(e) => setFps(Number(e.target.value))}>
+              {!FPS_OPTIONS.includes(fps) && <option value={fps}>{fpsText(fps)}</option>}
               {FPS_OPTIONS.map((f) => (
                 <option key={f} value={f}>
-                  {f} fps
+                  {fpsText(f)}
                 </option>
               ))}
             </select>
