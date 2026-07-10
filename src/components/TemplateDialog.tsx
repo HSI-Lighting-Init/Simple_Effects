@@ -90,12 +90,38 @@ export default function TemplateDialog({
           )}
 
           <label className="insp-field">
-            Hold on each image — {(pauseMs / 1000).toFixed(2)}s
-            <input type="range" min={0} max={5000} step={50} value={pauseMs} onChange={(e) => setPauseMs(Number(e.target.value))} />
+            <span className="row2" style={{ justifyContent: "space-between" }}>
+              <span>Hold on each image</span>
+              <span className="row2" style={{ gap: 4, alignItems: "center" }}>
+                <input
+                  className="an-num-box"
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  value={Math.round(pauseMs / 10) / 100}
+                  onChange={(e) => e.target.value !== "" && setPauseMs(Math.max(0, Number(e.target.value) * 1000))}
+                />
+                <span className="muted">s</span>
+              </span>
+            </span>
+            <input type="range" min={0} max={Math.max(5000, pauseMs)} step={50} value={pauseMs} onChange={(e) => setPauseMs(Number(e.target.value))} />
           </label>
           <label className="insp-field">
-            Snap time (rotate to next) — {(rotateMs / 1000).toFixed(2)}s
-            <input type="range" min={100} max={3000} step={50} value={rotateMs} onChange={(e) => setRotateMs(Number(e.target.value))} />
+            <span className="row2" style={{ justifyContent: "space-between" }}>
+              <span>Snap time (rotate to next)</span>
+              <span className="row2" style={{ gap: 4, alignItems: "center" }}>
+                <input
+                  className="an-num-box"
+                  type="number"
+                  min={0.05}
+                  step={0.1}
+                  value={Math.round(rotateMs / 10) / 100}
+                  onChange={(e) => e.target.value !== "" && setRotateMs(Math.max(50, Number(e.target.value) * 1000))}
+                />
+                <span className="muted">s</span>
+              </span>
+            </span>
+            <input type="range" min={100} max={Math.max(3000, rotateMs)} step={50} value={rotateMs} onChange={(e) => setRotateMs(Number(e.target.value))} />
           </label>
 
           <label className="surf-face">
