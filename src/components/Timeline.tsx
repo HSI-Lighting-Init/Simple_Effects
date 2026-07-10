@@ -238,9 +238,11 @@ export default function Timeline({
     if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(${-s.scrollLeft}px)`;
     if (labelsInnerRef.current) labelsInnerRef.current.style.transform = `translateY(${-s.scrollTop}px)`;
   };
-  // Wheeling over the labels column scrolls the tracks vertically (which syncs back).
+  // Wheeling over the labels column scrolls the tracks vertically (which syncs
+  // back) — the labels have no horizontal axis, so any non-Alt wheel scrolls the
+  // layers. Alt is left for zooming over the tracks area.
   const onLabelsWheel = (e: React.WheelEvent) => {
-    if (e.ctrlKey || e.metaKey) return;
+    if (e.altKey) return;
     if (scrollRef.current) scrollRef.current.scrollTop += e.deltaY;
   };
   // Zoom while keeping one point fixed on screen. `zoomAnchorRef` records the
@@ -274,29 +276,30 @@ export default function Timeline({
     onTracksScroll(); // keep the frozen ruler/labels in sync this frame
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [zoom]);
-  // Wheel over the tracks area: Ctrl/⌘ zooms; a plain vertical wheel scrolls the
-  // timeline HORIZONTALLY (time) whenever it's zoomed/overflowing — that's the axis
-  // you navigate. Shift-wheel or a horizontal wheel keeps native behaviour, and
-  // when nothing overflows horizontally the wheel scrolls layers vertically as
-  // usual. Attached natively (not via React's passive onWheel) so preventDefault
-  // takes effect.
+  // Wheel over the tracks area:
+  //   • Alt      → zoom the timeline (anchored under the cursor)
+  //   • Ctrl/⌘   → scroll vertically (through the layers)
+  //   • plain    → scroll horizontally (through time)
+  // Attached natively (not via React's passive onWheel) so preventDefault works.
   useEffect(() => {
     const s = scrollRef.current;
     if (!s) return;
     const handler = (e: WheelEvent) => {
-      if (e.ctrlKey || e.metaKey) {
+      if (e.altKey) {
         e.preventDefault();
         // Anchor the zoom under the cursor (natural "zoom where you point").
         const cursorX = e.clientX - s.getBoundingClientRect().left;
         zoomAround(e.deltaY < 0 ? 1.2 : 1 / 1.2, cursorX);
         return;
       }
-      if (e.shiftKey) return; // let the browser scroll the other axis
-      const horiz = s.scrollWidth > s.clientWidth + 1;
-      if (horiz && e.deltaY !== 0 && Math.abs(e.deltaY) >= Math.abs(e.deltaX)) {
-        s.scrollLeft += e.deltaY;
-        e.preventDefault();
+      const d = e.deltaY;
+      if (d === 0) return;
+      if (e.ctrlKey || e.metaKey) {
+        s.scrollTop += d; // vertical: through the layers
+      } else {
+        s.scrollLeft += d; // plain: through time
       }
+      e.preventDefault();
     };
     s.addEventListener("wheel", handler, { passive: false });
     return () => s.removeEventListener("wheel", handler);
@@ -810,11 +813,11 @@ export default function Timeline({
             </button>
           </span>
           <span className="tl-zoom">
-            <button onClick={() => zoomBy(1 / 1.5)} title="Zoom out (Ctrl+wheel)">−</button>
+            <button onClick={() => zoomBy(1 / 1.5)} title="Zoom out (Alt+wheel)">−</button>
             <button onClick={() => setZoom(1)} title="Reset zoom">
               {Math.round(zoom * 100)}%
             </button>
-            <button onClick={() => zoomBy(1.5)} title="Zoom in (Ctrl+wheel)">＋</button>
+            <button onClick={() => zoomBy(1.5)} title="Zoom in (Alt+wheel)">＋</button>
           </span>
         </div>
 
