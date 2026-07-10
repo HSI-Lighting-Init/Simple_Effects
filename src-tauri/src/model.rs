@@ -927,6 +927,9 @@ pub enum VectorShape {
     /// A horizontal arrow (tail at left, head at right) spanning `width`, with
     /// `height` as its overall thickness. Rotate the layer to aim it.
     Arrow,
+    /// A horizontal line spanning `width`, with `height` as its stroke thickness.
+    /// Like an arrow without the head; `bend` bows it into an arc. Rotate to aim.
+    Line,
 }
 
 /// The paint style of a `Shape2D` layer. Every colour is keyframeable via its
@@ -1015,8 +1018,12 @@ impl Shape2DStyle {
     /// A new shape style with a light fill, no border/glow/shadow yet, and
     /// sensible defaults ready for the user to style.
     pub fn new(shape: VectorShape, size: f32) -> Self {
-        // An arrow reads better wider than it is thick.
-        let (width, height) = if shape == VectorShape::Arrow { (size, size * 0.5) } else { (size, size) };
+        // An arrow reads better wider than it is thick; a line is a thin stroke.
+        let (width, height) = match shape {
+            VectorShape::Arrow => (size, size * 0.5),
+            VectorShape::Line => (size, (size * 0.04).max(6.0)),
+            _ => (size, size),
+        };
         Shape2DStyle {
             shape,
             width: Track::constant(width),

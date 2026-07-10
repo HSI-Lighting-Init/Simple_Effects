@@ -3073,6 +3073,7 @@ export default function App() {
         { label: "Circle", onClick: () => onAddShape2d("circle") },
         { label: "Polygon", onClick: () => onAddShape2d("polygon") },
         { label: "Arrow", onClick: () => onAddShape2d("arrow") },
+        { label: "Line", onClick: () => onAddShape2d("line") },
         { separator: true },
         { label: "3D Box", onClick: () => onAddShape("box") },
         { label: "3D Cylinder", onClick: () => onAddShape("cylinder") },

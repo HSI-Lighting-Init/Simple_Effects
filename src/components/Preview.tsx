@@ -792,33 +792,52 @@ function Shape2DNode({
   const h = s2.height;
   const rad = Math.min(w, h) / 2;
   const isArrow = s2.shape === "arrow";
+  const isLine = s2.shape === "line";
+  // Arrows and lines paint as a coloured stroke (no fill/border split).
+  const isStroke = isArrow || isLine;
+
+  // The shaft/line polyline spanning `width`, straight or bowed by `bend` into a
+  // quadratic arc. Shared by the arrow and the plain line.
+  const shaftPoints = (): number[] => {
+    if (Math.abs(s2.bend) < 0.5) return [-w / 2, 0, w / 2, 0];
+    const N = 24;
+    const ctrlY = -2 * s2.bend; // control point → apex offset ≈ bend
+    const pts: number[] = [];
+    for (let i = 0; i <= N; i++) {
+      const t = i / N;
+      const mt = 1 - t;
+      pts.push(mt * mt * (-w / 2) + t * t * (w / 2), 2 * mt * t * ctrlY);
+    }
+    return pts;
+  };
 
   // Build the chosen primitive with an arbitrary extra prop bag (fill/stroke/
   // shadow), centred on the group origin.
   const make = (key: string, extra: Record<string, unknown>): ReactElement => {
+    if (isLine) {
+      // A plain line spanning `width`; `height` is its stroke thickness. `bend`
+      // bows it into an arc. Rotate the layer to aim it.
+      return (
+        <Line
+          key={key}
+          points={shaftPoints()}
+          strokeWidth={Math.max(1, h)}
+          lineCap="round"
+          lineJoin="round"
+          {...extra}
+        />
+      );
+    }
     if (isArrow) {
       // Horizontal arrow spanning `width`; `height` is the head width, the shaft
       // a fraction of it. `bend` bows the shaft into an arc (a quadratic curve
       // whose midpoint is offset perpendicular). Rotate the layer to aim it.
       const shaft = Math.max(2, h * 0.4);
       const headLen = Math.max(8, Math.min(w * 0.5, h * 1.3));
-      let points: number[];
-      if (Math.abs(s2.bend) < 0.5) {
-        points = [-w / 2, 0, w / 2, 0];
-      } else {
-        const N = 24;
-        const ctrlY = -2 * s2.bend; // control point → apex offset ≈ bend
-        points = [];
-        for (let i = 0; i <= N; i++) {
-          const t = i / N;
-          const mt = 1 - t;
-          points.push(mt * mt * (-w / 2) + t * t * (w / 2), 2 * mt * t * ctrlY);
-        }
-      }
       return (
         <Arrow
           key={key}
-          points={points}
+          points={shaftPoints()}
           pointerLength={headLen}
           pointerWidth={h}
           strokeWidth={shaft}
@@ -871,7 +890,7 @@ function Shape2DNode({
   // shadow. An arrow (and a filled shape) glows from a coloured copy the opaque
   // main hides, leaving the halo; a hollow shape glows from a stroked copy so the
   // halo hugs the outline instead of filling the empty interior.
-  const glowProps = isArrow
+  const glowProps = isStroke
     ? { fill: rgbaCss(s2.glowColor), stroke: rgbaCss(s2.glowColor), shadowForStrokeEnabled: true }
     : filled
       ? { fill: rgbaCss(s2.glowColor), shadowForStrokeEnabled: false }
@@ -882,8 +901,8 @@ function Shape2DNode({
           shadowForStrokeEnabled: true,
         };
 
-  const mainProps: Record<string, unknown> = isArrow
-    ? { fill: rgbaCss(s2.fill), stroke: rgbaCss(s2.fill), ...shadow }
+  const mainProps: Record<string, unknown> = isStroke
+    ? { fill: rgbaCss(s2.fill), stroke: rgbaCss(s2.fill), shadowForStrokeEnabled: true, ...shadow }
     : {
         // Filled → the fill colour; hollow → a fully transparent fill so the
         // interior stays empty yet the shape is still clickable to select/drag.

@@ -376,8 +376,12 @@ function Shape2DSection({
   onSet: (layerId: number, style: Shape2DStyle) => void;
 }) {
   const set = (patch: Partial<Shape2DStyle>) => onSet(layerId, { ...style, ...patch });
-  const SHAPES: VectorShape[] = ["rectangle", "circle", "polygon", "arrow"];
+  const SHAPES: VectorShape[] = ["rectangle", "circle", "polygon", "arrow", "line"];
   const isArrow = style.shape === "arrow";
+  const isLine = style.shape === "line";
+  // Arrows and lines are stroke-only: no fill/border split, and width/height read
+  // as length/thickness.
+  const isStroke = isArrow || isLine;
   return (
     <>
       <Section title="Shape">
@@ -398,15 +402,15 @@ function Shape2DSection({
         {style.shape === "polygon" && (
           <KeyNumField label="Sides" track={style.sides} tMs={timeMs} min={3} max={30} onChange={(t) => set({ sides: t })} />
         )}
-        <KeyNumField label={isArrow ? "Length" : "Width"} track={style.width} tMs={timeMs} min={4} max={4000} onChange={(t) => set({ width: t })} />
-        <KeyNumField label={isArrow ? "Thickness" : "Height"} track={style.height} tMs={timeMs} min={4} max={4000} onChange={(t) => set({ height: t })} />
+        <KeyNumField label={isStroke ? "Length" : "Width"} track={style.width} tMs={timeMs} min={4} max={4000} onChange={(t) => set({ width: t })} />
+        <KeyNumField label={isStroke ? "Thickness" : "Height"} track={style.height} tMs={timeMs} min={isLine ? 1 : 4} max={4000} onChange={(t) => set({ height: t })} />
         {style.shape === "rectangle" && (
           <KeyNumField label="Corner radius" track={style.cornerRadius} tMs={timeMs} min={0} max={500} onChange={(t) => set({ cornerRadius: t })} />
         )}
-        {isArrow && (
+        {isStroke && (
           <KeyNumField label="Bend" track={style.bend} tMs={timeMs} min={-1000} max={1000} onChange={(t) => set({ bend: t })} />
         )}
-        {!isArrow && (
+        {!isStroke && (
           <label className="insp-field">
             Fill style
             <div className="seg">
@@ -430,12 +434,12 @@ function Shape2DSection({
             </div>
           </label>
         )}
-        {(style.filled || isArrow) && (
-          <ColorKeyField label={isArrow ? "Colour" : "Fill"} color={style.fill} keys={style.fillKeys} tMs={timeMs} onChange={(c, k) => set({ fill: c, fillKeys: k })} />
+        {(style.filled || isStroke) && (
+          <ColorKeyField label={isStroke ? "Colour" : "Fill"} color={style.fill} keys={style.fillKeys} tMs={timeMs} onChange={(c, k) => set({ fill: c, fillKeys: k })} />
         )}
       </Section>
 
-      {!isArrow && (
+      {!isStroke && (
         <Section title="Border">
           <KeyNumField label="Width" track={style.borderWidth} tMs={timeMs} min={0} max={200} onChange={(t) => set({ borderWidth: t })} />
           <ColorKeyField label="Colour" color={style.borderColor} keys={style.borderColorKeys} tMs={timeMs} onChange={(c, k) => set({ borderColor: c, borderColorKeys: k })} />

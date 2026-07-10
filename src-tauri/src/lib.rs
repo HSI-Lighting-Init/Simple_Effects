@@ -1397,6 +1397,7 @@ fn add_shape2d_layer(state: State<AppState>, shape: String) -> Result<Project, S
         "circle" => VectorShape::Circle,
         "polygon" => VectorShape::Polygon,
         "arrow" => VectorShape::Arrow,
+        "line" => VectorShape::Line,
         _ => return Err(format!("unknown shape '{shape}'")),
     };
     let mut project = state.project.lock().unwrap();
@@ -1410,6 +1411,7 @@ fn add_shape2d_layer(state: State<AppState>, shape: String) -> Result<Project, S
         VectorShape::Circle => "Circle",
         VectorShape::Polygon => "Polygon",
         VectorShape::Arrow => "Arrow",
+        VectorShape::Line => "Line",
     };
     project.layers.push(Layer {
         id: next_id,
