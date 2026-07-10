@@ -2964,6 +2964,7 @@ fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
             f(&mut style.border_width);
             f(&mut style.glow_size);
             f(&mut style.glow_opacity);
+            f(&mut style.glow_intensity);
             f(&mut style.shadow_blur);
             f(&mut style.shadow_offset_x);
             f(&mut style.shadow_offset_y);

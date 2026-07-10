@@ -34,4 +34,9 @@ bend: Track,
 /**
  * false = hollow (outline only, no fill) — the border/glow still draw.
  */
-filled: boolean, fill: Rgba, fillKeys: Array<ColorKey>, borderWidth: Track, borderColor: Rgba, borderColorKeys: Array<ColorKey>, glowColor: Rgba, glowColorKeys: Array<ColorKey>, glowSize: Track, glowOpacity: Track, shadowColor: Rgba, shadowColorKeys: Array<ColorKey>, shadowBlur: Track, shadowOffsetX: Track, shadowOffsetY: Track, shadowOpacity: Track, };
+filled: boolean, fill: Rgba, fillKeys: Array<ColorKey>, borderWidth: Track, borderColor: Rgba, borderColorKeys: Array<ColorKey>, glowColor: Rgba, glowColorKeys: Array<ColorKey>, glowSize: Track, glowOpacity: Track, 
+/**
+ * Glow strength multiplier: how many blurred copies stack (1 = the default
+ * halo, higher = brighter/denser, lower = fainter). Keyframeable.
+ */
+glowIntensity: Track, shadowColor: Rgba, shadowColorKeys: Array<ColorKey>, shadowBlur: Track, shadowOffsetX: Track, shadowOffsetY: Track, shadowOpacity: Track, };

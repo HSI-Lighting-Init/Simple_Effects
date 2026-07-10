@@ -15,4 +15,4 @@ bend: number,
 /**
  * false = hollow (outline only).
  */
-filled: boolean, fill: Rgba, borderWidth: number, borderColor: Rgba, glowColor: Rgba, glowSize: number, glowOpacity: number, shadowColor: Rgba, shadowBlur: number, shadowOffsetX: number, shadowOffsetY: number, shadowOpacity: number, };
+filled: boolean, fill: Rgba, borderWidth: number, borderColor: Rgba, glowColor: Rgba, glowSize: number, glowOpacity: number, glowIntensity: number, shadowColor: Rgba, shadowBlur: number, shadowOffsetX: number, shadowOffsetY: number, shadowOpacity: number, };

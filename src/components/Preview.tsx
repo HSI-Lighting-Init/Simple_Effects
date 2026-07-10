@@ -850,7 +850,13 @@ function Shape2DNode({
   const filled = s2.filled;
   const hasBorder = s2.borderWidth > 0;
   const hasShadow = s2.shadowBlur > 0 || s2.shadowOffsetX !== 0 || s2.shadowOffsetY !== 0;
-  const hasGlow = s2.glowSize > 0 && s2.glowOpacity > 0;
+  const hasGlow = s2.glowSize > 0 && s2.glowOpacity > 0 && s2.glowIntensity > 0;
+  // Intensity = how many blurred copies stack (default 1 → 3 copies). More copies
+  // accumulate opacity into a brighter, denser halo; fewer make it fainter. Capped
+  // so a huge value can't stall the canvas.
+  const glowCopies = hasGlow
+    ? Math.max(1, Math.min(24, Math.round(3 * s2.glowIntensity)))
+    : 0;
   const shadow = hasShadow
     ? {
         shadowColor: rgbaCss(s2.shadowColor),
@@ -898,14 +904,22 @@ function Shape2DNode({
       {...interaction}
     >
       {hasGlow &&
-        make("glow", {
-          listening: false,
-          shadowColor: rgbaCss(s2.glowColor),
-          shadowBlur: s2.glowSize,
-          shadowOpacity: s2.glowOpacity,
-          shadowOffsetX: 0,
-          shadowOffsetY: 0,
-          ...glowProps,
+        // Stack several blurred copies so the halo INTENSIFIES with size. A single
+        // shadow spreads its "ink" over a larger area as the blur grows, so it gets
+        // fainter — the opposite of what a glow should do. Overlaying copies (each a
+        // fraction of the full blur, so inner ones stay dense) accumulates opacity
+        // into a bright glow; `glowIntensity` sets how many copies stack.
+        Array.from({ length: glowCopies }).map((_, i) => {
+          const f = glowCopies === 1 ? 1 : 0.4 + 0.6 * (i / (glowCopies - 1));
+          return make(`glow${i}`, {
+            listening: false,
+            shadowColor: rgbaCss(s2.glowColor),
+            shadowBlur: Math.max(1, s2.glowSize * f),
+            shadowOpacity: s2.glowOpacity,
+            shadowOffsetX: 0,
+            shadowOffsetY: 0,
+            ...glowProps,
+          });
         })}
       {make("main", mainProps)}
     </Group>

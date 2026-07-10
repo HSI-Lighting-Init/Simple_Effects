@@ -84,7 +84,7 @@ function keyframeTimes(l: Layer): number[] {
     const s = l.kind.style;
     tracks.push(
       s.width, s.height, s.sides,
-      s.cornerRadius, s.bend, s.borderWidth, s.glowSize, s.glowOpacity,
+      s.cornerRadius, s.bend, s.borderWidth, s.glowSize, s.glowOpacity, s.glowIntensity,
       s.shadowBlur, s.shadowOffsetX, s.shadowOffsetY, s.shadowOpacity
     );
     // Keyframeable colours (fill / border / glow / shadow) carry their own key

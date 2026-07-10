@@ -977,6 +977,10 @@ pub struct Shape2DStyle {
     pub glow_size: Track,
     #[serde(default = "one_track")]
     pub glow_opacity: Track,
+    /// Glow strength multiplier: how many blurred copies stack (1 = the default
+    /// halo, higher = brighter/denser, lower = fainter). Keyframeable.
+    #[serde(default = "one_track")]
+    pub glow_intensity: Track,
     // --- Drop shadow ---
     pub shadow_color: Rgba,
     #[serde(default, rename = "shadowColorKeys")]
@@ -1030,6 +1034,7 @@ impl Shape2DStyle {
             glow_color_keys: vec![],
             glow_size: Track::constant(0.0),
             glow_opacity: Track::constant(1.0),
+            glow_intensity: Track::constant(1.0),
             shadow_color: Rgba { r: 0, g: 0, b: 0, a: 255 },
             shadow_color_keys: vec![],
             shadow_blur: Track::constant(0.0),

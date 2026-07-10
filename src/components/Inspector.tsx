@@ -444,7 +444,8 @@ function Shape2DSection({
 
       <Section title="Glow">
         <ColorKeyField label="Colour" color={style.glowColor} keys={style.glowColorKeys} tMs={timeMs} onChange={(c, k) => set({ glowColor: c, glowColorKeys: k })} />
-        <KeyNumField label="Size" track={style.glowSize} tMs={timeMs} min={0} max={200} onChange={(t) => set({ glowSize: t })} />
+        <KeyNumField label="Size" track={style.glowSize} tMs={timeMs} min={0} max={400} onChange={(t) => set({ glowSize: t })} />
+        <KeyNumField label="Intensity" track={style.glowIntensity} tMs={timeMs} min={0} max={8} step={0.1} onChange={(t) => set({ glowIntensity: t })} />
         <KeyNumField label="Opacity" track={style.glowOpacity} tMs={timeMs} min={0} max={1} step={0.05} onChange={(t) => set({ glowOpacity: t })} />
       </Section>
 
