@@ -7,9 +7,17 @@ export type ShapedText = { glyphs: Array<ShapedGlyph>,
  */
 width: number, 
 /**
- * Scaled ascender / descender (px, both positive).
+ * Scaled ascender / descender (px, both positive) — of a single line.
  */
 ascender: number, descender: number, 
+/**
+ * Baseline-to-baseline distance between lines (px).
+ */
+lineHeight: number, 
+/**
+ * Number of lines in the run (>= 1).
+ */
+lines: number, 
 /**
  * Synthetic-bold stroke width (px) to add when the family has no real face
  * heavier than the chosen one. 0 = the outlines are already the right weight

@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::text::Font;
+use crate::text::{Font, TextAlign};
 
 /// A complete animation project. This is what gets serialised to `.ron` on save
 /// and handed to the export pipeline.
@@ -164,9 +164,13 @@ pub enum LayerKind {
     /// A text run. `anim` opt-in drives per-letter animation from a preset;
     /// `parts` holds manual per-glyph move/rotate/scale (decompose mode).
     Text {
+        /// The text; may contain `'\n'` line breaks for multi-line paragraphs.
         content: String,
         /// Font size in px (the letter "height").
         size: f32,
+        /// Horizontal alignment of the lines in a multi-line run.
+        #[serde(default)]
+        align: TextAlign,
         color: Rgba,
         /// Keyframeable fill colour. When non-empty this overrides `color` and is
         /// interpolated at the current time, so the text colour animates over the
@@ -1402,6 +1406,7 @@ impl Project {
             kind: LayerKind::Text {
                 content: "آموزش اتوکد پی‌دی‌اف رایگان".into(),
                 size: 92.0,
+                align: TextAlign::Left,
                 color: Rgba { r: 240, g: 240, b: 245, a: 255 },
                 color_keys: vec![],
                 font: Font("Vazirmatn".into()),

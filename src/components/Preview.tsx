@@ -5,7 +5,7 @@
 // transform ends, the changed properties are committed as keyframes at the
 // current playhead time (via onCommit) — that's what turns a manual edit into
 // animation. The component still owns no interpolation math.
-import { useEffect, useLayoutEffect, useRef, useState, type ReactElement, type Ref } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type Ref } from "react";
 import {
   Stage,
   Layer as KLayer,
@@ -194,6 +194,28 @@ function useImage(src?: string): HTMLImageElement | null {
   return img;
 }
 
+// Resolve an image + optional source crop to what should actually be drawn: the
+// full image, or an offscreen canvas holding ONLY the cropped region. Every image
+// renderer (plain / effects / transition) uses this, so a cover-cropped filler
+// stays cropped through fades and effects instead of flashing the whole image.
+function useCroppedImage(
+  img: HTMLImageElement | null,
+  crop?: CropRect | null
+): HTMLImageElement | HTMLCanvasElement | null {
+  return useMemo(() => {
+    if (!img) return null;
+    if (!crop || crop.width < 1 || crop.height < 1) return img;
+    const c = document.createElement("canvas");
+    c.width = Math.round(crop.width);
+    c.height = Math.round(crop.height);
+    const cx = c.getContext("2d");
+    if (!cx) return img;
+    cx.drawImage(img, crop.x, crop.y, crop.width, crop.height, 0, 0, c.width, c.height);
+    return c;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [img, crop?.x, crop?.y, crop?.width, crop?.height]);
+}
+
 // A flat image with an effect stack. Renders the image through an offscreen
 // canvas — colour/blur effects via the canvas `filter`, then each wipe as a
 // gradient mask — and composites the result. Same transform contract as
@@ -203,17 +225,20 @@ function EffectImageNode({
   r,
   interaction,
   registerRef,
+  crop,
 }: {
   src?: string;
   r: ResolvedLayer;
   interaction: Interaction;
   registerRef: NodeRef;
+  crop?: CropRect | null;
 }) {
   const img = useImage(src);
+  const base = useCroppedImage(img, crop);
   const offRef = useRef<HTMLCanvasElement | null>(null);
-  if (!img) return null;
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
+  if (!base) return null;
+  const w = base.width;
+  const h = base.height;
 
   return (
     <Shape
@@ -230,7 +255,7 @@ function EffectImageNode({
       opacity={r.opacity}
       sceneFunc={(ctx) => {
         const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
-        const tex = applyEffects(off, img, w, h, r.effects);
+        const tex = applyEffects(off, base, w, h, r.effects);
         (ctx as unknown as CanvasRenderingContext2D).drawImage(tex, 0, 0);
       }}
       hitFunc={(ctx, shape) => {
@@ -257,19 +282,22 @@ function TransitionImageNode({
   transition,
   interaction,
   registerRef,
+  crop,
 }: {
   src?: string;
   r: ResolvedLayer;
   transition: ResolvedTransition;
   interaction: Interaction;
   registerRef: NodeRef;
+  crop?: CropRect | null;
 }) {
   const img = useImage(src);
+  const base = useCroppedImage(img, crop);
   const bRef = useRef<HTMLCanvasElement | null>(null);
   const offRef = useRef<HTMLCanvasElement | null>(null);
-  if (!img) return null;
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
+  if (!base) return null;
+  const w = base.width;
+  const h = base.height;
   return (
     <Shape
       ref={registerRef}
@@ -286,7 +314,7 @@ function TransitionImageNode({
       sceneFunc={(ctx) => {
         // The clip, with its effect stack baked in.
         const bcv = bRef.current ?? (bRef.current = document.createElement("canvas"));
-        const texClip: CanvasImageSource = r.effects.length > 0 ? applyEffects(bcv, img, w, h, r.effects) : img;
+        const texClip: CanvasImageSource = r.effects.length > 0 ? applyEffects(bcv, base, w, h, r.effects) : base;
         const clip: Clip = { source: texClip, width: w, height: h };
         const empty: Clip = { source: null, width: 0, height: 0 };
         // Most transitions build up clip B (reveal it in) → clip = B, A = empty.
@@ -639,6 +667,13 @@ function applyLayerStyles(ctx: CanvasRenderingContext2D, textCv: HTMLCanvasEleme
 // tracking/fill + optional 2.5D per-char rotation) into a padded, supersampled
 // canvas, then composite whole-layer styles. Returns placement so the caller can
 // align it with the plain vector layout.
+// Where a text block's left edge sits relative to the layer's anchor, per
+// alignment: left/justify anchor the left edge, right anchors the right edge,
+// centre keeps it centred. `w` is the block (widest-line) width.
+function blockLeft(align: string, w: number): number {
+  return align === "left" || align === "justify" ? 0 : align === "right" ? -w : -w / 2;
+}
+
 function rasterizeStyledText(
   off: HTMLCanvasElement,
   shaped: ShapedText,
@@ -646,7 +681,8 @@ function rasterizeStyledText(
   letters: ResolvedLayer["letters"],
   style: TextStyle | null,
   layerStyles: TextLayerStyles | null,
-  perChar3d: boolean
+  perChar3d: boolean,
+  align: string
 ): { logicalW: number; logicalH: number; imageX: number; imageY: number } {
   const SS = 2;
   const count = shaped.glyphs.length;
@@ -673,9 +709,11 @@ function rasterizeStyledText(
       layerStyles.bevel?.size ?? 0
     );
   }
+  const lineCount = Math.max(1, shaped.lines || 1);
+  const blockH = shaped.ascender + (lineCount - 1) * (shaped.lineHeight || 0) + shaped.descender;
   const pad = Math.ceil(maxStroke + Math.abs(baselineShift) + maxBlur + maxOff + (maxScale - 1) * shaped.ascender + styleExtent + 4);
   const logicalW = Math.ceil(trackedWidth) + pad * 2;
-  const logicalH = Math.ceil(shaped.ascender + shaped.descender) + pad * 2;
+  const logicalH = Math.ceil(blockH) + pad * 2;
   if (off.width !== logicalW * SS || off.height !== logicalH * SS) {
     off.width = logicalW * SS;
     off.height = logicalH * SS;
@@ -690,7 +728,7 @@ function rasterizeStyledText(
       const lt = letters[i];
       if (g.d) {
         ctx.save();
-        ctx.translate(pad + g.x + baseTrack * i + trackAcc + g.cx + (lt?.dx ?? 0), pad + baselineTop + g.cy + (lt?.dy ?? 0));
+        ctx.translate(pad + g.x + baseTrack * i + trackAcc + g.cx + (lt?.dx ?? 0), pad + baselineTop + g.y + g.cy + (lt?.dy ?? 0));
         ctx.rotate(((lt?.rotation ?? 0) * Math.PI) / 180);
         let sx = lt?.scale ?? 1, sy = lt?.scale ?? 1;
         const use3d = perChar3d && lt && (lt.rx !== 0 || lt.ry !== 0 || lt.dz !== 0);
@@ -737,8 +775,8 @@ function rasterizeStyledText(
       applyLayerStyles(offCtx, textCv, off.width, off.height, layerStyles, SS);
     }
   }
-  const imageY = (shaped.ascender - shaped.descender) / 2 - shaped.ascender - pad;
-  return { logicalW, logicalH, imageX: -pad - trackedWidth / 2, imageY };
+  const imageY = -pad - blockH / 2;
+  return { logicalW, logicalH, imageX: -pad + blockLeft(align, trackedWidth), imageY };
 }
 
 function ImageNode({
@@ -756,16 +794,16 @@ function ImageNode({
   crop?: CropRect | null;
 }) {
   const img = useImage(src);
-  if (!img) return null;
-  // Cropped: paint only the source sub-rect, drawn at the crop size (the layer
-  // transform then scales that to fill the block). Otherwise draw the whole image.
-  const w = crop ? crop.width : img.width;
-  const h = crop ? crop.height : img.height;
+  // Draw the cropped canvas (or the full image) — never the full image at the
+  // crop's scale, which is what caused the fullscreen flash.
+  const drawImg = useCroppedImage(img, crop);
+  if (!drawImg) return null;
+  const w = drawImg.width;
+  const h = drawImg.height;
   return (
     <KImage
       ref={registerRef}
-      image={img}
-      {...(crop ? { crop: { x: crop.x, y: crop.y, width: crop.width, height: crop.height }, width: w, height: h } : null)}
+      image={drawImg}
       x={r.x}
       y={r.y}
       offsetX={w / 2}
@@ -1672,6 +1710,8 @@ function DecalNode({
 }) {
   const isText = layer.kind.kind === "text";
   const imgTex = useImage(isText ? undefined : src);
+  const decalCrop = layer.kind.kind === "image" ? layer.kind.crop : null;
+  const croppedTex = useCroppedImage(imgTex, decalCrop);
   const shaped = useShaped(layer);
   const textOffRef = useRef<HTMLCanvasElement | null>(null);
   const fxOffRef = useRef<HTMLCanvasElement | null>(null);
@@ -1706,6 +1746,10 @@ function DecalNode({
             if (!shaped) return;
             const toff = textOffRef.current ?? (textOffRef.current = document.createElement("canvas"));
             base = rasterizeText(toff, shaped, textColor, r.letters);
+          } else if (decalCrop) {
+            // Cropped decal: the pre-cropped canvas is the texture, so the surface
+            // wraps only the visible region (a carousel fills the frame seamlessly).
+            base = croppedTex;
           } else {
             base = imgTex ? cappedTexture(imgTex) : null;
           }
@@ -1882,6 +1926,7 @@ function TextGlyphs({
   font,
   weight,
   italic,
+  align,
   fill,
   color,
   style,
@@ -1904,6 +1949,7 @@ function TextGlyphs({
   font: string;
   weight: number;
   italic: boolean;
+  align: string;
   fill: string;
   color: Rgba;
   style: TextStyle | null;
@@ -1933,7 +1979,7 @@ function TextGlyphs({
     return () => {
       alive = false;
     };
-  }, [layerId, content, size, font, weight, italic]);
+  }, [layerId, content, size, font, weight, italic, align]);
 
   // Attach the per-glyph Transformer to the selected glyph (decompose only).
   useEffect(() => {
@@ -1946,9 +1992,13 @@ function TextGlyphs({
   }, [decompose, selectedPart, shaped, parts, r, fill]);
 
   if (!shaped || shaped.glyphs.length === 0) return null;
-  // Centre the run on the layer origin; baseline so it's vertically centred too.
-  const left = -shaped.width / 2;
-  const baseline = (shaped.ascender - shaped.descender) / 2;
+  // Horizontal anchor: alignment decides where the block sits relative to the
+  // layer origin — left edge (left/justify), centre, or right edge. This is what
+  // makes alignment visible even on a single line.
+  const lineCount = Math.max(1, shaped.lines || 1);
+  const blockH = shaped.ascender + (lineCount - 1) * (shaped.lineHeight || 0) + shaped.descender;
+  const left = blockLeft(align, shaped.width);
+  const baseline = (shaped.ascender - shaped.descender) / 2 - ((lineCount - 1) * (shaped.lineHeight || 0)) / 2;
   // Styled (fills/strokes/tracking/baseline) text — or plain text whose animator
   // uses skew/blur/tracking/colour — rasterises to one image; everything else
   // (incl. position/scale/rotation/opacity animators) keeps crisp vector paths.
@@ -1966,7 +2016,8 @@ function TextGlyphs({
           r.letters,
           style,
           layerStyles,
-          perChar3d
+          perChar3d,
+          align
         )
       : null;
 
@@ -1978,7 +2029,7 @@ function TextGlyphs({
     const g = shaped.glyphs[i];
     onCommitPart(layerId, i, {
       dx: node.x() - (left + g.x + g.cx),
-      dy: node.y() - (baseline + g.cy),
+      dy: node.y() - (baseline + g.y + g.cy),
       rotation: node.rotation(),
       scale: node.scaleX(),
     });
@@ -2005,7 +2056,7 @@ function TextGlyphs({
           x={left - 4}
           y={baseline - shaped.ascender - 4}
           width={shaped.width + 8}
-          height={shaped.ascender + shaped.descender + 8}
+          height={blockH + 8}
           fill="#000"
           opacity={0}
           perfectDrawEnabled={false}
@@ -2068,7 +2119,7 @@ function TextGlyphs({
               ? { stroke: glyphFill, strokeWidth: shaped.embolden, lineJoin: "round" as const, fillAfterStrokeEnabled: true }
               : null)}
             x={left + g.x + g.cx + off.dx}
-            y={baseline + g.cy + off.dy}
+            y={baseline + g.y + g.cy + off.dy}
             offsetX={g.cx}
             offsetY={g.cy}
             // Never a hard 0: a zero-scale Konva node has a singular transform,
@@ -2672,6 +2723,7 @@ export default function Preview({
           font={k.font}
           weight={k.weight}
           italic={k.italic}
+          align={k.align}
           fill={rgbaCss(r.color ?? k.color)}
           color={r.color ?? k.color}
           style={k.style}
@@ -2754,13 +2806,14 @@ export default function Preview({
       );
     } else {
       const src = k.kind === "image" ? images[k.src] : undefined;
+      const crop = k.kind === "image" ? k.crop : null;
       node =
         r.transition?.engine && src ? (
-          <TransitionImageNode src={src} r={r} transition={r.transition} interaction={flatInter} registerRef={reg} />
+          <TransitionImageNode src={src} r={r} transition={r.transition} interaction={flatInter} registerRef={reg} crop={crop} />
         ) : r.effects.length > 0 ? (
-          <EffectImageNode src={src} r={r} interaction={flatInter} registerRef={reg} />
+          <EffectImageNode src={src} r={r} interaction={flatInter} registerRef={reg} crop={crop} />
         ) : (
-          <ImageNode src={src} r={r} interaction={flatInter} registerRef={reg} crop={k.kind === "image" ? k.crop : null} />
+          <ImageNode src={src} r={r} interaction={flatInter} registerRef={reg} crop={crop} />
         );
     }
     // A Flap effect on the selected image layer → a draggable dashed hinge line.

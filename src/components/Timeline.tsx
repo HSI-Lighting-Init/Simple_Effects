@@ -119,6 +119,8 @@ interface Props {
   /** Replace the whole multi-selection at once (used by drag/marquee select). */
   onSelectMany: (ids: number[]) => void;
   onToggleHidden: (id: number) => void;
+  /** Rename a layer (double-click its name in the track list). */
+  onRenameLayer: (id: number, name: string) => void;
   onSeek: (t: number) => void;
   onDeleteLayer: (id: number) => void;
   onDeleteKeyframe: (id: number, tMs: number) => void;
@@ -162,6 +164,7 @@ export default function Timeline({
   onSelect,
   onSelectMany,
   onToggleHidden,
+  onRenameLayer,
   onSeek,
   onDeleteLayer,
   onDeleteKeyframe,
@@ -187,6 +190,12 @@ export default function Timeline({
   // Layer-row reorder (drag a layer onto the one you want it under).
   const [rowDragId, setRowDragId] = useState<number | null>(null);
   const [rowOverId, setRowOverId] = useState<number | null>(null);
+  // Inline layer-name editing: the layer id being renamed + the draft text.
+  const [renaming, setRenaming] = useState<{ id: number; draft: string } | null>(null);
+  const commitRename = () => {
+    if (renaming) onRenameLayer(renaming.id, renaming.draft);
+    setRenaming(null);
+  };
   // Keyframe-diamond drag (retime). `fromMs` identifies which diamond is moving;
   // `cell` (row-major) is set when dragging a per-cell child-row diamond.
   const [kfDrag, setKfDrag] = useState<
@@ -926,7 +935,31 @@ export default function Timeline({
                   }}
                 />
               )}
-              <span className="tl-label-name">{l.name}</span>
+              {renaming?.id === l.id ? (
+                <input
+                  className="tl-label-edit"
+                  autoFocus
+                  value={renaming.draft}
+                  onChange={(e) => setRenaming({ id: l.id, draft: e.target.value })}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onBlur={commitRename}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitRename();
+                    else if (e.key === "Escape") setRenaming(null);
+                  }}
+                />
+              ) : (
+                <span
+                  className="tl-label-name"
+                  title="Double-click to rename"
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    setRenaming({ id: l.id, draft: l.name });
+                  }}
+                >
+                  {l.name}
+                </span>
+              )}
               <span className="tl-label-kind">{l.kind.kind}</span>
               <button
                 className="tl-del"

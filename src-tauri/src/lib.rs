@@ -17,11 +17,12 @@ use tauri::{Manager, State};
 
 use eval::ResolvedLayer;
 use model::{
-    ColorKey, ConstrainMode, CropRect, Decal, Easing, Effect, FrameCell, GridVertex, Keyframe, Layer,
-    LayerKind, LetterAnimation, LetterOverride, LinkedEffectGroup, Project, Rgba, Shape2DStyle,
-    SurfaceShape, Track, Transform, TransformEdit, Transition, TransitionKind, VectorShape,
+    ColorKey, ConstrainMode, CropRect, Decal, DropShadow, Easing, Effect, FrameCell, GridVertex,
+    Keyframe, Layer, LayerKind, LetterAnimation, LetterOverride, LinkedEffectGroup, Project, Rgba,
+    Shape2DStyle, SurfaceShape, TextLayerStyles, Track, Transform, TransformEdit, Transition,
+    TransitionKind, VectorShape,
 };
-use text::{Font, FontFace, ShapedText};
+use text::{Font, FontFace, ShapedText, TextAlign};
 
 /// Shortest play range a layer is allowed to have, and the floor for the comp
 /// duration (ms). Keeps a trimmed block from collapsing to nothing.
@@ -80,8 +81,8 @@ impl AppState {
 
 /// (Re)shape a single layer into the cache if it's a text layer.
 fn reshape_layer(shaped: &mut HashMap<u32, ShapedText>, layer: &Layer) {
-    if let LayerKind::Text { content, size, font, weight, italic, .. } = &layer.kind {
-        shaped.insert(layer.id, text::shape(content, *size, font, *weight, *italic));
+    if let LayerKind::Text { content, size, font, weight, italic, align, .. } = &layer.kind {
+        shaped.insert(layer.id, text::shape_aligned(content, *size, font, *weight, *italic, *align));
     }
 }
 
@@ -189,7 +190,10 @@ fn evaluate_at(state: State<AppState>, t_ms: u32) -> Vec<ResolvedLayer> {
     // decal's aspect ratio): width × (ascender + descender).
     let text_dims: HashMap<u32, (f32, f32)> = shaped
         .iter()
-        .map(|(id, st)| (*id, (st.width, st.ascender + st.descender)))
+        .map(|(id, st)| {
+            let h = st.ascender + st.descender + (st.lines.max(1) - 1) as f32 * st.line_height;
+            (*id, (st.width, h))
+        })
         .collect();
     eval::evaluate(&project, t_ms, &counts, &text_dims)
 }
@@ -219,6 +223,7 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
         kind: LayerKind::Text {
             content,
             size,
+            align: TextAlign::Center,
             color: Rgba { r: 245, g: 245, b: 250, a: 255 },
             color_keys: vec![],
             font,
@@ -290,11 +295,11 @@ fn set_text_content(
         .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
-    let (font, weight, italic) = match &mut layer.kind {
-        LayerKind::Text { content: c, size: s, font, weight, italic, .. } => {
+    let (font, weight, italic, align) = match &mut layer.kind {
+        LayerKind::Text { content: c, size: s, font, weight, italic, align, .. } => {
             *c = content.clone();
             *s = size;
-            (font.clone(), *weight, *italic)
+            (font.clone(), *weight, *italic, *align)
         }
         _ => return Err("not a text layer".into()),
     };
@@ -302,7 +307,7 @@ fn set_text_content(
         .shaped
         .lock()
         .unwrap()
-        .insert(layer_id, text::shape(&content, size, &font, weight, italic));
+        .insert(layer_id, text::shape_aligned(&content, size, &font, weight, italic, align));
     Ok(project.clone())
 }
 
@@ -393,16 +398,16 @@ fn clear_text_color_keys(
 fn set_text_font(state: State<AppState>, layer_id: u32, font: Font) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    let (content, size, weight, italic) = {
+    let (content, size, weight, italic, align) = {
         let layer = project
             .layers
             .iter_mut()
             .find(|l| l.id == layer_id)
             .ok_or("layer not found")?;
         match &mut layer.kind {
-            LayerKind::Text { content, size, font: f, weight, italic, .. } => {
+            LayerKind::Text { content, size, font: f, weight, italic, align, .. } => {
                 *f = font.clone();
-                (content.clone(), *size, *weight, *italic)
+                (content.clone(), *size, *weight, *italic, *align)
             }
             _ => return Err("not a text layer".into()),
         }
@@ -411,7 +416,7 @@ fn set_text_font(state: State<AppState>, layer_id: u32, font: Font) -> Result<Pr
         .shaped
         .lock()
         .unwrap()
-        .insert(layer_id, text::shape(&content, size, &font, weight, italic));
+        .insert(layer_id, text::shape_aligned(&content, size, &font, weight, italic, align));
     Ok(project.clone())
 }
 
@@ -425,17 +430,17 @@ fn set_text_font_style(
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    let (content, size, font) = {
+    let (content, size, font, align) = {
         let layer = project
             .layers
             .iter_mut()
             .find(|l| l.id == layer_id)
             .ok_or("layer not found")?;
         match &mut layer.kind {
-            LayerKind::Text { content, size, font, weight: w, italic: it, .. } => {
+            LayerKind::Text { content, size, font, weight: w, italic: it, align, .. } => {
                 *w = weight.clamp(100, 900);
                 *it = italic;
-                (content.clone(), *size, font.clone())
+                (content.clone(), *size, font.clone(), *align)
             }
             _ => return Err("not a text layer".into()),
         }
@@ -444,7 +449,26 @@ fn set_text_font_style(
         .shaped
         .lock()
         .unwrap()
-        .insert(layer_id, text::shape(&content, size, &font, weight.clamp(100, 900), italic));
+        .insert(layer_id, text::shape_aligned(&content, size, &font, weight.clamp(100, 900), italic, align));
+    Ok(project.clone())
+}
+
+/// Set a text layer's horizontal alignment (left / center / right) and re-shape.
+#[tauri::command]
+fn set_text_align(state: State<AppState>, layer_id: u32, align: TextAlign) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Text { align: a, .. } => *a = align,
+        _ => return Err("not a text layer".into()),
+    }
+    let mut shaped = state.shaped.lock().unwrap();
+    reshape_layer(&mut shaped, layer);
     Ok(project.clone())
 }
 
@@ -1438,6 +1462,15 @@ fn add_shape2d_layer(state: State<AppState>, shape: String) -> Result<Project, S
     Ok(project.clone())
 }
 
+/// Size a carousel cylinder to fill the frame with no empty space: the height
+/// matches the comp height, and the radius makes `n` frame-aspect images tile the
+/// full 360° so they sit seamlessly and the front image spans the frame. Floored
+/// so the cylinder always spans the frame width, even with only a couple images.
+fn carousel_dims(cw: f32, ch: f32, n: u32) -> (f32, f32) {
+    let radius = ((n.max(1) as f32 * cw) / (2.0 * std::f32::consts::PI)).max(cw * 0.6);
+    (radius, ch)
+}
+
 /// Template: build a rotating "cylinder carousel" from a set of images. Creates a
 /// cylinder and pins each image as a decal evenly spaced around it, then keyframes
 /// the cylinder's Y-rotation to SNAP from one image to the next — rotate to an
@@ -1461,9 +1494,7 @@ fn create_cylinder_carousel(
     state.snapshot(&project);
 
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
-    let comp_min = project.width.min(project.height) as f32;
-    let radius = comp_min * 0.42;
-    let height = comp_min * 0.6;
+    let (radius, height) = carousel_dims(project.width as f32, project.height as f32, n as u32);
 
     let cycle = (rotate_ms + pause_ms).max(1);
     let total = cycle * n as u32; // one full loop back to the first image
@@ -1534,6 +1565,9 @@ fn create_cylinder_carousel(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| format!("Image {}", i + 1));
         let u = (i as f32 + 0.5) / n as f32;
+        // Cover-crop to the frame aspect so the panels are uniform, fill the frame,
+        // and tile the cylinder seamlessly.
+        let (crop, _) = cover_crop(iw.max(1) as f32, ih.max(1) as f32, project.width as f32, project.height as f32);
         let (tin, tout) = match &transition {
             Some(eng) => (Some(mk_fade(eng)), Some(mk_fade(eng))),
             None => (None, None),
@@ -1543,7 +1577,7 @@ fn create_cylinder_carousel(
             name,
             start_ms: 0,
             end_ms: total,
-            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1), crop: None },
+            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1), crop: Some(crop) },
             transform: Transform::at(cx, cy),
             hidden: false,
             attach: Some(Decal {
@@ -1551,7 +1585,7 @@ fn create_cylinder_carousel(
                 face: 0,
                 u: Track::constant(u),
                 v: Track::constant(0.5),
-                scale: Track::constant(0.85),
+                scale: Track::constant(1.0),
                 rotation: Track::constant(0.0),
             }),
             effects: vec![],
@@ -1783,29 +1817,23 @@ fn create_photo_grid(
         let ccy = origin_y + (row as f32 + 0.5) * cell_h;
 
         let is_last_filler = i + 1 == n && empties > 0;
-        let (px, py, sx, sy, crop, tin, tout) = if is_last_filler {
+        let (px, py, sx, sy, crop) = if is_last_filler {
             // Widen this image to span its cell + the trailing empty cells in the
             // last row (as one solid block), and cover-crop it to fill without
-            // stretching. Cropped images render through the plain node, so they
-            // carry no fade transition.
+            // stretching. The renderer keeps the crop through its fade.
             let block_left = origin_x + col as f32 * cell_w + cell_w * gap / 2.0;
             let block_right = origin_x + cols as f32 * cell_w - cell_w * gap / 2.0;
             let block_w = block_right - block_left;
             let (crop, scale) = cover_crop(iwf, ihf, block_w, inner_h);
-            ((block_left + block_right) / 2.0, ccy, scale, scale, Some(crop), None, None)
+            ((block_left + block_right) / 2.0, ccy, scale, scale, Some(crop))
         } else {
             let ccx = origin_x + (col as f32 + 0.5) * cell_w;
             let fit = (inner_w / iwf).min(inner_h / ihf); // contain in the cell
-            (
-                ccx,
-                ccy,
-                fit,
-                fit,
-                None,
-                Some(mk("fade", fade_ms)),
-                if fade_out { Some(mk("fade", fade_ms)) } else { None },
-            )
+            (ccx, ccy, fit, fit, None)
         };
+        // Every image (filler included) fades in, and out when `fade_out` is set.
+        let tin = Some(mk("fade", fade_ms));
+        let tout = if fade_out { Some(mk("fade", fade_ms)) } else { None };
         let mut tf = Transform::at(px, py);
         tf.scale_x = Track::constant(sx);
         tf.scale_y = Track::constant(sy);
@@ -1903,9 +1931,9 @@ fn create_grid_call(
         // closing zoom scales about the centre), the big-at-centre scale, the
         // seated scale, an optional cover-crop, and the intro fade.
         let is_last_filler = i + 1 == n && empties > 0;
-        let (lx, ly, big_scale, cell_scale, crop, tin) = if is_last_filler {
+        let (lx, ly, big_scale, cell_scale, crop) = if is_last_filler {
             // Widen the last image over the trailing empty cells (one solid block)
-            // and cover-crop it. Cropped images use the plain node → no fade.
+            // and cover-crop it. The renderer keeps the crop through its fade.
             let block_left = origin_x + col as f32 * cell_w + cell_w * gap / 2.0;
             let block_right = origin_x + cols as f32 * cell_w - cell_w * gap / 2.0;
             let block_cx = (block_left + block_right) / 2.0;
@@ -1913,21 +1941,22 @@ fn create_grid_call(
             let (crop, scale) = cover_crop(iwf, ihf, block_right - block_left, inner_h);
             // Big-at-centre scale from the CROPPED size, so it still fills ~90%.
             let big = (cw * 0.9 / crop.width).min(ch * 0.9 / crop.height);
-            (block_cx - cx, block_cy - cy, big, scale, Some(crop), None)
+            (block_cx - cx, block_cy - cy, big, scale, Some(crop))
         } else {
             let lx = (origin_x + (col as f32 + 0.5) * cell_w) - cx;
             let ly = (origin_y + (row as f32 + 0.5) * cell_h) - cy;
             let big = (cw * 0.9 / iwf).min(ch * 0.9 / ihf); // fills ~90% of the comp
             let cell = (inner_w / iwf).min(inner_h / ihf); // contained in its cell
-            let fade = Transition {
-                kind: TransitionKind::Dissolve,
-                dur_ms: 250,
-                direction: 0,
-                engine: Some("fade".into()),
-                params: None,
-            };
-            (lx, ly, big, cell, None, Some(fade))
+            (lx, ly, big, cell, None)
         };
+        // A short fade so each image eases in (the crop is preserved through it).
+        let tin = Some(Transition {
+            kind: TransitionKind::Dissolve,
+            dur_ms: 250,
+            direction: 0,
+            engine: Some("fade".into()),
+            params: None,
+        });
 
         let t0 = i as u32 * step; // this image appears
         let t_hold_end = t0 + hold_ms; // begins shrinking
@@ -2002,6 +2031,1005 @@ fn create_grid_call(
 
     if project.duration_ms < total {
         project.duration_ms = total;
+    }
+    Ok(project.clone())
+}
+
+/// One slideshow-template look: which transitions cycle between slides, the Ken
+/// Burns zoom range + pan, the caption styling and entrance, and a whole-video
+/// colour grade (adjustment-layer filter effects).
+struct SlideStyle {
+    transitions: Vec<&'static str>,
+    dur: u32,
+    zoom0: f32,
+    zoom1: f32,
+    pan: f32,          // horizontal drift, fraction of comp width
+    text_weight: u16,
+    text_rel: f32,     // caption size as a fraction of comp height
+    text_rise: f32,    // vertical entrance offset, fraction of comp height (0 = none)
+    text_slide: f32,   // horizontal entrance offset, fraction of comp width (0 = none)
+    grade: Vec<Effect>, // whole-video adjustment-layer grade (filter effects)
+}
+
+fn slide_style(style: &str) -> SlideStyle {
+    let c = |a: f32| Effect::Contrast { amount: Track::constant(a) };
+    let s = |a: f32| Effect::Saturate { amount: Track::constant(a) };
+    match style {
+        "dynamic" => SlideStyle {
+            transitions: vec!["slide", "zoomIn", "horizontalWipe", "whipPan"],
+            dur: 700,
+            zoom0: 1.08,
+            zoom1: 1.14,
+            pan: 0.0,
+            text_weight: 800,
+            text_rel: 0.075,
+            text_rise: 0.0,
+            text_slide: 0.06,
+            grade: vec![s(1.18)],
+        },
+        "energetic" => SlideStyle {
+            transitions: vec!["glitch", "zoomIn", "shatter", "whipPan"],
+            dur: 600,
+            zoom0: 1.1,
+            zoom1: 1.2,
+            pan: 0.0,
+            text_weight: 800,
+            text_rel: 0.08,
+            text_rise: 0.03,
+            text_slide: 0.0,
+            grade: vec![c(1.15), s(1.25)],
+        },
+        "elegant" => SlideStyle {
+            transitions: vec!["fade"],
+            dur: 1300,
+            zoom0: 1.05,
+            zoom1: 1.14,
+            pan: 0.015,
+            text_weight: 300,
+            text_rel: 0.06,
+            text_rise: 0.03,
+            text_slide: 0.0,
+            grade: vec![s(0.95), c(1.03)],
+        },
+        // "cinematic" (default)
+        _ => SlideStyle {
+            transitions: vec!["crossDissolve"],
+            dur: 1100,
+            zoom0: 1.06,
+            zoom1: 1.18,
+            pan: 0.02,
+            text_weight: 600,
+            text_rel: 0.055,
+            text_rise: 0.04,
+            text_slide: 0.0,
+            grade: vec![c(1.08), s(1.12)],
+        },
+    }
+}
+
+/// A two-key ramp track at absolute comp times (`t0`→`t1`), the first key
+/// carrying the segment's easing.
+fn ramp2(t0: u32, v0: f32, t1: u32, v1: f32, e: Easing) -> Track {
+    Track {
+        keys: vec![
+            Keyframe { time_ms: t0, value: v0, easing: e },
+            Keyframe { time_ms: t1.max(t0 + 1), value: v1, easing: Easing::Linear },
+        ],
+        default: v0,
+    }
+}
+
+/// Template: build a complete ~`total_ms` slideshow video from `images` (with
+/// optional per-image `captions`), using the chosen `style`'s combination of
+/// transitions, Ken Burns motion, a coherent colour grade, and captions that
+/// fade + slide in and out. Appends all the layers and extends the comp to fit.
+/// Undoable.
+#[tauri::command]
+fn create_slideshow_template(
+    state: State<AppState>,
+    images: Vec<String>,
+    captions: Vec<String>,
+    style: String,
+    total_ms: u32,
+) -> Result<Project, String> {
+    let n = images.len();
+    if n < 2 {
+        return Err("pick at least two images".into());
+    }
+    let cfg = slide_style(&style);
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+
+    let (cw, ch) = (project.width as f32, project.height as f32);
+    let (cx, cy) = (cw / 2.0, ch / 2.0);
+    let total = total_ms.max(2000);
+    let per = (total / n as u32).max(cfg.dur + 600); // each slide's base span
+    let total = per * n as u32; // recompute so slides tile exactly
+
+    let mk_tr = |engine: &str, dur: u32| Transition {
+        kind: TransitionKind::Dissolve,
+        dur_ms: dur,
+        direction: 0,
+        engine: Some(engine.to_string()),
+        params: None,
+    };
+
+    let base_id = max_layer_id(&project.layers);
+    let mut next = base_id + 1;
+
+    // --- Image slides: cover the frame, Ken Burns, cross-transition in. --------
+    for (i, path) in images.iter().enumerate() {
+        let (iw, ih) = image::image_dimensions(path).unwrap_or((1, 1));
+        let (iwf, ihf) = (iw.max(1) as f32, ih.max(1) as f32);
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("Slide {}", i + 1));
+        let cover = (cw / iwf).max(ch / ihf); // fill the frame (crop overflow)
+        let start = i as u32 * per;
+        // Overlap the next slide by the transition duration so it cross-transitions.
+        let end = if i + 1 < n { (i as u32 + 1) * per + cfg.dur } else { total };
+        // Ken Burns: steady zoom over the slide, with a gentle alternating pan.
+        let dir = if i % 2 == 0 { 1.0 } else { -1.0 };
+        let px = cfg.pan * cw * 0.5 * dir;
+        let mut tf = Transform::at(cx, cy);
+        tf.scale_x = ramp2(start, cover * cfg.zoom0, end, cover * cfg.zoom1, Easing::Linear);
+        tf.scale_y = ramp2(start, cover * cfg.zoom0, end, cover * cfg.zoom1, Easing::Linear);
+        if cfg.pan != 0.0 {
+            tf.x = ramp2(start, cx - px, end, cx + px, Easing::Linear);
+        }
+        let tin = if i == 0 {
+            mk_tr("fade", cfg.dur)
+        } else {
+            mk_tr(cfg.transitions[(i - 1) % cfg.transitions.len()], cfg.dur)
+        };
+        let tout = if i + 1 == n { Some(mk_tr("fade", cfg.dur)) } else { None };
+        project.layers.push(Layer {
+            id: next,
+            name,
+            start_ms: start,
+            end_ms: end,
+            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1), crop: None },
+            transform: tf,
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            transition_in: Some(tin),
+            transition_out: tout,
+        });
+        next += 1;
+    }
+
+    // --- Whole-video grade: an adjustment layer over all the slides. -----------
+    if !cfg.grade.is_empty() {
+        project.layers.push(Layer {
+            id: next,
+            name: "Grade".into(),
+            start_ms: 0,
+            end_ms: total,
+            kind: LayerKind::Adjustment {},
+            transform: Transform::at(0.0, 0.0),
+            hidden: false,
+            attach: None,
+            effects: cfg.grade.clone(),
+            transition_in: None,
+            transition_out: None,
+        });
+        next += 1;
+    }
+
+    // --- Captions: one per slide (skipped when blank), fading + sliding in/out
+    //     above the grade so they stay crisp and legible (drop shadow). --------
+    let size = cfg.text_rel * ch;
+    for i in 0..n {
+        // Default the caption to a "text here" placeholder the user can edit, and
+        // pin it to the bottom-right corner (right-aligned via the shaped width).
+        let cap: String = captions
+            .get(i)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("text here")
+            .to_string();
+        let t_start = i as u32 * per + cfg.dur + 150;
+        let t_end = (((i + 1) as u32) * per).saturating_sub(150).max(t_start + 600);
+        let fade = 500u32.min((t_end - t_start) / 2);
+        let font = Font("Vazirmatn".into());
+        let shaped = text::shape(&cap, size, &font, cfg.text_weight, false);
+        let base_x = cw - cw * 0.04; // right edge; the Right-aligned block extends left
+        let base_y = ch - ch * 0.06 - size / 2.0;
+        let mut tf = Transform::at(base_x, base_y);
+        if cfg.text_slide != 0.0 {
+            let off = cfg.text_slide * cw;
+            tf.x = Track {
+                keys: vec![
+                    Keyframe { time_ms: t_start, value: base_x + off, easing: Easing::EaseOut },
+                    Keyframe { time_ms: t_start + fade, value: base_x, easing: Easing::Linear },
+                    Keyframe { time_ms: t_end.saturating_sub(fade), value: base_x, easing: Easing::EaseIn },
+                    Keyframe { time_ms: t_end, value: base_x + off, easing: Easing::Linear },
+                ],
+                default: base_x,
+            };
+        } else if cfg.text_rise != 0.0 {
+            let off = cfg.text_rise * ch;
+            tf.y = Track {
+                keys: vec![
+                    Keyframe { time_ms: t_start, value: base_y + off, easing: Easing::EaseOut },
+                    Keyframe { time_ms: t_start + fade, value: base_y, easing: Easing::Linear },
+                    Keyframe { time_ms: t_end.saturating_sub(fade), value: base_y, easing: Easing::EaseIn },
+                    Keyframe { time_ms: t_end, value: base_y - off, easing: Easing::Linear },
+                ],
+                default: base_y,
+            };
+        }
+        let text_id = next;
+        project.layers.push(Layer {
+            id: text_id,
+            name: format!("Caption {}", i + 1),
+            start_ms: t_start,
+            end_ms: t_end,
+            kind: LayerKind::Text {
+                content: cap.to_string(),
+                size,
+                align: TextAlign::Right,
+                color: Rgba { r: 250, g: 250, b: 252, a: 255 },
+                color_keys: vec![],
+                font,
+                weight: cfg.text_weight,
+                italic: false,
+                anim: None,
+                parts: vec![],
+                decompose: Track::constant(1.0),
+                style: None,
+                animators: vec![],
+                layer_styles: Some(TextLayerStyles {
+                    drop_shadow: Some(DropShadow {
+                        color: Rgba { r: 0, g: 0, b: 0, a: 255 },
+                        opacity: 65.0,
+                        angle: 90.0,
+                        distance: 4.0,
+                        size: 12.0,
+                    }),
+                    outer_glow: None,
+                    inner_glow: None,
+                    bevel: None,
+                    gradient: None,
+                }),
+                per_char_3d: false,
+                per_char_rx: 0.0,
+                per_char_ry: 0.0,
+                per_char_spread: 0.0,
+            },
+            transform: tf,
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            transition_in: Some(mk_tr("fade", fade)),
+            transition_out: Some(mk_tr("fade", fade)),
+        });
+        state.shaped.lock().unwrap().insert(text_id, shaped);
+        next += 1;
+    }
+
+    if project.duration_ms < total {
+        project.duration_ms = total;
+    }
+    Ok(project.clone())
+}
+
+/// Rename `layer_id` (searches nested group children too). Blank names fall back
+/// to "Layer". Undoable.
+fn rename_in(layers: &mut [Layer], id: u32, name: &str) -> bool {
+    for l in layers.iter_mut() {
+        if l.id == id {
+            l.name = name.to_string();
+            return true;
+        }
+        if let LayerKind::Group { children } = &mut l.kind {
+            if rename_in(children, id, name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[tauri::command]
+fn rename_layer(state: State<AppState>, layer_id: u32, name: String) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let trimmed = name.trim();
+    let name = if trimmed.is_empty() { "Layer" } else { trimmed };
+    if rename_in(&mut project.layers, layer_id, name) {
+        Ok(project.clone())
+    } else {
+        Err("layer not found".into())
+    }
+}
+
+/// Template: build a ~`total_ms` video that spins the `images` around a cylinder
+/// carousel (all images wrap around it, in order), snapping to each in turn, with
+/// a bottom-right caption for each that fades in/out while its image faces the
+/// camera (defaults to a "text here" placeholder). Undoable.
+#[tauri::command]
+fn create_carousel_video(
+    state: State<AppState>,
+    images: Vec<String>,
+    captions: Vec<String>,
+    total_ms: u32,
+) -> Result<Project, String> {
+    let n = images.len();
+    if n < 2 {
+        return Err("pick at least two images".into());
+    }
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+
+    let (cw, ch) = (project.width as f32, project.height as f32);
+    let (cx, cy) = (cw / 2.0, ch / 2.0);
+    let (radius, height) = carousel_dims(cw, ch, n as u32);
+
+    let cycle = (total_ms / n as u32).max(800);
+    let rotate = (cycle * 35 / 100).max(250);
+    let pause = cycle.saturating_sub(rotate).max(200);
+    let cycle = pause + rotate;
+    let total = cycle * n as u32;
+    let step = 360.0 / n as f32;
+    let front_ry = |i: usize| 180.0 - step * (i as f32 + 0.5);
+
+    // Snap rotation: arrive → hold on each image → ease-rotate to the next.
+    let mut keys = Vec::with_capacity(2 * n + 1);
+    for i in 0..=n {
+        let angle = front_ry(0) - step * i as f32;
+        let t_arrive = cycle * i as u32;
+        keys.push(Keyframe { time_ms: t_arrive, value: angle, easing: Easing::Linear });
+        if i < n {
+            keys.push(Keyframe { time_ms: t_arrive + pause, value: angle, easing: Easing::EaseInOut });
+        }
+    }
+    let rotation_y = Track { keys, default: front_ry(0) };
+
+    let base_id = max_layer_id(&project.layers);
+    let mut next = base_id + 1;
+    let cyl_id = next;
+    next += 1;
+    project.layers.push(Layer {
+        id: cyl_id,
+        name: "Carousel".into(),
+        start_ms: 0,
+        end_ms: total,
+        kind: LayerKind::Shape3D {
+            shape: SurfaceShape::Cylinder,
+            width: Track::constant(radius * 2.0),
+            height: Track::constant(height),
+            depth: Track::constant(radius * 2.0),
+            rotation_x: Track::constant(0.0),
+            rotation_y,
+            rotation_z: Track::constant(0.0),
+            perspective: Track::constant(0.35),
+            focal_length: Track::constant(1200.0),
+            coverage: Track::constant(360.0),
+            radius: Track::constant(radius),
+        },
+        transform: Transform::at(cx, cy),
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+
+    let mk_fade = |dur: u32| Transition {
+        kind: TransitionKind::Dissolve,
+        dur_ms: dur,
+        direction: 0,
+        engine: Some("fade".into()),
+        params: None,
+    };
+    for (i, path) in images.iter().enumerate() {
+        let (iw, ih) = image::image_dimensions(path).unwrap_or((1, 1));
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("Image {}", i + 1));
+        let u = (i as f32 + 0.5) / n as f32;
+        let (crop, _) = cover_crop(iw.max(1) as f32, ih.max(1) as f32, cw, ch);
+        project.layers.push(Layer {
+            id: next,
+            name,
+            start_ms: 0,
+            end_ms: total,
+            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1), crop: Some(crop) },
+            transform: Transform::at(cx, cy),
+            hidden: false,
+            attach: Some(Decal {
+                shape_id: cyl_id,
+                face: 0,
+                u: Track::constant(u),
+                v: Track::constant(0.5),
+                scale: Track::constant(1.0),
+                rotation: Track::constant(0.0),
+            }),
+            effects: vec![],
+            transition_in: Some(mk_fade(500)),
+            transition_out: Some(mk_fade(500)),
+        });
+        next += 1;
+    }
+
+    // A bottom-right caption per image, shown while that image faces the camera.
+    let size = ch * 0.05;
+    for i in 0..n {
+        let cap: String = captions
+            .get(i)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("text here")
+            .to_string();
+        let font = Font("Vazirmatn".into());
+        let shaped = text::shape(&cap, size, &font, 600, false);
+        let base_x = cw - cw * 0.04; // right edge; the Right-aligned block extends left
+        let base_y = ch - ch * 0.06 - size / 2.0;
+        let t_start = cycle * i as u32 + 250;
+        let t_end = (cycle * i as u32 + pause).saturating_sub(100).max(t_start + 500);
+        let fade = 400u32.min((t_end - t_start) / 2);
+        let text_id = next;
+        next += 1;
+        project.layers.push(Layer {
+            id: text_id,
+            name: format!("Caption {}", i + 1),
+            start_ms: t_start,
+            end_ms: t_end,
+            kind: LayerKind::Text {
+                content: cap,
+                size,
+                align: TextAlign::Right,
+                color: Rgba { r: 250, g: 250, b: 252, a: 255 },
+                color_keys: vec![],
+                font,
+                weight: 600,
+                italic: false,
+                anim: None,
+                parts: vec![],
+                decompose: Track::constant(1.0),
+                style: None,
+                animators: vec![],
+                layer_styles: Some(TextLayerStyles {
+                    drop_shadow: Some(DropShadow {
+                        color: Rgba { r: 0, g: 0, b: 0, a: 255 },
+                        opacity: 65.0,
+                        angle: 90.0,
+                        distance: 4.0,
+                        size: 12.0,
+                    }),
+                    outer_glow: None,
+                    inner_glow: None,
+                    bevel: None,
+                    gradient: None,
+                }),
+                per_char_3d: false,
+                per_char_rx: 0.0,
+                per_char_ry: 0.0,
+                per_char_spread: 0.0,
+            },
+            transform: Transform::at(base_x, base_y),
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            transition_in: Some(mk_fade(fade)),
+            transition_out: Some(mk_fade(fade)),
+        });
+        state.shaped.lock().unwrap().insert(text_id, shaped);
+    }
+
+    if project.duration_ms < total {
+        project.duration_ms = total;
+    }
+    Ok(project.clone())
+}
+
+// ---- Mixed-video template building blocks --------------------------------------
+// Each segment builder appends its layers (and any captions to shape) at an
+// absolute time offset and returns the time it ends, so segments can be chained
+// with a cross-fade overlap into one coherent video.
+
+struct VCtx {
+    cw: f32,
+    ch: f32,
+    cx: f32,
+    cy: f32,
+    comp_min: f32,
+}
+
+fn v_fade(dur: u32) -> Transition {
+    Transition { kind: TransitionKind::Dissolve, dur_ms: dur, direction: 0, engine: Some("fade".into()), params: None }
+}
+fn v_engine(name: &str, dur: u32) -> Transition {
+    Transition { kind: TransitionKind::Dissolve, dur_ms: dur, direction: 0, engine: Some(name.to_string()), params: None }
+}
+
+/// A bottom-right "text here" caption over `[start, end]`.
+fn v_caption(
+    ctx: &VCtx,
+    next_id: &mut u32,
+    layers: &mut Vec<Layer>,
+    caps: &mut Vec<(u32, ShapedText)>,
+    start: u32,
+    end: u32,
+) {
+    if end <= start + 300 {
+        return;
+    }
+    let size = ctx.ch * 0.05;
+    let font = Font("Vazirmatn".into());
+    let shaped = text::shape_aligned("text here", size, &font, 600, false, TextAlign::Right);
+    let bx = ctx.cw - ctx.cw * 0.04; // right edge; the Right-aligned block extends left
+    let by = ctx.ch - ctx.ch * 0.06 - size / 2.0;
+    let fade = 400u32.min((end - start) / 2);
+    let id = *next_id;
+    *next_id += 1;
+    layers.push(Layer {
+        id,
+        name: "Caption".into(),
+        start_ms: start,
+        end_ms: end,
+        kind: LayerKind::Text {
+            content: "text here".into(),
+            size,
+            align: TextAlign::Right,
+            color: Rgba { r: 250, g: 250, b: 252, a: 255 },
+            color_keys: vec![],
+            font,
+            weight: 600,
+            italic: false,
+            anim: None,
+            parts: vec![],
+            decompose: Track::constant(1.0),
+            style: None,
+            animators: vec![],
+            layer_styles: Some(TextLayerStyles {
+                drop_shadow: Some(DropShadow { color: Rgba { r: 0, g: 0, b: 0, a: 255 }, opacity: 65.0, angle: 90.0, distance: 4.0, size: 12.0 }),
+                outer_glow: None,
+                inner_glow: None,
+                bevel: None,
+                gradient: None,
+            }),
+            per_char_3d: false,
+            per_char_rx: 0.0,
+            per_char_ry: 0.0,
+            per_char_spread: 0.0,
+        },
+        transform: Transform::at(bx, by),
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: Some(v_fade(fade)),
+        transition_out: Some(v_fade(fade)),
+    });
+    caps.push((id, shaped));
+}
+
+/// Plain cover + Ken-Burns slideshow over `[start, start+dur]`, cross-dissolving
+/// between slides, with a caption per slide. Returns the segment end time.
+fn v_plain_segment(
+    ctx: &VCtx,
+    images: &[String],
+    start: u32,
+    dur: u32,
+    xfade: u32,
+    next_id: &mut u32,
+    layers: &mut Vec<Layer>,
+    caps: &mut Vec<(u32, ShapedText)>,
+) -> u32 {
+    let n = images.len() as u32;
+    if n == 0 {
+        return start;
+    }
+    let per = (dur / n).max(xfade + 400);
+    for (i, path) in images.iter().enumerate() {
+        let iu = i as u32;
+        let (iw, ih) = image::image_dimensions(path).unwrap_or((1, 1));
+        let (iwf, ihf) = (iw.max(1) as f32, ih.max(1) as f32);
+        let cover = (ctx.cw / iwf).max(ctx.ch / ihf);
+        let s0 = start + iu * per;
+        let s1 = if iu + 1 < n { start + (iu + 1) * per + xfade } else { start + n * per };
+        let dir = if i % 2 == 0 { 1.0 } else { -1.0 };
+        let px = 0.01 * ctx.cw * dir;
+        let mut tf = Transform::at(ctx.cx, ctx.cy);
+        tf.scale_x = ramp2(s0, cover * 1.06, s1, cover * 1.14, Easing::Linear);
+        tf.scale_y = ramp2(s0, cover * 1.06, s1, cover * 1.14, Easing::Linear);
+        tf.x = ramp2(s0, ctx.cx - px, s1, ctx.cx + px, Easing::Linear);
+        let tin = if i == 0 { v_fade(xfade) } else { v_engine("crossDissolve", xfade) };
+        let tout = if iu + 1 == n { Some(v_fade(xfade)) } else { None };
+        let id = *next_id;
+        *next_id += 1;
+        layers.push(Layer {
+            id,
+            name: format!("Slide {}", i + 1),
+            start_ms: s0,
+            end_ms: s1,
+            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1), crop: None },
+            transform: tf,
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            transition_in: Some(tin),
+            transition_out: tout,
+        });
+        let c0 = s0 + xfade + 100;
+        let c1 = (start + (iu + 1) * per).saturating_sub(100).max(c0 + 500);
+        v_caption(ctx, next_id, layers, caps, c0, c1);
+    }
+    start + n * per
+}
+
+/// Cylinder carousel over `[start, ...]` spinning through `images`, one caption
+/// per image while it faces the camera. Returns the segment end time.
+fn v_cylinder_segment(
+    ctx: &VCtx,
+    images: &[String],
+    start: u32,
+    dur: u32,
+    xfade: u32,
+    next_id: &mut u32,
+    layers: &mut Vec<Layer>,
+    caps: &mut Vec<(u32, ShapedText)>,
+) -> u32 {
+    let n = images.len() as u32;
+    if n == 0 {
+        return start;
+    }
+    let (radius, height) = carousel_dims(ctx.cw, ctx.ch, n);
+    let cycle = (dur / n).max(500);
+    let rotate = (cycle * 35 / 100).max(200);
+    let pause = cycle.saturating_sub(rotate).max(150);
+    let cycle = pause + rotate;
+    let seg_end = start + cycle * n;
+    let step = 360.0 / n as f32;
+    let front0 = 180.0 - step * 0.5;
+    let mut keys = Vec::new();
+    for i in 0..=n {
+        let angle = front0 - step * i as f32;
+        let t = start + cycle * i;
+        keys.push(Keyframe { time_ms: t, value: angle, easing: Easing::Linear });
+        if i < n {
+            keys.push(Keyframe { time_ms: t + pause, value: angle, easing: Easing::EaseInOut });
+        }
+    }
+    let cyl_id = *next_id;
+    *next_id += 1;
+    layers.push(Layer {
+        id: cyl_id,
+        name: "Carousel".into(),
+        start_ms: start,
+        end_ms: seg_end,
+        kind: LayerKind::Shape3D {
+            shape: SurfaceShape::Cylinder,
+            width: Track::constant(radius * 2.0),
+            height: Track::constant(height),
+            depth: Track::constant(radius * 2.0),
+            rotation_x: Track::constant(0.0),
+            rotation_y: Track { keys, default: front0 },
+            rotation_z: Track::constant(0.0),
+            perspective: Track::constant(0.35),
+            focal_length: Track::constant(1200.0),
+            coverage: Track::constant(360.0),
+            radius: Track::constant(radius),
+        },
+        transform: Transform::at(ctx.cx, ctx.cy),
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+    for (i, path) in images.iter().enumerate() {
+        let (iw, ih) = image::image_dimensions(path).unwrap_or((1, 1));
+        let u = (i as f32 + 0.5) / n as f32;
+        let (crop, _) = cover_crop(iw.max(1) as f32, ih.max(1) as f32, ctx.cw, ctx.ch);
+        let id = *next_id;
+        *next_id += 1;
+        layers.push(Layer {
+            id,
+            name: format!("Carousel image {}", i + 1),
+            start_ms: start,
+            end_ms: seg_end,
+            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1), crop: Some(crop) },
+            transform: Transform::at(ctx.cx, ctx.cy),
+            hidden: false,
+            attach: Some(Decal {
+                shape_id: cyl_id,
+                face: 0,
+                u: Track::constant(u),
+                v: Track::constant(0.5),
+                scale: Track::constant(1.0),
+                rotation: Track::constant(0.0),
+            }),
+            effects: vec![],
+            transition_in: Some(v_fade(xfade)),
+            transition_out: Some(v_fade(xfade)),
+        });
+        let c0 = start + cycle * i as u32 + 250;
+        let c1 = (start + cycle * i as u32 + pause).saturating_sub(100).max(c0 + 500);
+        v_caption(ctx, next_id, layers, caps, c0, c1);
+    }
+    seg_end
+}
+
+/// Rotating cube over `[start, ...]`; images on the four side faces cycle for
+/// more than four. A caption per image while it faces the camera. Returns end.
+fn v_box_segment(
+    ctx: &VCtx,
+    images: &[String],
+    start: u32,
+    dur: u32,
+    xfade: u32,
+    next_id: &mut u32,
+    layers: &mut Vec<Layer>,
+    caps: &mut Vec<(u32, ShapedText)>,
+) -> u32 {
+    let n = images.len() as u32;
+    if n == 0 {
+        return start;
+    }
+    let side = ctx.comp_min * 0.5;
+    let cycle = (dur / n).max(500);
+    let rotate = (cycle * 45 / 100).max(200);
+    let pause = cycle.saturating_sub(rotate).max(150);
+    let cycle = pause + rotate;
+    let seg_end = start + (n - 1) * cycle + pause;
+    let mut keys = Vec::new();
+    for i in 0..n {
+        let angle = -90.0 * i as f32;
+        let t = start + i * cycle;
+        keys.push(Keyframe { time_ms: t, value: angle, easing: Easing::Linear });
+        if i + 1 < n {
+            keys.push(Keyframe { time_ms: t + pause, value: angle, easing: Easing::EaseInOut });
+        }
+    }
+    let box_id = *next_id;
+    *next_id += 1;
+    layers.push(Layer {
+        id: box_id,
+        name: "Cube".into(),
+        start_ms: start,
+        end_ms: seg_end,
+        kind: LayerKind::Shape3D {
+            shape: SurfaceShape::Box,
+            width: Track::constant(side),
+            height: Track::constant(side),
+            depth: Track::constant(side),
+            rotation_x: Track::constant(0.0),
+            rotation_y: Track { keys, default: 0.0 },
+            rotation_z: Track::constant(0.0),
+            perspective: Track::constant(0.35),
+            focal_length: Track::constant(1200.0),
+            coverage: Track::constant(360.0),
+            radius: Track::constant(side),
+        },
+        transform: Transform::at(ctx.cx, ctx.cy),
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+    const FACE_ORDER: [u32; 4] = [0, 3, 1, 2];
+    for (i, path) in images.iter().enumerate() {
+        let iu = i as u32;
+        let (iw, ih) = image::image_dimensions(path).unwrap_or((1, 1));
+        let face = FACE_ORDER[i % 4];
+        let s0 = start + (iu.saturating_sub(2)) * cycle;
+        let s1 = (start + (iu + 2) * cycle).min(seg_end);
+        let tin = if i == 0 { Some(v_fade(xfade)) } else { None };
+        let tout = if iu + 1 == n { Some(v_fade(xfade)) } else { None };
+        let id = *next_id;
+        *next_id += 1;
+        layers.push(Layer {
+            id,
+            name: format!("Cube image {}", i + 1),
+            start_ms: s0,
+            end_ms: s1,
+            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1), crop: None },
+            transform: Transform::at(ctx.cx, ctx.cy),
+            hidden: false,
+            attach: Some(Decal {
+                shape_id: box_id,
+                face,
+                u: Track::constant(0.5),
+                v: Track::constant(0.5),
+                scale: Track::constant(0.9),
+                rotation: Track::constant(0.0),
+            }),
+            effects: vec![],
+            transition_in: tin,
+            transition_out: tout,
+        });
+        let c0 = start + iu * cycle + 250;
+        let c1 = (start + iu * cycle + pause).saturating_sub(100).max(c0 + 500);
+        v_caption(ctx, next_id, layers, caps, c0, c1);
+    }
+    seg_end
+}
+
+/// Assembling photo grid over `[start, start+dur]`: a group of cover-cropped
+/// images that fade in staggered, then hold. One caption for the segment.
+fn v_grid_segment(
+    ctx: &VCtx,
+    images: &[String],
+    start: u32,
+    dur: u32,
+    xfade: u32,
+    next_id: &mut u32,
+    layers: &mut Vec<Layer>,
+    caps: &mut Vec<(u32, ShapedText)>,
+) -> u32 {
+    let n = images.len() as u32;
+    if n == 0 {
+        return start;
+    }
+    let cols = (n as f32).sqrt().ceil().max(1.0) as u32;
+    let rows = (n + cols - 1) / cols;
+    let margin = 0.06f32;
+    let gap = 0.04f32;
+    let cell_w = ctx.cw * (1.0 - 2.0 * margin) / cols as f32;
+    let cell_h = ctx.ch * (1.0 - 2.0 * margin) / rows as f32;
+    let inner_w = cell_w * (1.0 - gap);
+    let inner_h = cell_h * (1.0 - gap);
+    let origin_x = ctx.cw * margin;
+    let origin_y = ctx.ch * margin;
+    let empties = rows * cols - n;
+    let seg_end = start + dur;
+    let stagger = ((dur * 40 / 100) / n).max(80);
+
+    let group_id = *next_id;
+    *next_id += 1;
+    let mut children: Vec<Layer> = Vec::with_capacity(n as usize);
+    let mut child_next = group_id + 1;
+    for (i, path) in images.iter().enumerate() {
+        let iu = i as u32;
+        let (iw, ih) = image::image_dimensions(path).unwrap_or((1, 1));
+        let (iwf, ihf) = (iw.max(1) as f32, ih.max(1) as f32);
+        let col = iu % cols;
+        let row = iu / cols;
+        let ccy = origin_y + (row as f32 + 0.5) * cell_h;
+        let is_last_filler = iu + 1 == n && empties > 0;
+        let (px, sx, crop) = if is_last_filler {
+            let bl = origin_x + col as f32 * cell_w + cell_w * gap / 2.0;
+            let br = origin_x + cols as f32 * cell_w - cell_w * gap / 2.0;
+            let (crop, scale) = cover_crop(iwf, ihf, br - bl, inner_h);
+            ((bl + br) / 2.0, scale, Some(crop))
+        } else {
+            let ccx = origin_x + (col as f32 + 0.5) * cell_w;
+            let fit = (inner_w / iwf).min(inner_h / ihf);
+            (ccx, fit, None)
+        };
+        let mut tf = Transform::at(px, ccy);
+        tf.scale_x = Track::constant(sx);
+        tf.scale_y = Track::constant(sx);
+        let cid = child_next;
+        child_next += 1;
+        children.push(Layer {
+            id: cid,
+            name: format!("Grid image {}", i + 1),
+            start_ms: start + iu * stagger,
+            end_ms: seg_end,
+            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1), crop },
+            transform: tf,
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            transition_in: Some(v_fade(500)),
+            transition_out: None,
+        });
+    }
+    *next_id = child_next;
+    layers.push(Layer {
+        id: group_id,
+        name: format!("Grid {cols}×{rows}"),
+        start_ms: start,
+        end_ms: seg_end,
+        kind: LayerKind::Group { children },
+        transform: Transform::at(0.0, 0.0),
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: Some(v_fade(xfade)),
+        transition_out: Some(v_fade(xfade)),
+    });
+    v_caption(ctx, next_id, layers, caps, start + xfade + 200, seg_end.saturating_sub(200));
+    seg_end
+}
+
+/// Build one feature segment of the given kind; returns its end time.
+fn v_feature_segment(
+    kind: &str,
+    ctx: &VCtx,
+    images: &[String],
+    start: u32,
+    dur: u32,
+    xfade: u32,
+    next_id: &mut u32,
+    layers: &mut Vec<Layer>,
+    caps: &mut Vec<(u32, ShapedText)>,
+) -> u32 {
+    match kind {
+        "box" => v_box_segment(ctx, images, start, dur, xfade, next_id, layers, caps),
+        "grid" => v_grid_segment(ctx, images, start, dur, xfade, next_id, layers, caps),
+        _ => v_cylinder_segment(ctx, images, start, dur, xfade, next_id, layers, caps),
+    }
+}
+
+/// Template: a coherent ~`total_ms` video that opens with plain Ken-Burns slides,
+/// transitions INTO one or two feature segments (cylinder / cube / grid), and
+/// then back OUT to plain slides — every part cross-fading into the next, with a
+/// bottom-right "text here" caption throughout. `plain` are the plain slides
+/// (split into an intro and outro); `feature_a` / `feature_b` are the images that
+/// go into the feature segments (`kind_b` empty = a single feature). Undoable.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn create_mixed_video(
+    state: State<AppState>,
+    plain: Vec<String>,
+    feature_a: Vec<String>,
+    feature_b: Vec<String>,
+    kind_a: String,
+    kind_b: String,
+    total_ms: u32,
+) -> Result<Project, String> {
+    if feature_a.is_empty() {
+        return Err("assign at least one image to the feature part".into());
+    }
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+
+    let ctx = VCtx {
+        cw: project.width as f32,
+        ch: project.height as f32,
+        cx: project.width as f32 / 2.0,
+        cy: project.height as f32 / 2.0,
+        comp_min: project.width.min(project.height) as f32,
+    };
+    let xfade = 800u32;
+
+    // Allocate time proportionally to each segment's image count.
+    let has_b = !kind_b.is_empty() && !feature_b.is_empty();
+    let intro_n = (plain.len() / 2) as u32;
+    let intro: Vec<String> = plain.iter().take(intro_n as usize).cloned().collect();
+    let outro: Vec<String> = plain.iter().skip(intro_n as usize).cloned().collect();
+    let total_imgs = (plain.len() + feature_a.len() + feature_b.len()).max(1) as u32;
+    let unit = (total_ms / total_imgs).max(1500);
+
+    let base_id = max_layer_id(&project.layers);
+    let mut next_id = base_id + 1;
+    let mut layers: Vec<Layer> = Vec::new();
+    let mut caps: Vec<(u32, ShapedText)> = Vec::new();
+
+    let mut t = 0u32;
+    if !intro.is_empty() {
+        let end = v_plain_segment(&ctx, &intro, t, intro.len() as u32 * unit, xfade, &mut next_id, &mut layers, &mut caps);
+        t = end.saturating_sub(xfade);
+    }
+    let end_a = v_feature_segment(&kind_a, &ctx, &feature_a, t, feature_a.len() as u32 * unit, xfade, &mut next_id, &mut layers, &mut caps);
+    t = end_a.saturating_sub(xfade);
+    if has_b {
+        let end_b = v_feature_segment(&kind_b, &ctx, &feature_b, t, feature_b.len() as u32 * unit, xfade, &mut next_id, &mut layers, &mut caps);
+        t = end_b.saturating_sub(xfade);
+    }
+    let end = if !outro.is_empty() {
+        v_plain_segment(&ctx, &outro, t, outro.len() as u32 * unit, xfade, &mut next_id, &mut layers, &mut caps)
+    } else {
+        t + xfade
+    };
+
+    project.layers.extend(layers);
+    {
+        let mut shaped = state.shaped.lock().unwrap();
+        for (id, st) in caps {
+            shaped.insert(id, st);
+        }
+    }
+    if project.duration_ms < end {
+        project.duration_ms = end;
     }
     Ok(project.clone())
 }
@@ -3849,6 +4877,11 @@ pub fn run() {
             create_box_carousel,
             create_photo_grid,
             create_grid_call,
+            create_slideshow_template,
+            create_carousel_video,
+            create_mixed_video,
+            rename_layer,
+            set_text_align,
             set_shape2d,
             add_frame_grid,
             filter_existing_files,
@@ -3937,4 +4970,40 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod mixed_tests {
+    use super::*;
+
+    fn ctx() -> VCtx {
+        VCtx { cw: 1920.0, ch: 1080.0, cx: 960.0, cy: 540.0, comp_min: 1080.0 }
+    }
+    fn imgs(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("nonexistent_{i}.png")).collect()
+    }
+
+    #[test]
+    fn segment_builders_do_not_panic() {
+        for kind in ["cylinder", "box", "grid"] {
+            let c = ctx();
+            let mut next = 1u32;
+            let mut layers = Vec::new();
+            let mut caps = Vec::new();
+            let end = v_feature_segment(kind, &c, &imgs(5), 0, 5 * 1500, 800, &mut next, &mut layers, &mut caps);
+            assert!(end > 0, "{kind} segment should advance time");
+            assert!(!layers.is_empty(), "{kind} segment should add layers");
+        }
+    }
+
+    #[test]
+    fn plain_segment_builds() {
+        let c = ctx();
+        let mut next = 1u32;
+        let mut layers = Vec::new();
+        let mut caps = Vec::new();
+        let end = v_plain_segment(&c, &imgs(3), 0, 3 * 1500, 800, &mut next, &mut layers, &mut caps);
+        assert!(end > 0);
+        assert!(layers.len() >= 3);
+    }
 }

@@ -104,10 +104,13 @@ export default function ContextMenu({
 }
 
 // A submenu flyout that nudges itself vertically so it never spills past the
-// bottom of the viewport (it opens to the right of its parent row).
+// bottom of the viewport, and flips to the left of its parent if it would spill
+// past the right edge. Recursive: items may themselves carry a `submenu`.
 function Flyout({ items, onClose }: { items: MenuItem[]; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [shift, setShift] = useState(0);
+  const [flip, setFlip] = useState(false);
+  const [openSub, setOpenSub] = useState<number | null>(null);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -117,22 +120,42 @@ function Flyout({ items, onClose }: { items: MenuItem[]; onClose: () => void }) 
     const overflow = rect.bottom - (window.innerHeight - margin);
     if (overflow > 0) setShift(-Math.min(overflow, rect.top - margin));
     else setShift(0);
+    setFlip(rect.right > window.innerWidth - margin);
   }, [items]);
 
   return (
-    <div className="ctx-flyout" ref={ref} style={{ marginTop: shift }}>
-      {items.map((s, j) => (
-        <button
-          key={j}
-          className="ctx-item"
-          onClick={() => {
-            s.onClick?.();
-            onClose();
-          }}
-        >
-          {s.label}
-        </button>
-      ))}
+    <div
+      className={"ctx-flyout" + (flip ? " ctx-flyout-left" : "")}
+      ref={ref}
+      style={{ marginTop: shift }}
+    >
+      {items.map((s, j) =>
+        s.submenu ? (
+          <div
+            key={j}
+            className="ctx-sub"
+            onMouseEnter={() => setOpenSub(j)}
+            onMouseLeave={() => setOpenSub((cur) => (cur === j ? null : cur))}
+          >
+            <button className="ctx-item ctx-item-parent">
+              <span>{s.label}</span>
+              <span className="ctx-arrow">▸</span>
+            </button>
+            {openSub === j && <Flyout items={s.submenu} onClose={onClose} />}
+          </div>
+        ) : (
+          <button
+            key={j}
+            className="ctx-item"
+            onClick={() => {
+              s.onClick?.();
+              onClose();
+            }}
+          >
+            {s.label}
+          </button>
+        )
+      )}
     </div>
   );
 }

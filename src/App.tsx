@@ -25,6 +25,8 @@ import UiSizeDialog from "./components/UiSizeDialog";
 import EffectEditor from "./components/EffectEditor";
 import ExportDialog from "./components/ExportDialog";
 import TemplateDialog, { type TemplateSpec } from "./components/TemplateDialog";
+import VideoTemplateDialog, { VIDEO_STYLES } from "./components/VideoTemplateDialog";
+import MixedTemplateDialog, { MIXED_TEMPLATES } from "./components/MixedTemplateDialog";
 import TransitionsDemo from "./components/TransitionsDemo";
 import {
   addEffect,
@@ -44,6 +46,10 @@ import {
   createBoxCarousel,
   createPhotoGrid,
   createGridCall,
+  createSlideshowTemplate,
+  createCarouselVideo,
+  createMixedVideo,
+  renameLayer,
   setShape2d,
   setCellImage,
   clearCellImage,
@@ -128,6 +134,7 @@ import {
   setTextContent,
   setTextFont,
   setTextFontStyle,
+  setTextAlign,
   listFonts,
   setTextStyle,
   setTextAnimators,
@@ -136,6 +143,7 @@ import {
   undo,
 } from "./lib/api";
 import type { EffectParam } from "./lib/api";
+import TransitionPicker from "./components/TransitionPicker";
 import {
   clearRecording,
   describeTarget,
@@ -164,6 +172,7 @@ import type { TransformEdit } from "./bindings/TransformEdit";
 import type { LetterAnimation } from "./bindings/LetterAnimation";
 import type { Font } from "./bindings/Font";
 import type { Rgba } from "./bindings/Rgba";
+import type { TextAlign } from "./bindings/TextAlign";
 import type { Effect } from "./bindings/Effect";
 import type { SurfaceShape } from "./bindings/SurfaceShape";
 import type { VectorShape } from "./bindings/VectorShape";
@@ -308,6 +317,10 @@ export default function App() {
   const [fxEditorId, setFxEditorId] = useState<number | null>(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [showTemplate, setShowTemplate] = useState(false);
+  const [videoStyle, setVideoStyle] = useState<string | null>(null);
+  const [mixedTemplate, setMixedTemplate] = useState<string | null>(null);
+  // Open transition picker: which layer(s) + which slot to set.
+  const [transitionPick, setTransitionPick] = useState<{ ids: number[]; slot: "in" | "out" } | null>(null);
   // Optional export range [inMs, outMs] — the section of the comp to render.
   // Null = export the whole comp. Set by Shift-dragging the timeline ruler. A ref
   // mirrors it so the export loop (a stable callback) can read the latest value.
@@ -414,15 +427,22 @@ export default function App() {
   const resolveImages = useCallback(
     async (p: Project) => {
       const next: Record<string, string> = {};
-      // Every image path referenced anywhere: flat image layers + grid cells.
+      // Every image path referenced anywhere: flat image layers + grid cells,
+      // recursing into groups (photo-grid / grid-call templates nest their images
+      // inside a group, so their sources live one level down).
       const srcs: string[] = [];
-      for (const layer of p.layers) {
-        if (layer.kind.kind === "image") srcs.push(layer.kind.src);
-        else if (layer.kind.kind === "framegrid") {
-          for (const cell of layer.kind.cells) if (cell.src) srcs.push(cell.src);
-          if (layer.kind.background) srcs.push(layer.kind.background);
+      const collect = (layers: Project["layers"]) => {
+        for (const layer of layers) {
+          if (layer.kind.kind === "image") srcs.push(layer.kind.src);
+          else if (layer.kind.kind === "framegrid") {
+            for (const cell of layer.kind.cells) if (cell.src) srcs.push(cell.src);
+            if (layer.kind.background) srcs.push(layer.kind.background);
+          } else if (layer.kind.kind === "group") {
+            collect(layer.kind.children);
+          }
         }
-      }
+      };
+      collect(p.layers);
       for (const src of srcs) {
         if (!images[src] && !next[src]) {
           try {
@@ -744,6 +764,45 @@ export default function App() {
       await loadProjectMedia(p);
       seek(0);
       recordAction(`template_${spec.kind}`, { count: spec.images.length });
+    },
+    [resolveImages, loadProjectMedia, seek, recordAction]
+  );
+
+  // Build a full slideshow-video template (Templates menu): the backend sequences
+  // the images with the style's transitions + Ken Burns + grade + captions; here
+  // we load the new media and jump to the start.
+  const onCreateSlideshow = useCallback(
+    async (images: string[], captions: string[], style: string, totalMs: number) => {
+      const p =
+        style === "carousel"
+          ? await createCarouselVideo(images, captions, totalMs)
+          : await createSlideshowTemplate(images, captions, style, totalMs);
+      setProject(p);
+      durationRef.current = p.durationMs;
+      await resolveImages(p);
+      await loadProjectMedia(p);
+      seek(0);
+      recordAction("template_slideshow", { style, count: images.length });
+    },
+    [resolveImages, loadProjectMedia, seek, recordAction]
+  );
+
+  const onCreateMixed = useCallback(
+    async (
+      plain: string[],
+      featureA: string[],
+      featureB: string[],
+      kindA: string,
+      kindB: string,
+      totalMs: number
+    ) => {
+      const p = await createMixedVideo(plain, featureA, featureB, kindA, kindB, totalMs);
+      setProject(p);
+      durationRef.current = p.durationMs;
+      await resolveImages(p);
+      await loadProjectMedia(p);
+      seek(0);
+      recordAction("template_mixed", { kindA, kindB, count: plain.length + featureA.length + featureB.length });
     },
     [resolveImages, loadProjectMedia, seek, recordAction]
   );
@@ -2431,6 +2490,15 @@ export default function App() {
     [applyTime, recordAction]
   );
 
+  const onRenameLayer = useCallback(
+    async (layerId: number, name: string) => {
+      const p = await renameLayer(layerId, name);
+      setProject(p);
+      recordAction("rename_layer", { layerId });
+    },
+    [recordAction]
+  );
+
   const onSetColor = useCallback(
     async (layerId: number, color: Rgba) => {
       const t = Math.round(timeRef.current);
@@ -2470,6 +2538,16 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("text_font_style", { layerId, weight, italic });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onSetTextAlign = useCallback(
+    async (layerId: number, align: TextAlign) => {
+      const p = await setTextAlign(layerId, align);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("text_align", { layerId, align });
     },
     [applyTime, recordAction]
   );
@@ -3038,36 +3116,15 @@ export default function App() {
     ["invert", "Invert"],
     ["wipe", "Wipe / Fade"],
   ];
-  // A curated shortcut list of transition-engine effects for the clip right-click
-  // menu (the full library lives in the Inspector's Transitions section).
-  const transitionShortlist: [string, string][] = [
-    ["fade", "Fade"],
-    ["crossDissolve", "Cross Dissolve"],
-    ["slide", "Slide"],
-    ["horizontalWipe", "Wipe"],
-    ["cube", "Cube"],
-    ["cardFlip3d", "Card Flip"],
-    ["zoomIn", "Zoom In"],
-    ["glitch", "Glitch"],
-    ["shatter", "Shatter"],
-    ["whipPan", "Whip Pan"],
-    ["pageTurn", "Page Turn"],
-  ];
-  const transitionSubmenu = (lid: number, slot: "in" | "out") => [
-    { label: "None", onClick: () => onSetLayerTransition(lid, slot, "none", 800, 0, null) },
-    ...transitionShortlist.map(([id, label]) => ({
-      label,
-      onClick: () => onSetLayerTransition(lid, slot, "dissolve", 800, 0, id),
-    })),
-  ];
-  // Same list, but applied to every layer in a multi-selection at once.
-  const transitionBatchSubmenu = (ids: number[], slot: "in" | "out") => [
-    { label: "None", onClick: () => onSetLayerTransitionMany(ids, slot, "none", 800, 0, null) },
-    ...transitionShortlist.map(([id, label]) => ({
-      label,
-      onClick: () => onSetLayerTransitionMany(ids, slot, "dissolve", 800, 0, id),
-    })),
-  ];
+  // Apply the picked transition engine to every target layer (one, or a whole
+  // multi-selection). Called by the searchable transition picker.
+  const applyPickedTransition = (engine: string | null) => {
+    if (!transitionPick) return;
+    const { ids, slot } = transitionPick;
+    if (engine === null) onSetLayerTransitionMany(ids, slot, "none", 800, 0, null);
+    else onSetLayerTransitionMany(ids, slot, "dissolve", 800, 0, engine);
+    setTransitionPick(null);
+  };
 
   const menus: MenuDef[] = [
     {
@@ -3175,6 +3232,20 @@ export default function App() {
         { label: "Image carousel…", onClick: () => setShowTemplate(true) },
         { separator: true },
         { label: "Adjustment Layer", onClick: onAddAdjustment },
+      ],
+    },
+    {
+      title: "Templates",
+      items: [
+        ...VIDEO_STYLES.map((s) => ({
+          label: `${s.label} slideshow…`,
+          onClick: () => setVideoStyle(s.id),
+        })),
+        { separator: true },
+        ...MIXED_TEMPLATES.map((t) => ({
+          label: `${t.label}…`,
+          onClick: () => setMixedTemplate(t.id),
+        })),
       ],
     },
     {
@@ -3441,6 +3512,7 @@ export default function App() {
           onClearColorKeys={onClearColorKeys}
           onFont={onSetFont}
           onFontStyle={onSetFontStyle}
+          onSetTextAlign={onSetTextAlign}
           onAnim={onSetAnim}
           onSetTextStyle={onSetTextStyle}
           onSetTextAnimators={onSetTextAnimators}
@@ -3512,6 +3584,7 @@ export default function App() {
         onSelect={selectLayer}
         onSelectMany={selectMany}
         onToggleHidden={onToggleHidden}
+        onRenameLayer={onRenameLayer}
         onSeek={(t) => {
           if (playingRef.current) stop();
           seek(t);
@@ -3618,42 +3691,34 @@ export default function App() {
                           },
                           {
                             label: "＋ Add effect",
-                            submenu: [
-                              ...effectKinds.map(([kind, label]) => ({
-                                label,
-                                onClick: () => onAddEffect(ctxMenu.layerId!, kind),
-                              })),
-                              // The transition-engine effects (from the demo),
-                              // applied as this clip's IN transition.
-                              ...transitionShortlist.map(([id, label]) => ({
-                                label: `⇋ ${label} (in)`,
-                                onClick: () => onSetLayerTransition(ctxMenu.layerId!, "in", "dissolve", 800, 0, id),
-                              })),
-                            ],
+                            submenu: effectKinds.map(([kind, label]) => ({
+                              label,
+                              onClick: () => onAddEffect(ctxMenu.layerId!, kind),
+                            })),
                           },
                           {
                             label: "✎ Open effect editor…",
                             onClick: () => setFxEditorId(ctxMenu.layerId!),
                           },
                           {
-                            label: "⇋ Transition in",
-                            submenu: transitionSubmenu(ctxMenu.layerId!, "in"),
+                            label: "⇋ Transition in…",
+                            onClick: () => setTransitionPick({ ids: [ctxMenu.layerId!], slot: "in" }),
                           },
                           {
-                            label: "⇋ Transition out",
-                            submenu: transitionSubmenu(ctxMenu.layerId!, "out"),
+                            label: "⇋ Transition out…",
+                            onClick: () => setTransitionPick({ ids: [ctxMenu.layerId!], slot: "out" }),
                           },
                         ]
                       : [{ label: "Effects — image layers only" }]),
                     ...(selectedIds.length >= 2
                       ? [
                           {
-                            label: `⇋ In transition → ${selectedIds.length} selected`,
-                            submenu: transitionBatchSubmenu(selectedIds, "in"),
+                            label: `⇋ In transition → ${selectedIds.length} selected…`,
+                            onClick: () => setTransitionPick({ ids: selectedIds, slot: "in" }),
                           },
                           {
-                            label: `⇋ Out transition → ${selectedIds.length} selected`,
-                            submenu: transitionBatchSubmenu(selectedIds, "out"),
+                            label: `⇋ Out transition → ${selectedIds.length} selected…`,
+                            onClick: () => setTransitionPick({ ids: selectedIds, slot: "out" }),
                           },
                           { label: "⧉ Combine into group", onClick: () => onCombineLayers() },
                         ]
@@ -3722,6 +3787,33 @@ export default function App() {
 
       {showTemplate && (
         <TemplateDialog onCreate={onCreateCarousel} onClose={() => setShowTemplate(false)} />
+      )}
+
+      {videoStyle && (
+        <VideoTemplateDialog
+          style={videoStyle}
+          onCreate={onCreateSlideshow}
+          onClose={() => setVideoStyle(null)}
+        />
+      )}
+
+      {mixedTemplate && (
+        <MixedTemplateDialog
+          templateId={mixedTemplate}
+          onCreate={onCreateMixed}
+          onClose={() => setMixedTemplate(null)}
+        />
+      )}
+
+      {transitionPick && (
+        <TransitionPicker
+          title={
+            (transitionPick.slot === "in" ? "Transition in" : "Transition out") +
+            (transitionPick.ids.length > 1 ? ` → ${transitionPick.ids.length} layers` : "")
+          }
+          onPick={applyPickedTransition}
+          onClose={() => setTransitionPick(null)}
+        />
       )}
 
       {showTransitions && <TransitionsDemo onClose={() => setShowTransitions(false)} />}

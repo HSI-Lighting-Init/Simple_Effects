@@ -1229,6 +1229,16 @@ body {
   flex-direction: column;
   min-width: 140px;
   z-index: 1001;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+/* Opens to the LEFT of its parent when it would overflow the right edge. */
+.ctx-flyout-left {
+  left: auto;
+  right: 100%;
+  margin-left: 0;
+  margin-right: 2px;
 }
 
 /* Effect stack rows. */
@@ -1783,6 +1793,69 @@ body {
   gap: 4px;
   margin-bottom: 8px;
 }
+
+.align-row {
+  display: flex;
+  gap: 4px;
+}
+.align-row .insp-btn {
+  flex: 1;
+}
+
+.tpick-modal {
+  width: 340px;
+  max-width: 92vw;
+}
+.tpick-list {
+  margin-top: 8px;
+  max-height: 50vh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px;
+}
+.tpick-cat {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 6px 6px 3px;
+}
+.tpick-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: inherit;
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.tpick-item:hover {
+  background: rgba(108, 140, 255, 0.18);
+}
+
+.tmpl-caption {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel, #1b1b20);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: inherit;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+.tmpl-role {
+  background: var(--panel, #1b1b20);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: inherit;
+  font-size: 11px;
+  padding: 1px 3px;
+}
 .tmpl-tabs .insp-btn {
   flex: 1;
 }
@@ -1972,6 +2045,17 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tl-label-edit {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel, #1b1b20);
+  border: 1px solid var(--accent, #e08a3c);
+  border-radius: 3px;
+  color: inherit;
+  font: inherit;
+  padding: 0 4px;
 }
 
 .tl-label-kind {

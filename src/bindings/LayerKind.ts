@@ -13,6 +13,7 @@ import type { LinkedEffectGroup } from "./LinkedEffectGroup";
 import type { Rgba } from "./Rgba";
 import type { Shape2DStyle } from "./Shape2DStyle";
 import type { SurfaceShape } from "./SurfaceShape";
+import type { TextAlign } from "./TextAlign";
 import type { TextAnimator } from "./TextAnimator";
 import type { TextLayerStyles } from "./TextLayerStyles";
 import type { TextStyle } from "./TextStyle";
@@ -48,11 +49,19 @@ coverage: Track,
 /**
  * Cylinder: radius (px). Ignored for boxes. Keyframeable.
  */
-radius: Track, } | { "kind": "text", content: string, 
+radius: Track, } | { "kind": "text", 
+/**
+ * The text; may contain `'\n'` line breaks for multi-line paragraphs.
+ */
+content: string, 
 /**
  * Font size in px (the letter "height").
  */
-size: number, color: Rgba, 
+size: number, 
+/**
+ * Horizontal alignment of the lines in a multi-line run.
+ */
+align: TextAlign, color: Rgba, 
 /**
  * Keyframeable fill colour. When non-empty this overrides `color` and is
  * interpolated at the current time, so the text colour animates over the

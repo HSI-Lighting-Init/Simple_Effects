@@ -6,9 +6,14 @@ export type ShapedGlyph = {
  */
 d: string, 
 /**
- * Pen x of this glyph within the run (px).
+ * Pen x of this glyph within the run (px), including line alignment.
  */
 x: number, 
+/**
+ * Baseline y of this glyph's line, relative to the first line (px). 0 for a
+ * single-line run; each subsequent line is one `line_height` lower.
+ */
+y: number, 
 /**
  * Horizontal advance (px).
  */

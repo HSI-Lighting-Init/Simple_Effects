@@ -25,6 +25,22 @@ use ts_rs::TS;
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct Font(pub String);
 
+/// Horizontal alignment of a multi-line text run: each line is offset within the
+/// widest line's box.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum TextAlign {
+    Left,
+    /// Default: the text block is centred on the layer's anchor point (matches the
+    /// original behaviour before alignment existed).
+    #[default]
+    Center,
+    Right,
+    /// Stretch each line (except the last) to the full width by widening spaces.
+    Justify,
+}
+
 const VAZIRMATN: &[u8] = include_bytes!("../fonts/Vazirmatn-Regular.ttf");
 const SAHEL: &[u8] = include_bytes!("../fonts/Sahel.ttf");
 const SHABNAM: &[u8] = include_bytes!("../fonts/Shabnam.ttf");
@@ -190,8 +206,12 @@ pub fn list_font_families() -> Vec<String> {
 pub struct ShapedGlyph {
     /// SVG path data in pixel space, origin at the glyph's pen point (baseline).
     pub d: String,
-    /// Pen x of this glyph within the run (px).
+    /// Pen x of this glyph within the run (px), including line alignment.
     pub x: f32,
+    /// Baseline y of this glyph's line, relative to the first line (px). 0 for a
+    /// single-line run; each subsequent line is one `line_height` lower.
+    #[serde(default)]
+    pub y: f32,
     /// Horizontal advance (px).
     pub advance: f32,
     /// Glyph bounding-box centre in local px (for centred scale/rotate).
@@ -208,9 +228,15 @@ pub struct ShapedText {
     pub glyphs: Vec<ShapedGlyph>,
     /// Total advance width of the run (px).
     pub width: f32,
-    /// Scaled ascender / descender (px, both positive).
+    /// Scaled ascender / descender (px, both positive) — of a single line.
     pub ascender: f32,
     pub descender: f32,
+    /// Baseline-to-baseline distance between lines (px).
+    #[serde(default)]
+    pub line_height: f32,
+    /// Number of lines in the run (>= 1).
+    #[serde(default)]
+    pub lines: u32,
     /// Synthetic-bold stroke width (px) to add when the family has no real face
     /// heavier than the chosen one. 0 = the outlines are already the right weight
     /// (a real Bold/Medium face was found), so the renderer just fills them.
@@ -270,6 +296,19 @@ impl ttf_parser::OutlineBuilder for PathBuilder {
 /// offers none, the difference is synthesised — italic as an outline shear,
 /// bold as an `embolden` stroke width the renderer applies.
 pub fn shape(content: &str, size: f32, font: &Font, weight: u16, italic: bool) -> ShapedText {
+    shape_aligned(content, size, font, weight, italic, TextAlign::Left)
+}
+
+/// Like [`shape`], but lays multiple lines (split on `'\n'`) out vertically and
+/// horizontally aligns each within the widest line.
+pub fn shape_aligned(
+    content: &str,
+    size: f32,
+    font: &Font,
+    weight: u16,
+    italic: bool,
+    align: TextAlign,
+) -> ShapedText {
     let (mut bytes, mut index, got_weight, got_italic) = font_data(&font.0, weight, italic);
     // Guard against an unparseable system font — fall back to a built-in.
     if ttf_parser::Face::parse(&bytes, index).is_err() || rustybuzz::Face::from_slice(&bytes, index).is_none() {
@@ -285,48 +324,104 @@ pub fn shape(content: &str, size: f32, font: &Font, weight: u16, italic: bool) -
     let ttf = ttf_parser::Face::parse(&bytes, index).expect("font is valid");
     let upem = ttf.units_per_em() as f32;
     let s = size / upem;
+    let ascender = ttf.ascender() as f32 * s;
+    let descender = (ttf.descender() as f32 * s).abs();
+    let line_height = (ttf.ascender() - ttf.descender() + ttf.line_gap()) as f32 * s;
 
-    let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(content);
-    // Auto-detect script/direction/language (RTL + Arabic for Persian).
-    buffer.guess_segment_properties();
-    let shaped = rustybuzz::shape(&rb_face, &[], buffer);
+    // Shape each line (split on '\n') independently: pen x within the line, plus
+    // the line width. Clusters stay global (offset by the line's byte start) so
+    // per-letter animation still maps glyphs to characters across lines.
+    struct LineShaped {
+        glyphs: Vec<ShapedGlyph>,
+        /// Per-glyph flag: is this glyph a space (a justification gap)?
+        space: Vec<bool>,
+        width: f32,
+    }
+    let mut lines: Vec<LineShaped> = Vec::new();
+    let mut byte_off = 0u32;
+    for raw in content.split('\n') {
+        let line_str = raw.strip_suffix('\r').unwrap_or(raw); // tolerate CRLF
+        let bytes = line_str.as_bytes();
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(line_str);
+        // Auto-detect script/direction/language (RTL + Arabic for Persian).
+        buffer.guess_segment_properties();
+        let shaped = rustybuzz::shape(&rb_face, &[], buffer);
+        let infos = shaped.glyph_infos();
+        let positions = shaped.glyph_positions();
+        let mut gs = Vec::with_capacity(infos.len());
+        let mut space = Vec::with_capacity(infos.len());
+        let mut pen = 0.0f32;
+        for (info, pos) in infos.iter().zip(positions.iter()) {
+            let gid = ttf_parser::GlyphId(info.glyph_id as u16);
+            let mut b = PathBuilder { d: String::new(), s, shear };
+            let bbox = ttf.outline_glyph(gid, &mut b);
+            // Centre of the glyph's bounding box (local px), Y already flipped.
+            let (cx, cy) = match bbox {
+                Some(r) => (
+                    (r.x_min as f32 + r.x_max as f32) * 0.5 * s,
+                    -(r.y_min as f32 + r.y_max as f32) * 0.5 * s,
+                ),
+                None => (pos.x_advance as f32 * s * 0.5, -size * 0.3),
+            };
+            gs.push(ShapedGlyph {
+                d: b.d,
+                x: pen + pos.x_offset as f32 * s,
+                y: 0.0, // filled in the layout pass below
+                advance: pos.x_advance as f32 * s,
+                cx,
+                cy,
+                cluster: byte_off + info.cluster,
+            });
+            space.push(bytes.get(info.cluster as usize) == Some(&b' '));
+            pen += pos.x_advance as f32 * s;
+        }
+        lines.push(LineShaped { glyphs: gs, space, width: pen });
+        byte_off += raw.len() as u32 + 1; // + the consumed '\n'
+    }
 
-    let infos = shaped.glyph_infos();
-    let positions = shaped.glyph_positions();
-
-    let mut glyphs = Vec::with_capacity(infos.len());
-    let mut pen = 0.0f32;
-    for (info, pos) in infos.iter().zip(positions.iter()) {
-        let gid = ttf_parser::GlyphId(info.glyph_id as u16);
-        let mut b = PathBuilder { d: String::new(), s, shear };
-        let bbox = ttf.outline_glyph(gid, &mut b);
-
-        // Centre of the glyph's bounding box (local px), Y already flipped.
-        let (cx, cy) = match bbox {
-            Some(r) => (
-                (r.x_min as f32 + r.x_max as f32) * 0.5 * s,
-                -(r.y_min as f32 + r.y_max as f32) * 0.5 * s,
-            ),
-            None => (pos.x_advance as f32 * s * 0.5, -size * 0.3),
+    // Layout pass: stack lines vertically and align each within the widest line.
+    let max_width = lines.iter().map(|l| l.width).fold(0.0f32, f32::max);
+    let line_count = lines.len().max(1) as u32;
+    let mut glyphs = Vec::new();
+    for (li, line) in lines.iter_mut().enumerate() {
+        let y_off = li as f32 * line_height;
+        let is_last = li as u32 + 1 == line_count;
+        // Justify: widen the spaces so the line fills the full width (last line and
+        // space-less lines fall back to left alignment).
+        if align == TextAlign::Justify && !is_last {
+            let gaps = line.space.iter().filter(|&&s| s).count();
+            let slack = (max_width - line.width).max(0.0);
+            if gaps > 0 && slack > 0.0 {
+                let extra = slack / gaps as f32;
+                let mut added = 0.0f32;
+                let spaces = std::mem::take(&mut line.space);
+                for (g, is_sp) in line.glyphs.drain(..).zip(spaces) {
+                    glyphs.push(ShapedGlyph { x: g.x + added, y: y_off, ..g });
+                    if is_sp {
+                        added += extra;
+                    }
+                }
+                continue;
+            }
+        }
+        let x_off = match align {
+            TextAlign::Left | TextAlign::Justify => 0.0,
+            TextAlign::Center => (max_width - line.width) * 0.5,
+            TextAlign::Right => max_width - line.width,
         };
-
-        glyphs.push(ShapedGlyph {
-            d: b.d,
-            x: pen + pos.x_offset as f32 * s,
-            advance: pos.x_advance as f32 * s,
-            cx,
-            cy,
-            cluster: info.cluster,
-        });
-        pen += pos.x_advance as f32 * s;
+        for g in line.glyphs.drain(..) {
+            glyphs.push(ShapedGlyph { x: g.x + x_off, y: y_off, ..g });
+        }
     }
 
     ShapedText {
         glyphs,
-        width: pen,
-        ascender: ttf.ascender() as f32 * s,
-        descender: (ttf.descender() as f32 * s).abs(),
+        width: max_width,
+        ascender,
+        descender,
+        line_height,
+        lines: line_count,
         embolden,
     }
 }
@@ -372,5 +467,23 @@ mod tests {
         // Italic shears the outline, so its path differs from upright.
         let ital = shape("A", 100.0, &font, 400, true);
         assert_ne!(reg.glyphs[0].d, ital.glyphs[0].d, "italic should slant the outline");
+    }
+}
+
+#[cfg(test)]
+mod justify_tests {
+    use super::*;
+
+    #[test]
+    fn justify_spreads_short_nonlast_line() {
+        // Two lines: a short first line and a long last line. Justify should push
+        // the first line's trailing glyph out toward the long line's width.
+        let font = Font("Vazirmatn".to_string());
+        let left = shape_aligned("a b\nlonger line here", 40.0, &font, 400, false, TextAlign::Left);
+        let just = shape_aligned("a b\nlonger line here", 40.0, &font, 400, false, TextAlign::Justify);
+        // Last glyph of the FIRST line (line y == 0) — its x should move right.
+        let last_left = left.glyphs.iter().filter(|g| g.y == 0.0).map(|g| g.x).fold(0.0f32, f32::max);
+        let last_just = just.glyphs.iter().filter(|g| g.y == 0.0).map(|g| g.x).fold(0.0f32, f32::max);
+        assert!(last_just > last_left + 1.0, "justify should spread the short line: {last_left} -> {last_just}");
     }
 }

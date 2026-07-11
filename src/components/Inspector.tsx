@@ -6,6 +6,7 @@ import type { Layer } from "../bindings/Layer";
 import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { LetterPreset } from "../bindings/LetterPreset";
 import type { Font } from "../bindings/Font";
+import type { TextAlign } from "../bindings/TextAlign";
 import type { Rgba } from "../bindings/Rgba";
 import type { TextStyle } from "../bindings/TextStyle";
 import type { TextFill } from "../bindings/TextFill";
@@ -753,9 +754,11 @@ function TextInspector({
   font,
   weight,
   italic,
+  align,
   fonts,
   onRefreshFonts,
   onFontStyle,
+  onSetTextAlign,
   anim,
   style,
   animators,
@@ -791,9 +794,11 @@ function TextInspector({
   font: Font;
   weight: number;
   italic: boolean;
+  align: TextAlign;
   fonts: string[];
   onRefreshFonts: () => void;
   onFontStyle: (layerId: number, weight: number, italic: boolean) => void;
+  onSetTextAlign: (layerId: number, align: TextAlign) => void;
   anim: LetterAnimation | null;
   style: TextStyle | null;
   animators: TextAnimator[];
@@ -889,6 +894,40 @@ function TextInspector({
           onChange={(e) => setContent(e.target.value)}
           onBlur={commitContent}
         />
+        <div className="row2" style={{ marginTop: 4 }}>
+          <span className="muted" style={{ flex: 1, fontSize: 11 }}>Enter adds a new line</span>
+          <button
+            type="button"
+            className="insp-btn active"
+            disabled={content === content0 && size === size0}
+            title="Apply the typed text"
+            onClick={commitContent}
+          >
+            ✓ Done
+          </button>
+        </div>
+      </label>
+
+      <label className="insp-field">
+        Alignment
+        <div className="align-row">
+          {([
+            ["left", "Left"],
+            ["center", "Centre"],
+            ["right", "Right"],
+            ["justify", "Justify"],
+          ] as const).map(([a, title]) => (
+            <button
+              key={a}
+              type="button"
+              className={"insp-btn" + (align === a ? " active" : "")}
+              title={`Align ${title.toLowerCase()}`}
+              onClick={() => onSetTextAlign(layerId, a)}
+            >
+              {title}
+            </button>
+          ))}
+        </div>
       </label>
 
       <label className="insp-field">
@@ -2130,6 +2169,7 @@ interface Props {
   onClearColorKeys: (layerId: number, color: Rgba) => void;
   onFont: (layerId: number, font: Font) => void;
   onFontStyle: (layerId: number, weight: number, italic: boolean) => void;
+  onSetTextAlign: (layerId: number, align: TextAlign) => void;
   onAnim: (layerId: number, anim: LetterAnimation | null) => void;
   onSetTextStyle: (layerId: number, style: TextStyle | null) => void;
   onSetTextAnimators: (layerId: number, animators: TextAnimator[]) => void;
@@ -2882,6 +2922,7 @@ export default function Inspector({
   onClearColorKeys,
   onFont,
   onFontStyle,
+  onSetTextAlign,
   onAnim,
   onSetTextStyle,
   onSetTextAnimators,
@@ -2979,9 +3020,11 @@ export default function Inspector({
           font={layer.kind.font}
           weight={layer.kind.weight}
           italic={layer.kind.italic}
+          align={layer.kind.align}
           fonts={fonts}
           onRefreshFonts={onRefreshFonts}
           onFontStyle={onFontStyle}
+          onSetTextAlign={onSetTextAlign}
           anim={layer.kind.anim}
           style={layer.kind.style}
           animators={layer.kind.animators}

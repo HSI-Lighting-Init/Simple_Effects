@@ -8,6 +8,7 @@ import type { TransformEdit } from "../bindings/TransformEdit";
 import type { ShapedText } from "../bindings/ShapedText";
 import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { Font } from "../bindings/Font";
+import type { TextAlign } from "../bindings/TextAlign";
 import type { FontFace } from "../bindings/FontFace";
 import type { Rgba } from "../bindings/Rgba";
 import type { Effect } from "../bindings/Effect";
@@ -144,6 +145,61 @@ export const createGridCall = (
     finalHoldMs,
   });
 
+/** Template: build a full ~`totalMs` slideshow video from `images` with optional
+ *  per-image `captions`, using the chosen `style`'s transitions, Ken Burns
+ *  motion, colour grade, and captions that fade + slide in/out. */
+export const createSlideshowTemplate = (
+  images: string[],
+  captions: string[],
+  style: string,
+  totalMs: number
+) =>
+  invoke<Project>("create_slideshow_template", {
+    images,
+    captions,
+    style,
+    totalMs,
+  });
+
+/** Template: spin `images` around a cylinder carousel (all images wrap around it,
+ *  in order) over ~`totalMs`, with a bottom-right caption per image (defaults to
+ *  "text here") that fades in/out while its image faces the camera. */
+export const createCarouselVideo = (
+  images: string[],
+  captions: string[],
+  totalMs: number
+) =>
+  invoke<Project>("create_carousel_video", {
+    images,
+    captions,
+    totalMs,
+  });
+
+/** Template: a coherent video that opens with plain Ken-Burns slides, transitions
+ *  into one or two feature segments (cylinder / cube / grid), then back to plain
+ *  slides — all cross-fading. `plain` are the plain slides; `featureA`/`featureB`
+ *  are the images for the feature segments (`kindB` empty = a single feature). */
+export const createMixedVideo = (
+  plain: string[],
+  featureA: string[],
+  featureB: string[],
+  kindA: string,
+  kindB: string,
+  totalMs: number
+) =>
+  invoke<Project>("create_mixed_video", {
+    plain,
+    featureA,
+    featureB,
+    kindA,
+    kindB,
+    totalMs,
+  });
+
+/** Rename a layer. */
+export const renameLayer = (layerId: number, name: string) =>
+  invoke<Project>("rename_layer", { layerId, name });
+
 /** Save the whole project to a .sefx file (pretty JSON). */
 export const saveProjectFile = (path: string) =>
   invoke<void>("save_project_file", { path });
@@ -222,6 +278,10 @@ export const setTextFont = (layerId: number, font: Font) =>
 /** Set a text layer's weight (100..900) and italic; re-shapes the glyphs. */
 export const setTextFontStyle = (layerId: number, weight: number, italic: boolean) =>
   invoke<Project>("set_text_font_style", { layerId, weight, italic });
+
+/** Set a text layer's horizontal alignment (multi-line runs); re-shapes. */
+export const setTextAlign = (layerId: number, align: TextAlign) =>
+  invoke<Project>("set_text_align", { layerId, align });
 
 /** Every selectable font family (built-ins first, then installed system fonts). */
 export const listFonts = () => invoke<string[]>("list_fonts");

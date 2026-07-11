@@ -870,7 +870,12 @@ fn resolve_layers(
             // placement sampled at this time so it can animate across the surface.
             let decal = layer.attach.as_ref().and_then(|d| {
                 let dims = match &layer.kind {
-                    LayerKind::Image { width, height, .. } => Some((*width as f32, *height as f32)),
+                    // A cropped image contributes its CROP aspect (so a decal wraps
+                    // the visible region, letting a carousel tile seamlessly).
+                    LayerKind::Image { width, height, crop, .. } => Some(match crop {
+                        Some(c) => (c.width, c.height),
+                        None => (*width as f32, *height as f32),
+                    }),
                     LayerKind::Text { .. } => text_dims.get(&layer.id).copied(),
                     _ => None,
                 };
