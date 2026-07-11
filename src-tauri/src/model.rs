@@ -99,6 +99,19 @@ pub enum TransitionKind {
     Wipe,
 }
 
+/// A source-pixel crop rectangle applied when drawing an `Image` layer. When set,
+/// only this region of the source image is painted (cover-cropping to fill a cell
+/// block without stretching); `None` draws the whole image.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct CropRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 /// What a layer actually draws. Internally tagged so the TS side is a clean
 /// discriminated union on `kind`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -107,8 +120,15 @@ pub enum TransitionKind {
 pub enum LayerKind {
     /// An image loaded from an absolute path on disk. `width`/`height` are the
     /// image's natural pixel size; the layer is scaled (via its transform) to
-    /// fit the comp when added.
-    Image { src: String, width: u32, height: u32 },
+    /// fit the comp when added. `crop` (optional) paints only a source sub-rect,
+    /// used by the grid templates to cover-crop the last image over empty cells.
+    Image {
+        src: String,
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        crop: Option<CropRect>,
+    },
     /// An invisible 3D box or cylinder you can spin (the rotation tracks) and
     /// move/scale on the canvas (the layer transform). It draws nothing itself —
     /// `Image` layers pinned to it (via `Decal`) render on its surface. The

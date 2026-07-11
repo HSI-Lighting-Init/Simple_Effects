@@ -91,6 +91,59 @@ export const createCylinderCarousel = (
     transition,
   });
 
+/** Template: build a rotating cube carousel from `images` — one per side face,
+ *  snapping 90° between them (hold `pauseMs`, rotate `rotateMs`). Faces cycle for
+ *  more than four images. `transition` fades the whole cube in/out. */
+export const createBoxCarousel = (
+  images: string[],
+  pauseMs: number,
+  rotateMs: number,
+  transition: string | null
+) =>
+  invoke<Project>("create_box_carousel", {
+    images,
+    pauseMs,
+    rotateMs,
+    transition,
+  });
+
+/** Template: arrange `images` into a centred grid ("photo wall") that assembles
+ *  in — each fades in staggered by `staggerMs` over `fadeMs`, holds `holdMs`,
+ *  then optionally breaks back out. Images are grouped so they move as one. */
+export const createPhotoGrid = (
+  images: string[],
+  staggerMs: number,
+  fadeMs: number,
+  holdMs: number,
+  fadeOut: boolean
+) =>
+  invoke<Project>("create_photo_grid", {
+    images,
+    staggerMs,
+    fadeMs,
+    holdMs,
+    fadeOut,
+  });
+
+/** Template "Grid call": images are introduced one by one — each shows large at
+ *  centre (`holdMs`), then shrinks/slides into its cell (`shrinkMs`) — building
+ *  the grid; once seated the whole grid zooms out and springs back (`bounceMs`
+ *  each way), then holds (`finalHoldMs`). */
+export const createGridCall = (
+  images: string[],
+  holdMs: number,
+  shrinkMs: number,
+  bounceMs: number,
+  finalHoldMs: number
+) =>
+  invoke<Project>("create_grid_call", {
+    images,
+    holdMs,
+    shrinkMs,
+    bounceMs,
+    finalHoldMs,
+  });
+
 /** Save the whole project to a .sefx file (pretty JSON). */
 export const saveProjectFile = (path: string) =>
   invoke<void>("save_project_file", { path });

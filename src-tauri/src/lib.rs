@@ -17,7 +17,7 @@ use tauri::{Manager, State};
 
 use eval::ResolvedLayer;
 use model::{
-    ColorKey, ConstrainMode, Decal, Easing, Effect, FrameCell, GridVertex, Keyframe, Layer,
+    ColorKey, ConstrainMode, CropRect, Decal, Easing, Effect, FrameCell, GridVertex, Keyframe, Layer,
     LayerKind, LetterAnimation, LetterOverride, LinkedEffectGroup, Project, Rgba, Shape2DStyle,
     SurfaceShape, Track, Transform, TransformEdit, Transition, TransitionKind, VectorShape,
 };
@@ -249,8 +249,10 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
     project.clone()
 }
 
-/// Add an adjustment layer spanning the whole comp, seeded with one "shiny
-/// clouds" effect. Its effect stack (layer.effects) lights every layer below it.
+/// Add a blank adjustment layer spanning the whole comp. Its effect stack
+/// (layer.effects) applies to every layer below it — add any effect from the
+/// inspector (colour/blur effects re-grade the layers below; shiny clouds and
+/// pattern GPU effects overlay on top).
 #[tauri::command]
 fn add_adjustment_layer(state: State<AppState>) -> Project {
     let mut project = state.project.lock().unwrap();
@@ -266,7 +268,7 @@ fn add_adjustment_layer(state: State<AppState>) -> Project {
         transform: Transform::at(0.0, 0.0),
         hidden: false,
         attach: None,
-        effects: vec![Effect::default_of("shinyclouds").unwrap()],
+        effects: vec![],
         transition_in: None,
         transition_out: None,
     });
@@ -607,7 +609,7 @@ fn add_image_layer(state: State<AppState>, path: String) -> Project {
         name,
         start_ms: 0,
         end_ms,
-        kind: LayerKind::Image { src: path, width: iw, height: ih },
+        kind: LayerKind::Image { src: path, width: iw, height: ih, crop: None },
         transform,
         hidden: false,
         attach: None,
@@ -1541,7 +1543,7 @@ fn create_cylinder_carousel(
             name,
             start_ms: 0,
             end_ms: total,
-            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1) },
+            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1), crop: None },
             transform: Transform::at(cx, cy),
             hidden: false,
             attach: Some(Decal {
@@ -1559,6 +1561,445 @@ fn create_cylinder_carousel(
     }
 
     // Make sure the comp is long enough to show one full loop.
+    if project.duration_ms < total {
+        project.duration_ms = total;
+    }
+    Ok(project.clone())
+}
+
+/// Template: build a rotating cube carousel. Images sit on the box's four side
+/// faces (front/right/back/left in rotation order); the cube snaps 90° per image,
+/// holding on each. With more than four images the faces cycle — each image lives
+/// on its face only while that face is on/near the front, swapping to the next
+/// image for that face while the face is turned to the back (culled), so the swap
+/// is invisible. The first/last image optionally fade the whole cube in/out.
+/// Extends the comp to fit. Undoable.
+#[tauri::command]
+fn create_box_carousel(
+    state: State<AppState>,
+    images: Vec<String>,
+    pause_ms: u32,
+    rotate_ms: u32,
+    transition: Option<String>,
+) -> Result<Project, String> {
+    let n = images.len();
+    if n == 0 {
+        return Err("pick at least one image".into());
+    }
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+
+    let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
+    let comp_min = project.width.min(project.height) as f32;
+    let side = comp_min * 0.5; // cube edge
+
+    let cycle = (rotate_ms + pause_ms).max(1);
+    // Sequence: hold image 0, rotate to 1, hold, … arrive on the last and hold
+    // (no wrap). One "step" spans `cycle`; the final step has no outgoing rotate.
+    let total = (n as u32 - 1) * cycle + pause_ms;
+
+    // Rotation about Y: −90° per step (one consistent direction), snapping. The
+    // engine adds rotation_y to a face's intrinsic angle (front at 0), so at step
+    // i the face whose angle ≡ 90·i is brought to the front.
+    let mut keys = Vec::with_capacity(2 * n);
+    for i in 0..n {
+        let angle = -90.0 * i as f32;
+        let t_arrive = i as u32 * cycle;
+        keys.push(Keyframe { time_ms: t_arrive, value: angle, easing: Easing::Linear });
+        if i + 1 < n {
+            // Hold key — its segment eases the rotation to the next face.
+            keys.push(Keyframe {
+                time_ms: t_arrive + pause_ms,
+                value: angle,
+                easing: Easing::EaseInOut,
+            });
+        }
+    }
+    let rotation_y = Track { keys, default: 0.0 };
+
+    let base_id = max_layer_id(&project.layers);
+    let box_id = base_id + 1;
+    project.layers.push(Layer {
+        id: box_id,
+        name: "Cube".into(),
+        start_ms: 0,
+        end_ms: total,
+        kind: LayerKind::Shape3D {
+            shape: SurfaceShape::Box,
+            width: Track::constant(side),
+            height: Track::constant(side),
+            depth: Track::constant(side),
+            rotation_x: Track::constant(0.0),
+            rotation_y,
+            rotation_z: Track::constant(0.0),
+            perspective: Track::constant(0.35),
+            focal_length: Track::constant(1200.0),
+            coverage: Track::constant(360.0),
+            radius: Track::constant(side),
+        },
+        transform: Transform::at(cx, cy),
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+
+    // Side faces in rotation order: front(0), right(3), back(1), left(2).
+    const FACE_ORDER: [u32; 4] = [0, 3, 1, 2];
+    let fade_dur = rotate_ms.max(300);
+    let mk_fade = |eng: &str| Transition {
+        kind: TransitionKind::Dissolve,
+        dur_ms: fade_dur,
+        direction: 0,
+        engine: Some(eng.to_string()),
+        params: None,
+    };
+    for (i, path) in images.iter().enumerate() {
+        let (iw, ih) = image::image_dimensions(path).unwrap_or((1, 1));
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("Image {}", i + 1));
+        let face = FACE_ORDER[i % 4];
+        // Visible window: from this face's previous back-crossing to its next one
+        // (the face is at the back at steps i±2), so the swap to the image sharing
+        // this face happens off-screen (culled) and is invisible.
+        let start_ms = ((i as i64 - 2).max(0) as u32) * cycle;
+        let end_ms = (((i as u32) + 2) * cycle).min(total);
+        // Only the first/last image carry a fade — they're front-facing at the
+        // comp start/end, so the whole cube reads as fading in / out. The rest
+        // transition via the 3D rotation itself.
+        let tin = if i == 0 { transition.as_deref().map(&mk_fade) } else { None };
+        let tout = if i + 1 == n { transition.as_deref().map(&mk_fade) } else { None };
+        project.layers.push(Layer {
+            id: box_id + 1 + i as u32,
+            name,
+            start_ms,
+            end_ms,
+            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1), crop: None },
+            transform: Transform::at(cx, cy),
+            hidden: false,
+            attach: Some(Decal {
+                shape_id: box_id,
+                face,
+                u: Track::constant(0.5),
+                v: Track::constant(0.5),
+                scale: Track::constant(0.9),
+                rotation: Track::constant(0.0),
+            }),
+            effects: vec![],
+            transition_in: tin,
+            transition_out: tout,
+        });
+    }
+
+    if project.duration_ms < total {
+        project.duration_ms = total;
+    }
+    Ok(project.clone())
+}
+
+/// Template: arrange `images` into a centred grid ("photo wall") that assembles
+/// in — each image fades in one after another (staggered by `stagger_ms`) over
+/// `fade_ms`, then holds. Auto-sizes the grid to fit the count. The images are
+/// wrapped in a group so they move / scale as one unit. `hold_ms` is how long the
+/// finished wall stays after the last image lands; `fade_out` breaks it back out
+/// Cover-crop an image of natural size `(iw, ih)` to the aspect of a `bw×bh`
+/// block: the centred source rect of that aspect, plus the uniform scale that
+/// makes the crop exactly fill the block (no stretch, no blank space).
+fn cover_crop(iw: f32, ih: f32, bw: f32, bh: f32) -> (CropRect, f32) {
+    let aspect = (bw / bh).max(1e-6);
+    let (cw, ch) = if iw / ih >= aspect {
+        (ih * aspect, ih) // image is wider than the block → crop the sides
+    } else {
+        (iw, iw / aspect) // image is taller → crop top and bottom
+    };
+    let crop = CropRect { x: (iw - cw) / 2.0, y: (ih - ch) / 2.0, width: cw, height: ch };
+    (crop, bw / cw)
+}
+
+/// at the end. Extends the comp to fit. Undoable.
+#[tauri::command]
+fn create_photo_grid(
+    state: State<AppState>,
+    images: Vec<String>,
+    stagger_ms: u32,
+    fade_ms: u32,
+    hold_ms: u32,
+    fade_out: bool,
+) -> Result<Project, String> {
+    let n = images.len();
+    if n == 0 {
+        return Err("pick at least one image".into());
+    }
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+
+    let (cw, ch) = (project.width as f32, project.height as f32);
+    // Near-square layout: cols = ceil(√n), rows = ceil(n / cols).
+    let cols = (n as f32).sqrt().ceil().max(1.0) as u32;
+    let rows = ((n as u32) + cols - 1) / cols;
+
+    // Fill ~88% of the comp, leaving a small gap between cells.
+    let margin = 0.06f32;
+    let gap = 0.04f32;
+    let cell_w = cw * (1.0 - 2.0 * margin) / cols as f32;
+    let cell_h = ch * (1.0 - 2.0 * margin) / rows as f32;
+    let inner_w = cell_w * (1.0 - gap);
+    let inner_h = cell_h * (1.0 - gap);
+    let origin_x = cw * margin;
+    let origin_y = ch * margin;
+
+    // Timeline: images land every `stagger_ms`; after the last lands, hold, then
+    // optionally break out over `fade_ms`.
+    let last_start = (n as u32 - 1) * stagger_ms;
+    let total = last_start + fade_ms + hold_ms + if fade_out { fade_ms } else { 0 };
+
+    let mk = |eng: &str, dur: u32| Transition {
+        kind: TransitionKind::Dissolve,
+        dur_ms: dur,
+        direction: 0,
+        engine: Some(eng.to_string()),
+        params: None,
+    };
+
+    // Trailing cells with no image (they sit after the last image in the last
+    // row). The last image is cover-cropped to span them so there's no blank gap.
+    let empties = rows * cols - n as u32;
+
+    let base_id = max_layer_id(&project.layers);
+    let group_id = base_id + 1;
+    let mut children: Vec<Layer> = Vec::with_capacity(n);
+    for (i, path) in images.iter().enumerate() {
+        let (iw, ih) = image::image_dimensions(path).unwrap_or((1, 1));
+        let (iwf, ihf) = (iw.max(1) as f32, ih.max(1) as f32);
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("Image {}", i + 1));
+        let col = i as u32 % cols;
+        let row = i as u32 / cols;
+        let ccy = origin_y + (row as f32 + 0.5) * cell_h;
+
+        let is_last_filler = i + 1 == n && empties > 0;
+        let (px, py, sx, sy, crop, tin, tout) = if is_last_filler {
+            // Widen this image to span its cell + the trailing empty cells in the
+            // last row (as one solid block), and cover-crop it to fill without
+            // stretching. Cropped images render through the plain node, so they
+            // carry no fade transition.
+            let block_left = origin_x + col as f32 * cell_w + cell_w * gap / 2.0;
+            let block_right = origin_x + cols as f32 * cell_w - cell_w * gap / 2.0;
+            let block_w = block_right - block_left;
+            let (crop, scale) = cover_crop(iwf, ihf, block_w, inner_h);
+            ((block_left + block_right) / 2.0, ccy, scale, scale, Some(crop), None, None)
+        } else {
+            let ccx = origin_x + (col as f32 + 0.5) * cell_w;
+            let fit = (inner_w / iwf).min(inner_h / ihf); // contain in the cell
+            (
+                ccx,
+                ccy,
+                fit,
+                fit,
+                None,
+                Some(mk("fade", fade_ms)),
+                if fade_out { Some(mk("fade", fade_ms)) } else { None },
+            )
+        };
+        let mut tf = Transform::at(px, py);
+        tf.scale_x = Track::constant(sx);
+        tf.scale_y = Track::constant(sy);
+        children.push(Layer {
+            id: group_id + 1 + i as u32,
+            name,
+            start_ms: i as u32 * stagger_ms,
+            end_ms: total,
+            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1), crop },
+            transform: tf,
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            transition_in: tin,
+            transition_out: tout,
+        });
+    }
+
+    project.layers.push(Layer {
+        id: group_id,
+        name: format!("Photo grid {cols}×{rows}"),
+        start_ms: 0,
+        end_ms: total,
+        kind: LayerKind::Group { children },
+        transform: Transform::at(0.0, 0.0),
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+
+    if project.duration_ms < total {
+        project.duration_ms = total;
+    }
+    Ok(project.clone())
+}
+
+/// Template "Grid call": images are introduced one at a time — each appears large
+/// at the centre, holds, then shrinks and slides into its grid cell — until the
+/// whole grid is built. Once every image is seated, the assembled grid zooms out
+/// a little and springs back to size. The images live in a group centred on the
+/// comp so the closing zoom scales the whole wall about its centre. Undoable.
+#[tauri::command]
+fn create_grid_call(
+    state: State<AppState>,
+    images: Vec<String>,
+    hold_ms: u32,        // how long each image stays large at centre
+    shrink_ms: u32,      // how long the shrink-and-slide to its cell takes
+    bounce_ms: u32,      // closing zoom-out / zoom-back, each direction (0 = none)
+    final_hold_ms: u32,  // how long the finished grid holds at the end
+) -> Result<Project, String> {
+    let n = images.len();
+    if n == 0 {
+        return Err("pick at least one image".into());
+    }
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+
+    let (cw, ch) = (project.width as f32, project.height as f32);
+    let (cx, cy) = (cw / 2.0, ch / 2.0);
+    // Near-square layout: cols = ceil(√n), rows = ceil(n / cols).
+    let cols = (n as f32).sqrt().ceil().max(1.0) as u32;
+    let rows = ((n as u32) + cols - 1) / cols;
+
+    let margin = 0.06f32;
+    let gap = 0.04f32;
+    let cell_w = cw * (1.0 - 2.0 * margin) / cols as f32;
+    let cell_h = ch * (1.0 - 2.0 * margin) / rows as f32;
+    let inner_w = cell_w * (1.0 - gap);
+    let inner_h = cell_h * (1.0 - gap);
+    let origin_x = cw * margin;
+    let origin_y = ch * margin;
+
+    let shrink = shrink_ms.max(1);
+    let step = hold_ms + shrink; // one image's whole intro
+    let t_all = n as u32 * step; // moment the last image is seated
+    let total = t_all + if bounce_ms > 0 { 2 * bounce_ms } else { 0 } + final_hold_ms;
+    // Trailing empty cells the last image is cover-cropped to fill (no blank gap).
+    let empties = rows * cols - n as u32;
+
+    let base_id = max_layer_id(&project.layers);
+    let group_id = base_id + 1;
+    let mut children: Vec<Layer> = Vec::with_capacity(n);
+    for (i, path) in images.iter().enumerate() {
+        let (iw, ih) = image::image_dimensions(path).unwrap_or((1, 1));
+        let (iwf, ihf) = (iw.max(1) as f32, ih.max(1) as f32);
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("Image {}", i + 1));
+        let col = i as u32 % cols;
+        let row = i as u32 / cols;
+        // Seated cell offset (from the comp centre, the group's origin, so the
+        // closing zoom scales about the centre), the big-at-centre scale, the
+        // seated scale, an optional cover-crop, and the intro fade.
+        let is_last_filler = i + 1 == n && empties > 0;
+        let (lx, ly, big_scale, cell_scale, crop, tin) = if is_last_filler {
+            // Widen the last image over the trailing empty cells (one solid block)
+            // and cover-crop it. Cropped images use the plain node → no fade.
+            let block_left = origin_x + col as f32 * cell_w + cell_w * gap / 2.0;
+            let block_right = origin_x + cols as f32 * cell_w - cell_w * gap / 2.0;
+            let block_cx = (block_left + block_right) / 2.0;
+            let block_cy = origin_y + (row as f32 + 0.5) * cell_h;
+            let (crop, scale) = cover_crop(iwf, ihf, block_right - block_left, inner_h);
+            // Big-at-centre scale from the CROPPED size, so it still fills ~90%.
+            let big = (cw * 0.9 / crop.width).min(ch * 0.9 / crop.height);
+            (block_cx - cx, block_cy - cy, big, scale, Some(crop), None)
+        } else {
+            let lx = (origin_x + (col as f32 + 0.5) * cell_w) - cx;
+            let ly = (origin_y + (row as f32 + 0.5) * cell_h) - cy;
+            let big = (cw * 0.9 / iwf).min(ch * 0.9 / ihf); // fills ~90% of the comp
+            let cell = (inner_w / iwf).min(inner_h / ihf); // contained in its cell
+            let fade = Transition {
+                kind: TransitionKind::Dissolve,
+                dur_ms: 250,
+                direction: 0,
+                engine: Some("fade".into()),
+                params: None,
+            };
+            (lx, ly, big, cell, None, Some(fade))
+        };
+
+        let t0 = i as u32 * step; // this image appears
+        let t_hold_end = t0 + hold_ms; // begins shrinking
+        let t_seated = t0 + step; // arrives in its cell
+
+        // Position/scale keyframes: hold big at centre, then ease into the cell.
+        let mut xk = vec![Keyframe { time_ms: t0, value: 0.0, easing: Easing::Linear }];
+        let mut yk = vec![Keyframe { time_ms: t0, value: 0.0, easing: Easing::Linear }];
+        let mut sk = vec![Keyframe { time_ms: t0, value: big_scale, easing: Easing::Linear }];
+        if hold_ms > 0 {
+            xk.push(Keyframe { time_ms: t_hold_end, value: 0.0, easing: Easing::EaseInOut });
+            yk.push(Keyframe { time_ms: t_hold_end, value: 0.0, easing: Easing::EaseInOut });
+            sk.push(Keyframe { time_ms: t_hold_end, value: big_scale, easing: Easing::EaseInOut });
+        }
+        xk.push(Keyframe { time_ms: t_seated, value: lx, easing: Easing::Linear });
+        yk.push(Keyframe { time_ms: t_seated, value: ly, easing: Easing::Linear });
+        sk.push(Keyframe { time_ms: t_seated, value: cell_scale, easing: Easing::Linear });
+
+        let mut tf = Transform::at(0.0, 0.0);
+        tf.x = Track { keys: xk, default: lx };
+        tf.y = Track { keys: yk, default: ly };
+        tf.scale_x = Track { keys: sk.clone(), default: cell_scale };
+        tf.scale_y = Track { keys: sk, default: cell_scale };
+
+        children.push(Layer {
+            id: group_id + 1 + i as u32,
+            name,
+            start_ms: t0,
+            end_ms: total,
+            kind: LayerKind::Image { src: path.clone(), width: iw.max(1), height: ih.max(1), crop },
+            transform: tf,
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            // A short fade so each image eases in rather than hard-popping (the
+            // cover-cropped filler uses the plain node, so it carries no fade).
+            transition_in: tin,
+            transition_out: None,
+        });
+    }
+
+    // The group is centred on the comp; its scale stays 1 during assembly, then
+    // dips and springs back once every image is seated (the closing zoom).
+    let mut gtf = Transform::at(cx, cy);
+    if bounce_ms > 0 {
+        let scale = Track {
+            keys: vec![
+                Keyframe { time_ms: 0, value: 1.0, easing: Easing::Linear },
+                Keyframe { time_ms: t_all, value: 1.0, easing: Easing::EaseInOut },
+                Keyframe { time_ms: t_all + bounce_ms, value: 0.88, easing: Easing::EaseInOut },
+                Keyframe { time_ms: t_all + 2 * bounce_ms, value: 1.0, easing: Easing::EaseOut },
+            ],
+            default: 1.0,
+        };
+        gtf.scale_x = scale.clone();
+        gtf.scale_y = scale;
+    }
+
+    project.layers.push(Layer {
+        id: group_id,
+        name: format!("Grid call {cols}×{rows}"),
+        start_ms: 0,
+        end_ms: total,
+        kind: LayerKind::Group { children },
+        transform: gtf,
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+
     if project.duration_ms < total {
         project.duration_ms = total;
     }
@@ -3405,6 +3846,9 @@ pub fn run() {
             add_shape_layer,
             add_shape2d_layer,
             create_cylinder_carousel,
+            create_box_carousel,
+            create_photo_grid,
+            create_grid_call,
             set_shape2d,
             add_frame_grid,
             filter_existing_files,

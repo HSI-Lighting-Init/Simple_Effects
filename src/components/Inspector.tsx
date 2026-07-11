@@ -3048,9 +3048,10 @@ export default function Inspector({
         <>
           <Section title="Adjustment layer">
             <p className="insp-hint">
-              Lights every layer <b>below</b> this one in the stack, over its time span.
-              Reorder it in the timeline to change what it affects. Only the{" "}
-              <b>Shiny clouds</b> effect renders on adjustment layers.
+              Applies its effects to every layer <b>below</b> this one in the stack,
+              over its time span. Reorder it in the timeline to change what it affects.
+              Add any effect — colour/blur effects re-grade the layers below; shiny
+              clouds and pattern effects overlay on top. Layer opacity sets the strength.
             </p>
           </Section>
           <EffectsSection

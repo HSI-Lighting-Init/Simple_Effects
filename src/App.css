@@ -1778,6 +1778,15 @@ body {
 }
 
 /* Template dialog: the chosen-images list. */
+.tmpl-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.tmpl-tabs .insp-btn {
+  flex: 1;
+}
+
 .tmpl-list {
   display: flex;
   flex-direction: column;

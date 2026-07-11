@@ -29,7 +29,7 @@ import type { LetterPose } from "../lib/api";
 import { sampleTrack, sampleColor } from "../lib/track";
 import { drawSurface, drawTexturedQuad } from "../lib/surface3d";
 import type { Texture } from "../lib/surface3d";
-import { applyEffects } from "../lib/effects";
+import { applyEffects, buildFilter } from "../lib/effects";
 import { renderShine } from "../lib/shinyClouds";
 import { renderGpuFx, gpuFxIsOverlay } from "../lib/gpuFx";
 import { getMediaUrl, registerVideoEl } from "../lib/media";
@@ -37,6 +37,7 @@ import { createTransition, getTransitionMeta } from "../lib/transitions";
 import type { Clip } from "../lib/transitions";
 import type { Project } from "../bindings/Project";
 import type { Layer } from "../bindings/Layer";
+import type { CropRect } from "../bindings/CropRect";
 import type { ResolvedLayer } from "../bindings/ResolvedLayer";
 import type { ResolvedEffect } from "../bindings/ResolvedEffect";
 import type { ResolvedTransition } from "../bindings/ResolvedTransition";
@@ -745,22 +746,30 @@ function ImageNode({
   r,
   interaction,
   registerRef,
+  crop,
 }: {
   src?: string;
   r: ResolvedLayer;
   interaction: Interaction;
   registerRef: NodeRef;
+  /** Optional source-pixel crop (cover-crops the image into a cell block). */
+  crop?: CropRect | null;
 }) {
   const img = useImage(src);
   if (!img) return null;
+  // Cropped: paint only the source sub-rect, drawn at the crop size (the layer
+  // transform then scales that to fill the block). Otherwise draw the whole image.
+  const w = crop ? crop.width : img.width;
+  const h = crop ? crop.height : img.height;
   return (
     <KImage
       ref={registerRef}
       image={img}
+      {...(crop ? { crop: { x: crop.x, y: crop.y, width: crop.width, height: crop.height }, width: w, height: h } : null)}
       x={r.x}
       y={r.y}
-      offsetX={img.width / 2}
-      offsetY={img.height / 2}
+      offsetX={w / 2}
+      offsetY={h / 2}
       scaleX={r.scaleX}
       scaleY={r.scaleY}
       rotation={r.rotation}
@@ -2144,10 +2153,12 @@ interface Props {
 // Canvas blend mode per shine blend index (0 Add · 1 Screen · 2 Overlay · 3 Soft).
 const SHINE_GCO = ["lighter", "screen", "overlay", "soft-light"] as const;
 
-// An adjustment layer: renders its shiny-clouds effect(s) as full-frame overlays
-// that composite (via the canvas blend mode) over EVERY layer already drawn
-// beneath it in this Konva layer. `listening={false}` so it never intercepts
-// clicks meant for the content below — select it from the timeline instead.
+// An adjustment layer: applies its effect stack to EVERY layer already drawn
+// beneath it in this Konva layer. Colour/blur effects (grayscale, brightness,
+// contrast, saturation, blur, hue, invert) re-filter the content below in place;
+// shiny-clouds + pattern GPU effects composite on top via their blend mode.
+// `listening={false}` so it never intercepts clicks meant for the content below —
+// select it from the timeline instead.
 function AdjustmentNode({
   r,
   width,
@@ -2158,17 +2169,52 @@ function AdjustmentNode({
   height: number;
 }) {
   const offRef = useRef<HTMLCanvasElement | null>(null);
-  // Overlay-type effects usable as whole-comp adjustments: shiny clouds + the
-  // GPU-overlay effects that emit a compositable pattern (not haze/vignette).
+  const snapRef = useRef<HTMLCanvasElement | null>(null);
+  // The colour/blur effects become a CSS filter string applied to the content
+  // below; overlay-type effects (shiny clouds + pattern GPU effects) composite
+  // on top via their blend mode.
+  const filterStr = buildFilter(r.effects);
   type Overlay = Extract<ResolvedEffect, { kind: "shinyclouds" | "gpuoverlay" }>;
   const overlays = r.effects.filter(
     (e): e is Overlay =>
       e.kind === "shinyclouds" ||
       (e.kind === "gpuoverlay" && gpuFxIsOverlay(e.effect))
   );
-  if (overlays.length === 0) return null;
+  if (filterStr === "none" && overlays.length === 0) return null;
   return (
     <>
+      {filterStr !== "none" && (
+        // Re-filter everything drawn below: snapshot the layer canvas, then draw
+        // it back through the CSS filter, blended by the adjustment's opacity.
+        // Done in raw device pixels (identity transform) so it's DPR-agnostic.
+        <Shape
+          listening={false}
+          perfectDrawEnabled={false}
+          sceneFunc={(kctx) => {
+            const c = (kctx as unknown as { _context?: CanvasRenderingContext2D })._context;
+            if (!c) return;
+            const cv = c.canvas;
+            if (cv.width === 0 || cv.height === 0) return;
+            const snap = snapRef.current ?? (snapRef.current = document.createElement("canvas"));
+            if (snap.width !== cv.width || snap.height !== cv.height) {
+              snap.width = cv.width;
+              snap.height = cv.height;
+            }
+            const sc = snap.getContext("2d");
+            if (!sc) return;
+            sc.clearRect(0, 0, snap.width, snap.height);
+            sc.drawImage(cv, 0, 0);
+            c.save();
+            c.setTransform(1, 0, 0, 1, 0, 0);
+            c.globalAlpha = r.opacity;
+            c.filter = filterStr;
+            c.drawImage(snap, 0, 0);
+            c.filter = "none";
+            c.globalAlpha = 1;
+            c.restore();
+          }}
+        />
+      )}
       {overlays.map((s, i) => {
         return (
           <Shape
@@ -2714,7 +2760,7 @@ export default function Preview({
         ) : r.effects.length > 0 ? (
           <EffectImageNode src={src} r={r} interaction={flatInter} registerRef={reg} />
         ) : (
-          <ImageNode src={src} r={r} interaction={flatInter} registerRef={reg} />
+          <ImageNode src={src} r={r} interaction={flatInter} registerRef={reg} crop={k.kind === "image" ? k.crop : null} />
         );
     }
     // A Flap effect on the selected image layer → a draggable dashed hinge line.

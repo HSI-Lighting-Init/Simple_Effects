@@ -24,7 +24,7 @@ import CompSettings from "./components/CompSettings";
 import UiSizeDialog from "./components/UiSizeDialog";
 import EffectEditor from "./components/EffectEditor";
 import ExportDialog from "./components/ExportDialog";
-import TemplateDialog from "./components/TemplateDialog";
+import TemplateDialog, { type TemplateSpec } from "./components/TemplateDialog";
 import TransitionsDemo from "./components/TransitionsDemo";
 import {
   addEffect,
@@ -41,6 +41,9 @@ import {
   addShapeLayer,
   addShape2dLayer,
   createCylinderCarousel,
+  createBoxCarousel,
+  createPhotoGrid,
+  createGridCall,
   setShape2d,
   setCellImage,
   clearCellImage,
@@ -726,14 +729,21 @@ export default function App() {
   // dialog). The backend assembles the cylinder + decals + snap keyframes; here we
   // just load the new images for rendering and jump the playhead to the start.
   const onCreateCarousel = useCallback(
-    async (images: string[], pauseMs: number, rotateMs: number, transition: string | null) => {
-      const p = await createCylinderCarousel(images, pauseMs, rotateMs, transition);
+    async (spec: TemplateSpec) => {
+      const p =
+        spec.kind === "cylinder"
+          ? await createCylinderCarousel(spec.images, spec.pauseMs, spec.rotateMs, spec.transition)
+          : spec.kind === "box"
+          ? await createBoxCarousel(spec.images, spec.pauseMs, spec.rotateMs, spec.transition)
+          : spec.kind === "grid"
+          ? await createPhotoGrid(spec.images, spec.staggerMs, spec.fadeMs, spec.holdMs, spec.fadeOut)
+          : await createGridCall(spec.images, spec.holdMs, spec.shrinkMs, spec.bounceMs, spec.finalHoldMs);
       setProject(p);
       durationRef.current = p.durationMs;
       await resolveImages(p);
       await loadProjectMedia(p);
       seek(0);
-      recordAction("template_carousel", { count: images.length, pauseMs, rotateMs, transition });
+      recordAction(`template_${spec.kind}`, { count: spec.images.length });
     },
     [resolveImages, loadProjectMedia, seek, recordAction]
   );
@@ -3162,9 +3172,9 @@ export default function App() {
         { separator: true },
         { label: "Multi-Frame Grid…", onClick: () => setGridDialog({ rows: 2, cols: 2 }) },
         { separator: true },
-        { label: "Template · Cylinder Carousel…", onClick: () => setShowTemplate(true) },
+        { label: "Image carousel…", onClick: () => setShowTemplate(true) },
         { separator: true },
-        { label: "Adjustment Layer (Shiny Clouds)", onClick: onAddAdjustment },
+        { label: "Adjustment Layer", onClick: onAddAdjustment },
       ],
     },
     {

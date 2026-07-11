@@ -2,6 +2,7 @@
 import type { BlendMode } from "./BlendMode";
 import type { ColorKey } from "./ColorKey";
 import type { ConstrainMode } from "./ConstrainMode";
+import type { CropRect } from "./CropRect";
 import type { Font } from "./Font";
 import type { FrameCell } from "./FrameCell";
 import type { GridVertex } from "./GridVertex";
@@ -21,7 +22,7 @@ import type { Track } from "./Track";
  * What a layer actually draws. Internally tagged so the TS side is a clean
  * discriminated union on `kind`.
  */
-export type LayerKind = { "kind": "image", src: string, width: number, height: number, } | { "kind": "shape3d", shape: SurfaceShape, 
+export type LayerKind = { "kind": "image", src: string, width: number, height: number, crop: CropRect | null, } | { "kind": "shape3d", shape: SurfaceShape, 
 /**
  * Box/cylinder dimensions (px). Keyframeable — animate the size over the
  * clip. Bare numbers in older projects deserialize as constant tracks.
