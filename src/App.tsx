@@ -2846,8 +2846,24 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
+      const tag = t?.tagName ?? "";
       const inField =
-        !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+        !!t && (tag === "INPUT" || tag === "TEXTAREA" || t.isContentEditable);
+      // Text entry: single-key shortcuts must never fire while the user is
+      // typing. Only genuine text controls count — a range/colour/checkbox is
+      // an INPUT but not something you type into.
+      const typing =
+        tag === "TEXTAREA" ||
+        (!!t && t.isContentEditable) ||
+        (tag === "INPUT" &&
+          !["range", "color", "checkbox", "radio", "button", "submit", "reset"].includes(
+            ((t as HTMLInputElement).type || "text").toLowerCase()
+          ));
+      // Any focusable form control (slider, dropdown, button, number box…). A
+      // parameter control keeps focus after you adjust it, so we use this to
+      // keep the arrows nudging that control and to blur it on Space instead of
+      // letting the key re-trigger the parameter.
+      const onControl = tag === "INPUT" || tag === "SELECT" || tag === "BUTTON" || typing;
       if (e.key === "Escape") {
         setSelectedPart(null);
         setDecomposeId(null);
@@ -2871,15 +2887,19 @@ export default function App() {
         }
         return;
       }
-      // Transport + playhead navigation (not while typing in a field).
-      if (!inField) {
-        // Space toggles play/pause globally — no need to focus the button first.
-        if (e.key === " " || e.code === "Space") {
-          e.preventDefault();
-          if (playingRef.current) stop();
-          else play();
-          return;
-        }
+      // Space toggles play/pause globally. A slider, dropdown or button often
+      // still holds focus after you adjust a parameter — blur it first so Space
+      // plays/pauses instead of re-triggering that control (or scrolling).
+      if ((e.key === " " || e.code === "Space") && !typing) {
+        e.preventDefault();
+        if (onControl) t?.blur?.();
+        if (playingRef.current) stop();
+        else play();
+        return;
+      }
+      // Playhead navigation with the arrows — only when no form control is
+      // focused, so a focused slider/number field nudges itself instead.
+      if (!onControl) {
         // Left/Right step the playhead by one frame.
         if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
           e.preventDefault();

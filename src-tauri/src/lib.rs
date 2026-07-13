@@ -4288,12 +4288,29 @@ fn find_exe(dir: &std::path::Path, name: &str, depth: u32) -> Option<std::path::
     None
 }
 
+/// Build a `Command` that never flashes a console window. The app is a GUI
+/// (windows_subsystem = "windows"), so spawning a console-subsystem child like
+/// ffmpeg or winget would otherwise pop a black cmd window — and closing that
+/// window kills the child, crashing an in-progress render. CREATE_NO_WINDOW
+/// keeps the whole thing invisible. No-op on non-Windows.
+fn quiet_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Locate an `ffmpeg` executable. Checks PATH first, then the locations winget
 /// installs to (its running-process PATH isn't refreshed after an install), then
 /// a couple of common spots.
 fn find_ffmpeg() -> Option<std::path::PathBuf> {
     // On PATH?
-    if std::process::Command::new("ffmpeg")
+    if quiet_command("ffmpeg")
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -4335,7 +4352,7 @@ fn ffmpeg_status() -> Option<String> {
 /// found, or the winget error.
 #[tauri::command]
 fn install_ffmpeg() -> Result<String, String> {
-    let out = std::process::Command::new("winget")
+    let out = quiet_command("winget")
         .args([
             "install",
             "--id",
@@ -4482,7 +4499,7 @@ fn export_video(
     // 1-second VBV buffer → tight CBR that lands on the predicted size.
     let bufsize = target.to_string();
 
-    let mut cmd = std::process::Command::new(&ffmpeg);
+    let mut cmd = quiet_command(&ffmpeg);
     cmd.args(["-y", "-i"]).arg(&tmp);
     // Audio inputs (1..=N).
     for a in &audio {
