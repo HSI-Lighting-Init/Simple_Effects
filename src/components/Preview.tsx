@@ -150,17 +150,37 @@ type Interaction = {
 
 type NodeRef = (n: Konva.Node | null) => void;
 
+// Preview render quality: caps the longest side of drawn image textures. Lower =
+// smoother playback on heavy projects, at some preview sharpness (export is
+// always full-res). "Full" still caps enormous photos so a single 42MP image
+// can't stall the editor.
+export type PreviewQuality = "full" | "balanced" | "fast";
+export const PREVIEW_QUALITY_CAP: Record<PreviewQuality, number> = {
+  full: 4096,
+  balanced: 2048,
+  fast: 1024,
+};
+export const PREVIEW_QUALITY_LABEL: Record<PreviewQuality, string> = {
+  full: "Full",
+  balanced: "Balanced",
+  fast: "Fast",
+};
+
 // A surface decal maps its texture through hundreds of clipped triangles every
 // frame, so a 10-megapixel photo wrapped on a small cylinder is what makes
 // playback stall. Cap the texture at a sane size (cached per image — built once)
 // so each per-triangle drawImage is cheap. The decal is shown small, so there's
 // no visible quality loss.
-const downscaleCache = new WeakMap<HTMLImageElement, HTMLCanvasElement>();
+// Cached per (image, cap) — a quality change asks for a different cap, so the
+// cache is keyed by size, not just the image.
+const downscaleCache = new WeakMap<HTMLImageElement, Map<number, HTMLCanvasElement>>();
 function cappedTexture(img: HTMLImageElement, max = 1280): HTMLImageElement | HTMLCanvasElement {
   const w = img.naturalWidth || img.width;
   const h = img.naturalHeight || img.height;
-  if (!w || !h || Math.max(w, h) <= max) return img;
-  const cached = downscaleCache.get(img);
+  if (!w || !h || !Number.isFinite(max) || Math.max(w, h) <= max) return img;
+  let byMax = downscaleCache.get(img);
+  if (!byMax) downscaleCache.set(img, (byMax = new Map()));
+  const cached = byMax.get(max);
   if (cached) return cached;
   const s = max / Math.max(w, h);
   const cv = document.createElement("canvas");
@@ -172,7 +192,7 @@ function cappedTexture(img: HTMLImageElement, max = 1280): HTMLImageElement | HT
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(img, 0, 0, cv.width, cv.height);
   }
-  downscaleCache.set(img, cv);
+  byMax.set(max, cv);
   return cv;
 }
 
@@ -198,22 +218,45 @@ function useImage(src?: string): HTMLImageElement | null {
 // full image, or an offscreen canvas holding ONLY the cropped region. Every image
 // renderer (plain / effects / transition) uses this, so a cover-cropped filler
 // stays cropped through fades and effects instead of flashing the whole image.
+// `maxTex` caps the drawn texture's longest side (Infinity during export for
+// full fidelity, a smaller cap for a smooth preview): a 42-megapixel photo is
+// downscaled once to something the GPU can redraw every frame cheaply, with no
+// visible difference at preview/export resolution.
+interface DrawTex {
+  /** The drawable to sample (may be downscaled for a smooth preview). */
+  tex: HTMLImageElement | HTMLCanvasElement;
+  /** Logical size the node draws at — the crop's (or image's) full dimensions,
+   *  so on-screen geometry is unchanged whatever the texture resolution. */
+  w: number;
+  h: number;
+}
 function useCroppedImage(
   img: HTMLImageElement | null,
-  crop?: CropRect | null
-): HTMLImageElement | HTMLCanvasElement | null {
+  crop?: CropRect | null,
+  maxTex = Infinity
+): DrawTex | null {
   return useMemo(() => {
     if (!img) return null;
-    if (!crop || crop.width < 1 || crop.height < 1) return img;
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+    if (!crop || crop.width < 1 || crop.height < 1) {
+      return { tex: cappedTexture(img, maxTex), w: iw, h: ih };
+    }
+    // Draw only the crop region, downscaled to the cap so the offscreen canvas
+    // isn't the full (possibly huge) crop resolution. The node still draws at the
+    // crop's logical size (w/h below), so nothing moves or resizes on screen.
+    const s = Math.min(1, maxTex / Math.max(crop.width, crop.height));
     const c = document.createElement("canvas");
-    c.width = Math.round(crop.width);
-    c.height = Math.round(crop.height);
+    c.width = Math.max(1, Math.round(crop.width * s));
+    c.height = Math.max(1, Math.round(crop.height * s));
     const cx = c.getContext("2d");
-    if (!cx) return img;
+    if (!cx) return { tex: img, w: crop.width, h: crop.height };
+    cx.imageSmoothingEnabled = true;
+    cx.imageSmoothingQuality = "high";
     cx.drawImage(img, crop.x, crop.y, crop.width, crop.height, 0, 0, c.width, c.height);
-    return c;
+    return { tex: c, w: crop.width, h: crop.height };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [img, crop?.x, crop?.y, crop?.width, crop?.height]);
+  }, [img, crop?.x, crop?.y, crop?.width, crop?.height, maxTex]);
 }
 
 // A flat image with an effect stack. Renders the image through an offscreen
@@ -226,19 +269,20 @@ function EffectImageNode({
   interaction,
   registerRef,
   crop,
+  maxTex,
 }: {
   src?: string;
   r: ResolvedLayer;
   interaction: Interaction;
   registerRef: NodeRef;
   crop?: CropRect | null;
+  maxTex?: number;
 }) {
   const img = useImage(src);
-  const base = useCroppedImage(img, crop);
+  const res = useCroppedImage(img, crop, maxTex);
   const offRef = useRef<HTMLCanvasElement | null>(null);
-  if (!base) return null;
-  const w = base.width;
-  const h = base.height;
+  if (!res) return null;
+  const { tex: base, w, h } = res;
 
   return (
     <Shape
@@ -255,8 +299,10 @@ function EffectImageNode({
       opacity={r.opacity}
       sceneFunc={(ctx) => {
         const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
-        const tex = applyEffects(off, base, w, h, r.effects);
-        (ctx as unknown as CanvasRenderingContext2D).drawImage(tex, 0, 0);
+        // Run the effect stack at the (possibly reduced) texture resolution, then
+        // draw it stretched to the logical size — cheap, and no visible change.
+        const tex = applyEffects(off, base, base.width, base.height, r.effects);
+        (ctx as unknown as CanvasRenderingContext2D).drawImage(tex, 0, 0, w, h);
       }}
       hitFunc={(ctx, shape) => {
         ctx.beginPath();
@@ -283,6 +329,7 @@ function TransitionImageNode({
   interaction,
   registerRef,
   crop,
+  maxTex,
 }: {
   src?: string;
   r: ResolvedLayer;
@@ -290,14 +337,14 @@ function TransitionImageNode({
   interaction: Interaction;
   registerRef: NodeRef;
   crop?: CropRect | null;
+  maxTex?: number;
 }) {
   const img = useImage(src);
-  const base = useCroppedImage(img, crop);
+  const res = useCroppedImage(img, crop, maxTex);
   const bRef = useRef<HTMLCanvasElement | null>(null);
   const offRef = useRef<HTMLCanvasElement | null>(null);
-  if (!base) return null;
-  const w = base.width;
-  const h = base.height;
+  if (!res) return null;
+  const { tex: base, w, h } = res;
   return (
     <Shape
       ref={registerRef}
@@ -785,6 +832,7 @@ function ImageNode({
   interaction,
   registerRef,
   crop,
+  maxTex,
 }: {
   src?: string;
   r: ResolvedLayer;
@@ -792,18 +840,22 @@ function ImageNode({
   registerRef: NodeRef;
   /** Optional source-pixel crop (cover-crops the image into a cell block). */
   crop?: CropRect | null;
+  maxTex?: number;
 }) {
   const img = useImage(src);
   // Draw the cropped canvas (or the full image) — never the full image at the
-  // crop's scale, which is what caused the fullscreen flash.
-  const drawImg = useCroppedImage(img, crop);
-  if (!drawImg) return null;
-  const w = drawImg.width;
-  const h = drawImg.height;
+  // crop's scale, which is what caused the fullscreen flash. `w`/`h` are the
+  // logical size; the texture may be downscaled for a smooth preview, and Konva
+  // stretches it to `w`/`h`, so on-screen size is unchanged.
+  const res = useCroppedImage(img, crop, maxTex);
+  if (!res) return null;
+  const { tex: drawImg, w, h } = res;
   return (
     <KImage
       ref={registerRef}
       image={drawImg}
+      width={w}
+      height={h}
       x={r.x}
       y={r.y}
       offsetX={w / 2}
@@ -1711,7 +1763,7 @@ function DecalNode({
   const isText = layer.kind.kind === "text";
   const imgTex = useImage(isText ? undefined : src);
   const decalCrop = layer.kind.kind === "image" ? layer.kind.crop : null;
-  const croppedTex = useCroppedImage(imgTex, decalCrop);
+  const croppedTex = useCroppedImage(imgTex, decalCrop)?.tex ?? null;
   const shaped = useShaped(layer);
   const textOffRef = useRef<HTMLCanvasElement | null>(null);
   const fxOffRef = useRef<HTMLCanvasElement | null>(null);
@@ -2192,6 +2244,11 @@ interface Props {
   /** Move a Flap effect's hinge axis (drag the dashed line in the preview). */
   onSetFlapAxis?: (layerId: number, index: number, axis: number) => void;
   exporting?: boolean;
+  /** Preview render quality — caps the texture size used for drawing so heavy
+   *  projects play smoothly. Ignored during export (always full fidelity). */
+  previewQuality?: PreviewQuality;
+  /** Cycle the preview quality (toolbar control). */
+  onSetPreviewQuality?: (q: PreviewQuality) => void;
   /** When set (during export with "show FPS" on), burn this fps value into the
    *  rendered frames as a corner label. Null = no overlay. */
   fpsOverlay?: number | null;
@@ -2416,9 +2473,14 @@ export default function Preview({
   onEnterGroup,
   onSetFlapAxis,
   exporting = false,
+  previewQuality = "balanced",
+  onSetPreviewQuality,
   fpsOverlay = null,
   stageRef,
 }: Props) {
+  // Longest-side cap for drawn textures. Export always renders at full fidelity;
+  // in the editor a cap keeps heavy (multi-megapixel) images cheap to redraw.
+  const maxTex = exporting ? Infinity : PREVIEW_QUALITY_CAP[previewQuality];
   const wrapRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   // User zoom (1 = fit-to-window) and pan offset (px), driven by the scroll wheel.
@@ -2809,11 +2871,11 @@ export default function Preview({
       const crop = k.kind === "image" ? k.crop : null;
       node =
         r.transition?.engine && src ? (
-          <TransitionImageNode src={src} r={r} transition={r.transition} interaction={flatInter} registerRef={reg} crop={crop} />
+          <TransitionImageNode src={src} r={r} transition={r.transition} interaction={flatInter} registerRef={reg} crop={crop} maxTex={maxTex} />
         ) : r.effects.length > 0 ? (
-          <EffectImageNode src={src} r={r} interaction={flatInter} registerRef={reg} crop={crop} />
+          <EffectImageNode src={src} r={r} interaction={flatInter} registerRef={reg} crop={crop} maxTex={maxTex} />
         ) : (
-          <ImageNode src={src} r={r} interaction={flatInter} registerRef={reg} crop={crop} />
+          <ImageNode src={src} r={r} interaction={flatInter} registerRef={reg} crop={crop} maxTex={maxTex} />
         );
     }
     // A Flap effect on the selected image layer → a draggable dashed hinge line.
@@ -2948,6 +3010,19 @@ export default function Preview({
         >
           <span className="preview-zoom-pct">{Math.round(userZoom * 100)}%</span>
           <span className="preview-zoom-fit">⤢ Fit</span>
+        </button>
+      )}
+      {!exporting && scale > 0 && onSetPreviewQuality && (
+        <button
+          className="preview-quality"
+          title="Preview quality — lower = smoother playback on heavy projects. Exports are always full quality."
+          onClick={() => {
+            const order: PreviewQuality[] = ["full", "balanced", "fast"];
+            onSetPreviewQuality(order[(order.indexOf(previewQuality) + 1) % order.length]);
+          }}
+        >
+          <span className="preview-quality-dot">◐</span>
+          {PREVIEW_QUALITY_LABEL[previewQuality]}
         </button>
       )}
     </div>

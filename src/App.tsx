@@ -4,7 +4,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
-import Preview from "./components/Preview";
+import Preview, { type PreviewQuality } from "./components/Preview";
 import Timeline from "./components/Timeline";
 import Inspector from "./components/Inspector";
 import MediaPanel from "./components/MediaPanel";
@@ -17,6 +17,7 @@ import {
   seekVideosForFrame,
   IMPORT_EXTENSIONS,
 } from "./lib/media";
+import { hasAudio, waveformPng } from "./lib/waveform";
 import RecorderPanel from "./components/RecorderPanel";
 import ContextMenu from "./components/ContextMenu";
 import MenuBar, { type MenuDef } from "./components/MenuBar";
@@ -299,6 +300,23 @@ export default function App() {
   const [media, setMedia] = useState<string[]>([]);
   // Thumbnails for non-image media (video poster frames), path → data URL.
   const [mediaThumbs, setMediaThumbs] = useState<Record<string, string>>({});
+  // Waveform strips for audio layers, source path → PNG data URL. Loaded lazily
+  // from the decoded audio; `wavesLoadedRef` guards against re-decoding.
+  const [waveforms, setWaveforms] = useState<Record<string, string>>({});
+  const wavesLoadedRef = useRef<Set<string>>(new Set());
+  // Preview render quality (persisted). Lower caps texture size for smoother
+  // playback on heavy projects; export is always full quality.
+  const [previewQuality, setPreviewQualityState] = useState<PreviewQuality>(
+    () => (localStorage.getItem("sefx.previewQuality") as PreviewQuality) || "balanced"
+  );
+  const setPreviewQuality = useCallback((q: PreviewQuality) => {
+    setPreviewQualityState(q);
+    try {
+      localStorage.setItem("sefx.previewQuality", q);
+    } catch {
+      /* ignore */
+    }
+  }, []);
   // True while an OS file drag is hovering the window (shows the drop overlay).
   const [fileDragging, setFileDragging] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -835,6 +853,27 @@ export default function App() {
     []
   );
 
+  // Lazily decode a waveform strip for every audio layer's source (from import
+  // or a reopened project). Cached per path so each file decodes at most once.
+  useEffect(() => {
+    if (!project) return;
+    const srcs: string[] = [];
+    const scan = (layers: typeof project.layers) => {
+      for (const l of layers) {
+        if (l.kind.kind === "audio") srcs.push(l.kind.src);
+        else if (l.kind.kind === "group") scan(l.kind.children);
+      }
+    };
+    scan(project.layers);
+    for (const src of srcs) {
+      if (wavesLoadedRef.current.has(src)) continue;
+      wavesLoadedRef.current.add(src);
+      waveformPng(src)
+        .then((png) => png && setWaveforms((prev) => ({ ...prev, [src]: png })))
+        .catch(() => {});
+    }
+  }, [project]);
+
   // Accepts dialog or OS-drop paths. Adds to the bin (dedup) and persists the new
   // list onto the project (so it's saved with the file) — the project is the
   // single source of truth for the bin.
@@ -867,9 +906,12 @@ export default function App() {
     const kind = mediaKind(path);
     // Capture the layer selected at add-time — the new one slots just above it.
     const above = selectedIdRef.current;
+    const at = Math.round(timeRef.current);
     let p: Project;
+    let videoDurationMs = 0;
     if (kind === "video") {
       const meta = await getVideoMeta(path).catch(() => ({ width: 1280, height: 720, durationMs: 0 }));
+      videoDurationMs = meta.durationMs;
       p = await addVideoLayer(path, meta.width, meta.height, meta.durationMs);
     } else if (kind === "audio") {
       const meta = await getAudioMeta(path).catch(() => ({ durationMs: 0 }));
@@ -881,8 +923,18 @@ export default function App() {
     const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
     // Drop it at the playhead and directly above the previously selected layer.
     if (newId != null) {
-      p = await placeLayer(newId, Math.round(timeRef.current), above);
+      p = await placeLayer(newId, at, above);
       setSelectedId(newId);
+    }
+    // A video with an audio track gets its own editable audio layer, aligned to
+    // the video. Preview sound still comes from the video element, but this is
+    // what the exporter muxes — so the video's audio now lands in the output too
+    // (and the layer shows its waveform).
+    if (kind === "video" && newId != null && (await hasAudio(path).catch(() => false))) {
+      let pa = await addAudioLayer(path, videoDurationMs);
+      const audId = pa.layers.length ? pa.layers[pa.layers.length - 1].id : null;
+      if (audId != null) pa = await placeLayer(audId, at, newId);
+      p = pa;
     }
     setProject(p);
     durationRef.current = p.durationMs;
@@ -3508,6 +3560,8 @@ export default function App() {
             onEnterGroup={onEnterGroup}
             onSetFlapAxis={onSetFlapAxis}
             exporting={exporting}
+            previewQuality={previewQuality}
+            onSetPreviewQuality={setPreviewQuality}
             fpsOverlay={fpsOverlay}
           />
           {exporting && (
@@ -3630,6 +3684,8 @@ export default function App() {
       <Timeline
         project={project}
         time={time}
+        waveforms={waveforms}
+        thumbs={{ ...images, ...mediaThumbs }}
         selectedId={selectedId}
         selectedIds={selectedIds}
         onSelect={selectLayer}

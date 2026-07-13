@@ -111,6 +111,10 @@ function cellKeyTimes(cell: FrameCell): number[] {
 interface Props {
   project: Project;
   time: number;
+  /** Waveform PNG data URLs for audio layers, keyed by source path. */
+  waveforms?: Record<string, string>;
+  /** Thumbnail data URLs (image data URLs / video posters), keyed by source. */
+  thumbs?: Record<string, string>;
   selectedId: number | null;
   /** Every selected layer id (multi-select) — all get highlighted. */
   selectedIds: number[];
@@ -159,6 +163,8 @@ interface Props {
 export default function Timeline({
   project,
   time,
+  waveforms,
+  thumbs,
   selectedId,
   selectedIds,
   onSelect,
@@ -203,6 +209,19 @@ export default function Timeline({
   >(null);
   // Grid layers whose per-cell child rows are expanded in the timeline.
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  // Image/video layers expanded to a tall row that previews their thumbnail, so
+  // you can tell which clip a block is straight from the timeline.
+  const [tallRows, setTallRows] = useState<Set<number>>(new Set());
+  const toggleTall = (id: number) =>
+    setTallRows((s) => {
+      const n = new Set(s);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+  // Source thumbnail for a layer (image data URL or video poster), if any.
+  const layerThumb = (l: Layer): string | undefined =>
+    l.kind.kind === "image" || l.kind.kind === "video" ? thumbs?.[l.kind.src] : undefined;
+  const isTall = (l: Layer) => tallRows.has(l.id) && !!layerThumb(l);
   // Auto-expand a grid's cell rows the first time it's selected (discoverable);
   // the chevron can still collapse it afterwards. Idempotent, so it won't fight
   // a manual collapse until the selection changes again.
@@ -891,6 +910,7 @@ export default function Timeline({
             <Fragment key={l.id}>
             <div
               data-layer-id={l.id}
+              style={isTall(l) ? { height: 66 } : undefined}
               className={
                 "tl-label" +
                 (selectedIds.includes(l.id) ? " selected" : "") +
@@ -961,6 +981,18 @@ export default function Timeline({
                 </span>
               )}
               <span className="tl-label-kind">{l.kind.kind}</span>
+              {(l.kind.kind === "image" || l.kind.kind === "video") && layerThumb(l) && (
+                <button
+                  className="tl-thumb-toggle"
+                  title={isTall(l) ? "Collapse thumbnail" : "Show thumbnail"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleTall(l.id);
+                  }}
+                >
+                  {isTall(l) ? "▾" : "▸"}
+                </button>
+              )}
               <button
                 className="tl-del"
                 title="Delete layer"
@@ -1038,7 +1070,10 @@ export default function Timeline({
             const showChildren = gridExpanded(l);
             return (
               <Fragment key={l.id}>
-              <div className={"tl-track" + (l.hidden ? " hidden" : "")}>
+              <div
+                className={"tl-track" + (l.hidden ? " hidden" : "")}
+                style={isTall(l) ? { height: 66 } : undefined}
+              >
                 <div
                   data-lid={l.id}
                   className={"tl-block" + (selectedIds.includes(l.id) ? " selected" : "")}
@@ -1072,6 +1107,18 @@ export default function Timeline({
                       className="tl-tr tl-tr-out"
                       style={{ width: `${Math.min(60, (l.transitionOut.durMs / span) * 100)}%` }}
                       title={`Out: ${l.transitionOut.engine ?? l.transitionOut.kind} · ${(l.transitionOut.durMs / 1000).toFixed(2)}s`}
+                    />
+                  )}
+                  {l.kind.kind === "audio" && waveforms?.[l.kind.src] && (
+                    <div
+                      className="tl-wave"
+                      style={{ backgroundImage: `url(${waveforms[l.kind.src]})` }}
+                    />
+                  )}
+                  {isTall(l) && layerThumb(l) && (
+                    <div
+                      className="tl-thumb"
+                      style={{ backgroundImage: `url(${layerThumb(l)})` }}
                     />
                   )}
                   <span className="tl-block-name">{l.name}</span>

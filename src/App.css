@@ -1627,6 +1627,30 @@ body {
   color: var(--muted);
 }
 
+/* Preview quality cycle button — sits just right of the zoom/Fit control. */
+.preview-quality {
+  position: absolute;
+  left: 96px;
+  bottom: 10px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(18, 18, 28, 0.78);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.preview-quality:hover {
+  background: rgba(40, 40, 58, 0.92);
+}
+.preview-quality-dot {
+  color: var(--muted);
+}
+
 /* Transitions demo */
 .tr-demo {
   max-height: 88vh;
@@ -2230,6 +2254,44 @@ body {
   cursor: grabbing;
 }
 
+/* Thumbnail preview filling an expanded image/video block (cover, behind name). */
+.tl-thumb {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-repeat: no-repeat;
+  background-size: cover;
+  background-position: center;
+  opacity: 0.95;
+  pointer-events: none;
+}
+
+/* Small chevron in the label row that expands an image/video into a tall,
+   thumbnail-previewing track. */
+.tl-thumb-toggle {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 4px;
+  line-height: 1;
+}
+.tl-thumb-toggle:hover {
+  color: var(--text);
+}
+
+/* Audio waveform strip filling an audio layer's block (stretches with zoom). */
+.tl-wave {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  background-position: center;
+  pointer-events: none;
+}
+
 /* A selected block (single or multi-select) gets a bright ring. */
 .tl-block.selected {
   opacity: 1;
@@ -2305,7 +2367,8 @@ body {
   color: rgba(255, 255, 255, 0.92);
   white-space: nowrap;
   pointer-events: none;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  z-index: 1;
 }
 
 .tl-kf {
