@@ -51,6 +51,7 @@ import {
   createCarouselVideo,
   createMixedVideo,
   createBeforeAfter,
+  setImageCrop,
   renameLayer,
   setShape2d,
   setCellImage,
@@ -821,6 +822,17 @@ export default function App() {
       recordAction("template_before_after", { orientation });
     },
     [resolveImages, loadProjectMedia, seek, recordAction]
+  );
+
+  // Pan an image layer's crop window within its source (reframe a cropped image,
+  // e.g. a before/after slide). The image is already loaded — only the drawn
+  // region changes — so a project update is enough to re-render.
+  const onSetImageCrop = useCallback(
+    async (layerId: number, x: number, y: number) => {
+      const p = await setImageCrop(layerId, x, y);
+      setProject(p);
+    },
+    []
   );
 
   // Accepts dialog or OS-drop paths. Adds to the bin (dedup) and persists the new
@@ -3564,6 +3576,7 @@ export default function App() {
           onSetLayerTransition={onSetLayerTransition}
           transformNow={transformNow}
           onCommitTransform={onCommit}
+          onSetImageCrop={onSetImageCrop}
           selectedCell={selectedCell?.layerId === selectedLayer?.id ? selectedCell?.cell ?? null : null}
           cellZoomNow={cellZoomNow}
           cellMerged={cellMerged}

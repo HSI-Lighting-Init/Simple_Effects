@@ -3,6 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import SearchSelect, { type SelGroup } from "./SearchSelect";
 import type { Layer } from "../bindings/Layer";
+import type { CropRect } from "../bindings/CropRect";
 import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { LetterPreset } from "../bindings/LetterPreset";
 import type { Font } from "../bindings/Font";
@@ -1634,6 +1635,45 @@ function TransformSection({
   );
 }
 
+// Reposition an image layer's crop window within its source — pan the framing
+// without changing the crop size (so a frame-shaped crop keeps filling the
+// frame). Only shows the axis that actually has slack to move along.
+function CropSection({
+  layerId,
+  srcW,
+  srcH,
+  crop,
+  onSetCrop,
+}: {
+  layerId: number;
+  srcW: number;
+  srcH: number;
+  crop: CropRect;
+  onSetCrop: (layerId: number, x: number, y: number) => void;
+}) {
+  const slackX = Math.max(0, srcW - crop.width);
+  const slackY = Math.max(0, srcH - crop.height);
+  const pct = (v: number, slack: number) => (slack > 0 ? Math.round((v / slack) * 100) : 0);
+  const fromPct = (p: number, slack: number) => (Math.max(0, Math.min(100, p)) / 100) * slack;
+  return (
+    <Section title="Crop / Framing">
+      {slackX > 0.5 &&
+        effSlider("Horizontal", pct(crop.x, slackX), 0, 100, 1, (v) =>
+          onSetCrop(layerId, fromPct(v, slackX), crop.y)
+        )}
+      {slackY > 0.5 &&
+        effSlider("Vertical", pct(crop.y, slackY), 0, 100, 1, (v) =>
+          onSetCrop(layerId, crop.x, fromPct(v, slackY))
+        )}
+      {slackX <= 0.5 && slackY <= 0.5 ? (
+        <p className="insp-hint">This image already fills the frame — nothing to reposition.</p>
+      ) : (
+        <p className="insp-hint">Slide to choose which part of the image shows in the frame.</p>
+      )}
+    </Section>
+  );
+}
+
 // One row of the effect stack — the controls vary by effect kind. Live values
 // come from the sampled effect; the sliders key at the playhead so effects
 // animate (e.g. a wipe's Position swept 0→1).
@@ -2188,6 +2228,8 @@ interface Props {
   transformNow: { x: number; y: number; scaleX: number; scaleY: number; rotation: number; opacity: number } | null;
   /** Keyframe a transform edit at the playhead (numeric position/scale fields). */
   onCommitTransform: (layerId: number, edit: TransformEdit) => void;
+  /** Pan an image layer's crop window within its source (reframe it). */
+  onSetImageCrop: (layerId: number, x: number, y: number) => void;
   /** Selected grid cell (row-major index) for a FrameGrid layer, or null. */
   selectedCell: number | null;
   /** The selected cell's zoom at the playhead (for the slider readout). */
@@ -2979,6 +3021,7 @@ export default function Inspector({
   onUnlinkCell,
   transformNow,
   onCommitTransform,
+  onSetImageCrop,
 }: Props) {
   const decalControls = layer && (layer.kind.kind === "image" || layer.kind.kind === "text") && (
     <DecalControls
@@ -3008,6 +3051,15 @@ export default function Inspector({
       )}
       {layer && transformNow && (
         <TransformSection layerId={layer.id} tr={transformNow} compW={compWidth} compH={compHeight} onCommit={onCommitTransform} />
+      )}
+      {layer && layer.kind.kind === "image" && layer.kind.crop && (
+        <CropSection
+          layerId={layer.id}
+          srcW={layer.kind.width}
+          srcH={layer.kind.height}
+          crop={layer.kind.crop}
+          onSetCrop={onSetImageCrop}
+        />
       )}
       {layer && layer.kind.kind === "text" && (
         <TextInspector

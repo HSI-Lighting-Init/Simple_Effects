@@ -161,6 +161,11 @@ export const createSlideshowTemplate = (
     totalMs,
   });
 
+/** Pan an image layer's crop window within its source (reframe it). Only the
+ *  crop origin moves; its size/aspect is preserved. Clamped to source bounds. */
+export const setImageCrop = (layerId: number, x: number, y: number) =>
+  invoke<Project>("set_image_crop", { layerId, x, y });
+
 /** Template: a before/after reveal — `before` fills the frame and `after` is
  *  revealed by a divider bar that sweeps across (`orientation` "horizontal" or
  *  "vertical") over ~`totalMs`, pushing the before image out to one side. */

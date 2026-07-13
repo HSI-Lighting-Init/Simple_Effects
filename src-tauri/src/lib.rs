@@ -2119,6 +2119,42 @@ fn ramp2(t0: u32, v0: f32, t1: u32, v1: f32, e: Easing) -> Track {
     }
 }
 
+/// Reposition an image layer's crop window within its source (pan the framing).
+/// Only the crop's `(x, y)` origin moves — its size (and thus aspect / frame-fill)
+/// is preserved — so templates that rely on a frame-shaped crop (e.g. the
+/// before/after wipe) stay aligned. Clamped to the source bounds. Undoable.
+#[tauri::command]
+fn set_image_crop(state: State<AppState>, layer_id: u32, x: f32, y: f32) -> Result<Project, String> {
+    fn set_in(layers: &mut [Layer], id: u32, x: f32, y: f32) -> Option<bool> {
+        for l in layers.iter_mut() {
+            if l.id == id {
+                if let LayerKind::Image { width, height, crop, .. } = &mut l.kind {
+                    if let Some(c) = crop {
+                        let max_x = (*width as f32 - c.width).max(0.0);
+                        let max_y = (*height as f32 - c.height).max(0.0);
+                        c.x = x.clamp(0.0, max_x);
+                        c.y = y.clamp(0.0, max_y);
+                        return Some(true);
+                    }
+                }
+                return Some(false); // found, but nothing to crop
+            }
+            if let LayerKind::Group { children } = &mut l.kind {
+                if let Some(r) = set_in(children, id, x, y) {
+                    return Some(r);
+                }
+            }
+        }
+        None
+    }
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    match set_in(&mut project.layers, layer_id, x, y) {
+        Some(true) => Ok(project.clone()),
+        _ => Err("that layer has no crop to adjust".into()),
+    }
+}
+
 /// Template: a before/after reveal. `before` fills the frame; `after` sits on
 /// top with a hard directional `Wipe` whose edge sweeps across, so the before
 /// image is progressively pushed out to one side while the after replaces it. A
@@ -5022,6 +5058,7 @@ pub fn run() {
             create_photo_grid,
             create_grid_call,
             create_before_after,
+            set_image_crop,
             create_slideshow_template,
             create_carousel_video,
             create_mixed_video,
