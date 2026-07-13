@@ -27,6 +27,7 @@ import ExportDialog from "./components/ExportDialog";
 import TemplateDialog, { type TemplateSpec } from "./components/TemplateDialog";
 import VideoTemplateDialog, { VIDEO_STYLES } from "./components/VideoTemplateDialog";
 import MixedTemplateDialog, { MIXED_TEMPLATES } from "./components/MixedTemplateDialog";
+import BeforeAfterDialog from "./components/BeforeAfterDialog";
 import TransitionsDemo from "./components/TransitionsDemo";
 import {
   addEffect,
@@ -49,6 +50,7 @@ import {
   createSlideshowTemplate,
   createCarouselVideo,
   createMixedVideo,
+  createBeforeAfter,
   renameLayer,
   setShape2d,
   setCellImage,
@@ -319,6 +321,7 @@ export default function App() {
   const [showTemplate, setShowTemplate] = useState(false);
   const [videoStyle, setVideoStyle] = useState<string | null>(null);
   const [mixedTemplate, setMixedTemplate] = useState<string | null>(null);
+  const [showBeforeAfter, setShowBeforeAfter] = useState(false);
   // Open transition picker: which layer(s) + which slot to set.
   const [transitionPick, setTransitionPick] = useState<{ ids: number[]; slot: "in" | "out" } | null>(null);
   // Optional export range [inMs, outMs] — the section of the comp to render.
@@ -803,6 +806,19 @@ export default function App() {
       await loadProjectMedia(p);
       seek(0);
       recordAction("template_mixed", { kindA, kindB, count: plain.length + featureA.length + featureB.length });
+    },
+    [resolveImages, loadProjectMedia, seek, recordAction]
+  );
+
+  const onCreateBeforeAfter = useCallback(
+    async (before: string, after: string, orientation: string, totalMs: number) => {
+      const p = await createBeforeAfter(before, after, orientation, totalMs);
+      setProject(p);
+      durationRef.current = p.durationMs;
+      await resolveImages(p);
+      await loadProjectMedia(p);
+      seek(0);
+      recordAction("template_before_after", { orientation });
     },
     [resolveImages, loadProjectMedia, seek, recordAction]
   );
@@ -3266,6 +3282,8 @@ export default function App() {
           label: `${t.label}…`,
           onClick: () => setMixedTemplate(t.id),
         })),
+        { separator: true },
+        { label: "Before / After…", onClick: () => setShowBeforeAfter(true) },
       ],
     },
     {
@@ -3822,6 +3840,13 @@ export default function App() {
           templateId={mixedTemplate}
           onCreate={onCreateMixed}
           onClose={() => setMixedTemplate(null)}
+        />
+      )}
+
+      {showBeforeAfter && (
+        <BeforeAfterDialog
+          onCreate={onCreateBeforeAfter}
+          onClose={() => setShowBeforeAfter(false)}
         />
       )}
 

@@ -2119,6 +2119,133 @@ fn ramp2(t0: u32, v0: f32, t1: u32, v1: f32, e: Easing) -> Track {
     }
 }
 
+/// Template: a before/after reveal. `before` fills the frame; `after` sits on
+/// top with a hard directional `Wipe` whose edge sweeps across, so the before
+/// image is progressively pushed out to one side while the after replaces it. A
+/// thin divider bar rides the seam through the sweep. `orientation` is
+/// "horizontal" (bar sweeps left→right) or "vertical" (top→bottom). Undoable.
+#[tauri::command]
+fn create_before_after(
+    state: State<AppState>,
+    before: String,
+    after: String,
+    orientation: String,
+    total_ms: u32,
+) -> Result<Project, String> {
+    if before.trim().is_empty() || after.trim().is_empty() {
+        return Err("pick a before and an after image".into());
+    }
+    let vertical = orientation.eq_ignore_ascii_case("vertical");
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+
+    let (cw, ch) = (project.width as f32, project.height as f32);
+    let (cx, cy) = (cw / 2.0, ch / 2.0);
+    let total = total_ms.max(1500);
+    // Hold on the before, sweep across, hold on the after.
+    let hold = (total as f32 * 0.15).max(350.0) as u32;
+    let sweep_start = hold;
+    let sweep_end = total.saturating_sub(hold).max(sweep_start + 300);
+
+    // Cover the frame by cropping to the frame aspect (no stretch), centred. The
+    // crop makes each rendered layer exactly frame-shaped, so the wipe's seam
+    // (mapped across the layer) and the divider bar (in frame coords) stay in
+    // lockstep whatever the image aspect.
+    let cover_tf = |path: &str| -> (Transform, u32, u32, CropRect) {
+        let (iw, ih) = image::image_dimensions(path).unwrap_or((1, 1));
+        let (iwf, ihf) = (iw.max(1) as f32, ih.max(1) as f32);
+        let (crop, scale) = cover_crop(iwf, ihf, cw, ch);
+        let mut tf = Transform::at(cx, cy);
+        tf.scale_x = Track::constant(scale);
+        tf.scale_y = Track::constant(scale);
+        (tf, iw.max(1), ih.max(1), crop)
+    };
+
+    let base_id = max_layer_id(&project.layers);
+    let mut next = base_id + 1;
+
+    // Before — full frame, underneath.
+    let (tf_a, aw, ah, crop_a) = cover_tf(&before);
+    project.layers.push(Layer {
+        id: next,
+        name: "Before".into(),
+        start_ms: 0,
+        end_ms: total,
+        kind: LayerKind::Image { src: before.clone(), width: aw, height: ah, crop: Some(crop_a) },
+        transform: tf_a,
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+    next += 1;
+
+    // After — on top, revealed by a hard wipe whose edge sweeps across. angle 0
+    // reveals it from the left (before slides out to the right); 90 from the top.
+    let (tf_b, bw, bh, crop_b) = cover_tf(&after);
+    project.layers.push(Layer {
+        id: next,
+        name: "After".into(),
+        start_ms: 0,
+        end_ms: total,
+        kind: LayerKind::Image { src: after.clone(), width: bw, height: bh, crop: Some(crop_b) },
+        transform: tf_b,
+        hidden: false,
+        attach: None,
+        effects: vec![Effect::Wipe {
+            angle: if vertical { 90.0 } else { 0.0 },
+            position: Track::ramp(0.0, sweep_start, 1.0, sweep_end, Easing::EaseInOut),
+            softness: Track::constant(0.0),
+            invert: false,
+        }],
+        transition_in: None,
+        transition_out: None,
+    });
+    next += 1;
+
+    // Divider bar — a thin white rectangle spanning the frame, riding the seam.
+    // It exists only during the sweep, so the intro/outro holds are clean.
+    let bar_thick = ((if vertical { ch } else { cw }) * 0.006).max(6.0);
+    let mut style = Shape2DStyle::new(VectorShape::Rectangle, 100.0);
+    if vertical {
+        style.width = Track::constant(cw);
+        style.height = Track::constant(bar_thick);
+    } else {
+        style.width = Track::constant(bar_thick);
+        style.height = Track::constant(ch);
+    }
+    style.corner_radius = Track::constant(0.0);
+    style.fill = Rgba { r: 255, g: 255, b: 255, a: 255 };
+    style.shadow_color = Rgba { r: 0, g: 0, b: 0, a: 170 };
+    style.shadow_blur = Track::constant(14.0);
+    style.shadow_opacity = Track::constant(1.0);
+    let mut tf_bar = Transform::at(cx, cy);
+    if vertical {
+        tf_bar.y = Track::ramp(0.0, sweep_start, ch, sweep_end, Easing::EaseInOut);
+    } else {
+        tf_bar.x = Track::ramp(0.0, sweep_start, cw, sweep_end, Easing::EaseInOut);
+    }
+    project.layers.push(Layer {
+        id: next,
+        name: "Divider".into(),
+        start_ms: sweep_start,
+        end_ms: sweep_end,
+        kind: LayerKind::Shape2D { style },
+        transform: tf_bar,
+        hidden: false,
+        attach: None,
+        effects: vec![],
+        transition_in: None,
+        transition_out: None,
+    });
+
+    if project.duration_ms < total {
+        project.duration_ms = total;
+    }
+    Ok(project.clone())
+}
+
 /// Template: build a complete ~`total_ms` slideshow video from `images` (with
 /// optional per-image `captions`), using the chosen `style`'s combination of
 /// transitions, Ken Burns motion, a coherent colour grade, and captions that
@@ -4894,6 +5021,7 @@ pub fn run() {
             create_box_carousel,
             create_photo_grid,
             create_grid_call,
+            create_before_after,
             create_slideshow_template,
             create_carousel_video,
             create_mixed_video,

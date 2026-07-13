@@ -161,6 +161,22 @@ export const createSlideshowTemplate = (
     totalMs,
   });
 
+/** Template: a before/after reveal — `before` fills the frame and `after` is
+ *  revealed by a divider bar that sweeps across (`orientation` "horizontal" or
+ *  "vertical") over ~`totalMs`, pushing the before image out to one side. */
+export const createBeforeAfter = (
+  before: string,
+  after: string,
+  orientation: string,
+  totalMs: number
+) =>
+  invoke<Project>("create_before_after", {
+    before,
+    after,
+    orientation,
+    totalMs,
+  });
+
 /** Template: spin `images` around a cylinder carousel (all images wrap around it,
  *  in order) over ~`totalMs`, with a bottom-right caption per image (defaults to
  *  "text here") that fades in/out while its image faces the camera. */
