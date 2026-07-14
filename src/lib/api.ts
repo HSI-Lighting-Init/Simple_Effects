@@ -166,6 +166,11 @@ export const createSlideshowTemplate = (
 export const setImageCrop = (layerId: number, x: number, y: number) =>
   invoke<Project>("set_image_crop", { layerId, x, y });
 
+/** Replace an image layer's source with `path`, keeping its effects, transitions,
+ *  timing and transform (rescaled so the new media fills the same on-screen box). */
+export const replaceLayerMedia = (layerId: number, path: string) =>
+  invoke<Project>("replace_layer_media", { layerId, path });
+
 /** Template: a before/after reveal — `before` fills the frame and `after` is
  *  revealed by a divider bar that sweeps across (`orientation` "horizontal" or
  *  "vertical") over ~`totalMs`, pushing the before image out to one side. */

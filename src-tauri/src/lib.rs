@@ -2155,6 +2155,81 @@ fn set_image_crop(state: State<AppState>, layer_id: u32, x: f32, y: f32) -> Resu
     }
 }
 
+/// Swap an image layer's source for `path`, keeping its whole effect stack,
+/// transitions, timing, position, rotation and opacity intact — only the media
+/// changes. The transform scale is rescaled so the new image occupies the same
+/// on-screen box as the old one; a cover-cropped layer's crop is recomputed to
+/// the same aspect so it keeps filling its slot. Undoable.
+#[tauri::command]
+fn replace_layer_media(state: State<AppState>, layer_id: u32, path: String) -> Result<Project, String> {
+    let (nw, nh) = image::image_dimensions(&path).map_err(|e| format!("read image: {e}"))?;
+    let (nw, nh) = (nw.max(1), nh.max(1));
+
+    fn mul_track(t: &mut Track, f: f32) {
+        t.default *= f;
+        for k in &mut t.keys {
+            k.value *= f;
+        }
+    }
+    fn base_name(p: &str) -> String {
+        std::path::Path::new(p)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+    fn replace_in(layers: &mut [Layer], id: u32, path: &str, nw: u32, nh: u32) -> Option<bool> {
+        for l in layers.iter_mut() {
+            if l.id == id {
+                let LayerKind::Image { src, width, height, crop } = &mut l.kind else {
+                    return Some(false);
+                };
+                let (ow, oh) = (*width as f32, *height as f32);
+                let old_base = base_name(src);
+                let (rx, ry) = match crop {
+                    // Recompute the cover-crop for the new image at the old crop's
+                    // aspect; the scale ratio keeps the on-screen block the same size.
+                    Some(c) => {
+                        let (new_crop, _) = cover_crop(nw as f32, nh as f32, c.width, c.height);
+                        let r = c.width / new_crop.width.max(1e-6);
+                        *crop = Some(new_crop);
+                        (r, r)
+                    }
+                    // No crop: a single uniform ratio (contain) keeps the new
+                    // image's aspect and fits it into the old on-screen footprint.
+                    None => {
+                        let r = (ow / nw as f32).min(oh / nh as f32);
+                        (r, r)
+                    }
+                };
+                *src = path.to_string();
+                *width = nw;
+                *height = nh;
+                mul_track(&mut l.transform.scale_x, rx);
+                mul_track(&mut l.transform.scale_y, ry);
+                // Refresh an auto-named layer to the new file; keep a custom name.
+                if l.name == old_base {
+                    l.name = base_name(path);
+                }
+                return Some(true);
+            }
+            if let LayerKind::Group { children } = &mut l.kind {
+                if let Some(r) = replace_in(children, id, path, nw, nh) {
+                    return Some(r);
+                }
+            }
+        }
+        None
+    }
+
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    match replace_in(&mut project.layers, layer_id, &path, nw, nh) {
+        Some(true) => Ok(project.clone()),
+        Some(false) => Err("that layer isn't an image".into()),
+        None => Err("layer not found".into()),
+    }
+}
+
 /// Template: a before/after reveal. `before` fills the frame; `after` sits on
 /// top with a hard directional `Wipe` whose edge sweeps across, so the before
 /// image is progressively pushed out to one side while the after replaces it. A
@@ -5059,6 +5134,7 @@ pub fn run() {
             create_grid_call,
             create_before_after,
             set_image_crop,
+            replace_layer_media,
             create_slideshow_template,
             create_carousel_video,
             create_mixed_video,

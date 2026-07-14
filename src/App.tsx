@@ -53,6 +53,7 @@ import {
   createMixedVideo,
   createBeforeAfter,
   setImageCrop,
+  replaceLayerMedia,
   renameLayer,
   setShape2d,
   setCellImage,
@@ -1925,6 +1926,25 @@ export default function App() {
     if (selectedIdRef.current != null) void duplicateLayerById(selectedIdRef.current);
   }, [duplicateLayerById]);
 
+  // Replace an image layer's media with another file, keeping every effect,
+  // transition, keyframe and transform on the layer — only the pixels change.
+  const onReplaceMedia = useCallback(
+    async (layerId: number) => {
+      const sel = await open({
+        multiple: false,
+        filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
+      });
+      if (typeof sel !== "string") return;
+      const p = await replaceLayerMedia(layerId, sel);
+      setProject(p);
+      await resolveImages(p);
+      await addMediaPaths([sel]);
+      await applyTime(timeRef.current);
+      recordAction("replace_media", { layerId });
+    },
+    [resolveImages, addMediaPaths, applyTime, recordAction]
+  );
+
   // Cut a layer at a time into two segments; selects the new (second) segment.
   const onSplitLayer = useCallback(
     async (layerId: number, tMs: number) => {
@@ -2117,6 +2137,37 @@ export default function App() {
       recordAction("reorder_layers", { order });
     },
     [applyTime, recordAction]
+  );
+
+  // Move the selected layer(s) up or down the stack, keeping them together. "up"
+  // = toward the top of the timeline (higher z-order = later in the array, which
+  // reorderLayers takes bottom-first). Works for a single layer or a whole
+  // multi-selection; only top-level layers reorder.
+  const moveSelectedLayers = useCallback(
+    async (dir: "up" | "down") => {
+      const p = projectRef.current;
+      if (!p) return;
+      const ids = p.layers.map((l) => l.id);
+      const chosen = selectedIdsRef.current.length
+        ? selectedIdsRef.current
+        : selectedIdRef.current != null
+          ? [selectedIdRef.current]
+          : [];
+      const sel = new Set(ids.filter((id) => chosen.includes(id)));
+      if (sel.size === 0) return;
+      const arr = ids.slice();
+      if (dir === "up") {
+        // Bubble each selected id toward the end, past unselected neighbours.
+        for (let i = arr.length - 2; i >= 0; i--)
+          if (sel.has(arr[i]) && !sel.has(arr[i + 1])) [arr[i], arr[i + 1]] = [arr[i + 1], arr[i]];
+      } else {
+        for (let i = 1; i < arr.length; i++)
+          if (sel.has(arr[i]) && !sel.has(arr[i - 1])) [arr[i], arr[i - 1]] = [arr[i - 1], arr[i]];
+      }
+      if (arr.every((id, i) => id === ids[i])) return; // already at the edge
+      await onReorder(arr);
+    },
+    [onReorder]
   );
 
   // Save As: always prompt for a .sefx path, write, and bind the project to it.
@@ -2977,6 +3028,13 @@ export default function App() {
         else play();
         return;
       }
+      // Ctrl/Cmd+Shift+Up/Down moves the selected layer(s) up/down the stack
+      // (checked before plain-arrow playhead nav so it isn't swallowed).
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+        e.preventDefault();
+        void moveSelectedLayers(e.key === "ArrowUp" ? "up" : "down");
+        return;
+      }
       // Playhead navigation with the arrows — only when no form control is
       // focused, so a focused slider/number field nudges itself instead.
       if (!onControl) {
@@ -3082,6 +3140,7 @@ export default function App() {
     onPasteLayer,
     onDuplicateLayer,
     onSplitAtPlayhead,
+    moveSelectedLayers,
     seek,
     play,
     stop,
@@ -3793,6 +3852,10 @@ export default function App() {
                     ...(project.layers.find((l) => l.id === ctxMenu.layerId)?.kind.kind === "image"
                       ? [
                           {
+                            label: "⇄ Replace media…",
+                            onClick: () => void onReplaceMedia(ctxMenu.layerId!),
+                          },
+                          {
                             label: "⤢ Scale to fit",
                             onClick: () => onScaleToFit(ctxMenu.layerId!),
                           },
@@ -3836,6 +3899,16 @@ export default function App() {
                           { label: "⋆ Explode group", onClick: () => onExplodeLayer(ctxMenu.layerId!) },
                         ]
                       : []),
+                    {
+                      label:
+                        selectedIds.length >= 2 ? `▲ Move ${selectedIds.length} up` : "▲ Move up",
+                      onClick: () => void moveSelectedLayers("up"),
+                    },
+                    {
+                      label:
+                        selectedIds.length >= 2 ? `▼ Move ${selectedIds.length} down` : "▼ Move down",
+                      onClick: () => void moveSelectedLayers("down"),
+                    },
                     {
                       label: "⊘ Clear all keyframes",
                       onClick: () => onClearKeyframes(ctxMenu.layerId!),

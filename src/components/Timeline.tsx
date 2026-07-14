@@ -196,6 +196,8 @@ export default function Timeline({
   // Layer-row reorder (drag a layer onto the one you want it under).
   const [rowDragId, setRowDragId] = useState<number | null>(null);
   const [rowOverId, setRowOverId] = useState<number | null>(null);
+  // True while dragging a whole multi-selection (so every moved row is dimmed).
+  const [groupDragging, setGroupDragging] = useState(false);
   // Inline layer-name editing: the layer id being renamed + the draft text.
   const [renaming, setRenaming] = useState<{ id: number; draft: string } | null>(null);
   const commitRename = () => {
@@ -322,8 +324,14 @@ export default function Timeline({
       }
       const d = e.deltaY;
       if (d === 0) return;
+      const canScrollX = s.scrollWidth > s.clientWidth + 1;
+      const canScrollY = s.scrollHeight > s.clientHeight + 1;
       if (e.ctrlKey || e.metaKey) {
         s.scrollTop += d; // vertical: through the layers
+      } else if (!canScrollX && canScrollY) {
+        // Nothing to scroll through in time, but there are off-screen layers →
+        // a plain wheel scrolls them vertically instead of doing nothing.
+        s.scrollTop += d;
       } else {
         s.scrollLeft += d; // plain: through time
       }
@@ -346,6 +354,23 @@ export default function Timeline({
     onReorder(arr);
   };
 
+  // Drop a whole set of layers (a multi-selection) together, just *under*
+  // `targetId`, preserving their existing relative order. No-op if the target is
+  // itself one of the moved layers.
+  const commitReorderMulti = (moveIds: number[], targetId: number) => {
+    const moving = new Set(moveIds);
+    if (moving.has(targetId)) return;
+    const all = project.layers.map((l) => l.id);
+    const ordered = all.filter((id) => moving.has(id)); // keep their relative order
+    if (ordered.length === 0) return;
+    if (ordered.length === 1) return commitReorder(ordered[0], targetId);
+    const remaining = all.filter((id) => !moving.has(id));
+    const tIdx = remaining.indexOf(targetId);
+    if (tIdx < 0) return;
+    remaining.splice(tIdx, 0, ...ordered);
+    onReorder(remaining);
+  };
+
   // Mouse-driven layer-row reordering. We don't use HTML5 drag-and-drop because
   // Tauri's WebView2 drag/drop handler swallows it on Windows; instead we track
   // the pointer and hit-test rows by their `data-layer-id`, committing on release
@@ -361,6 +386,8 @@ export default function Timeline({
     const additive = e.ctrlKey || e.metaKey || e.shiftKey;
     if (additive) onSelect(layer.id, true);
     else if (!selectedIds.includes(layer.id)) onSelect(layer.id);
+    // Dragging any member of a multi-selection drags the whole group together.
+    const groupDrag = !additive && selectedIds.includes(layer.id) && selectedIds.length > 1;
     const startY = e.clientY;
     let over: number | null = null;
     let moved = false;
@@ -377,22 +404,32 @@ export default function Timeline({
       if (!moved && Math.abs(ev.clientY - startY) > 4) {
         moved = true;
         setRowDragId(layer.id);
+        if (groupDrag) setGroupDragging(true);
       }
       if (!moved) return;
       const target = rowIdAt(ev.clientX, ev.clientY);
-      over = target != null && target !== layer.id ? target : null;
+      // A valid drop target is any row that isn't part of what's being dragged.
+      const invalid =
+        target == null ||
+        target === layer.id ||
+        (groupDrag && selectedIds.includes(target));
+      over = invalid ? null : target;
       setRowOverId(over);
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
-      if (moved && over != null) commitReorder(layer.id, over);
+      if (moved && over != null) {
+        if (groupDrag) commitReorderMulti(selectedIds, over);
+        else commitReorder(layer.id, over);
+      }
       else if (!moved && !additive && selectedIds.includes(layer.id) && selectedIds.length > 1) {
         // Plain click on a member of a multi-selection collapses to just it.
         onSelect(layer.id);
       }
       setRowDragId(null);
       setRowOverId(null);
+      setGroupDragging(false);
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
@@ -916,7 +953,9 @@ export default function Timeline({
                 (selectedIds.includes(l.id) ? " selected" : "") +
                 (l.id === selectedId ? " primary" : "") +
                 (l.hidden ? " hidden" : "") +
-                (l.id === rowDragId ? " row-dragging" : "") +
+                (l.id === rowDragId || (groupDragging && selectedIds.includes(l.id))
+                  ? " row-dragging"
+                  : "") +
                 (l.id === rowOverId && rowDragId != null && rowOverId !== rowDragId
                   ? " row-over"
                   : "")
