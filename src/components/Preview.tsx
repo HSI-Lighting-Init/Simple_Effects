@@ -1082,6 +1082,10 @@ function VideoNode({
       const v = document.createElement("video");
       v.playsInline = true;
       v.preload = "auto";
+      // The video is always silent; its sound is driven by its separate audio
+      // layer (created on import) via AudioLayerPlayer. That way deleting/hiding
+      // the audio layer actually removes the sound, and preview matches export.
+      v.muted = true;
       v.src = url;
       v.onloadeddata = () => {
         registerVideoEl(layerId, v);
@@ -1111,13 +1115,8 @@ function VideoNode({
     const target = Number.isFinite(durSec) ? Math.min(localSec, durSec - 0.001) : localSec;
     if (playing) {
       if (Math.abs(v.currentTime - target) > 0.3) v.currentTime = Math.max(0, target);
-      // Play with sound; if the autoplay policy blocks unmuted playback, retry
-      // muted so the frames still advance (video stays visible, just silent).
-      if (v.paused)
-        v.play().catch(() => {
-          v.muted = true;
-          v.play().catch(() => {});
-        });
+      // Muted playback is always allowed by the autoplay policy.
+      if (v.paused) v.play().catch(() => {});
     } else {
       if (!v.paused) v.pause();
       if (Math.abs(v.currentTime - target) > 0.02) v.currentTime = Math.max(0, target);
@@ -1159,6 +1158,74 @@ function VideoNode({
       {...interaction}
     />
   );
+}
+
+// Preview sound for an audio layer (including the audio split off a video). Not
+// a Konva node — it's a plain DOM <audio> element managed via effects, rendered
+// outside the Stage. It plays only while the playhead is inside the layer's
+// [start, end] window and the layer isn't hidden, seeking to the offset into the
+// clip so it stays in sync with the frames. Removing the layer unmounts this and
+// stops the sound.
+function AudioLayerPlayer({
+  src,
+  playing,
+  timeMs,
+  startMs,
+  endMs,
+  hidden,
+}: {
+  src: string;
+  playing: boolean;
+  timeMs: number;
+  startMs: number;
+  endMs: number;
+  hidden: boolean;
+}) {
+  const [audio, setAudio] = useState<HTMLAudioElement | null>(null);
+  useEffect(() => {
+    let alive = true;
+    let el: HTMLAudioElement | null = null;
+    getMediaUrl(src).then((url) => {
+      if (!alive) return;
+      const a = new Audio();
+      a.preload = "auto";
+      a.src = url;
+      el = a;
+      setAudio(a);
+    });
+    return () => {
+      alive = false;
+      if (el) {
+        el.pause();
+        el.removeAttribute("src");
+        el.load();
+      }
+      setAudio(null);
+    };
+  }, [src]);
+
+  useEffect(() => {
+    const a = audio;
+    if (!a) return;
+    const local = Math.max(0, (timeMs - startMs) / 1000);
+    const inWindow = timeMs >= startMs && timeMs < endMs;
+    if (playing && inWindow && !hidden) {
+      if (Math.abs(a.currentTime - local) > 0.3) a.currentTime = local;
+      if (a.paused) a.play().catch(() => {});
+    } else {
+      if (!a.paused) a.pause();
+      // Keep the scrub position roughly aligned while paused.
+      if (!playing && Number.isFinite(local) && Math.abs(a.currentTime - local) > 0.05) {
+        try {
+          a.currentTime = local;
+        } catch {
+          /* seeking before metadata is ready — ignore */
+        }
+      }
+    }
+  }, [audio, playing, timeMs, startMs, endMs, hidden]);
+
+  return null;
 }
 
 // A nested composition (precomp). Renders its resolved children read-only inside
@@ -2481,6 +2548,24 @@ export default function Preview({
   // Longest-side cap for drawn textures. Export always renders at full fidelity;
   // in the editor a cap keeps heavy (multi-megapixel) images cheap to redraw.
   const maxTex = exporting ? Infinity : PREVIEW_QUALITY_CAP[previewQuality];
+
+  // Every audio layer (incl. those split off videos), flattened out of groups,
+  // so each gets a DOM <audio> player for preview sound.
+  const audioLayers = useMemo(() => {
+    const out: { id: number; src: string; startMs: number; endMs: number; hidden: boolean }[] = [];
+    const scan = (layers: Layer[], parentHidden: boolean) => {
+      for (const l of layers) {
+        const hid = parentHidden || l.hidden;
+        if (l.kind.kind === "audio") {
+          out.push({ id: l.id, src: l.kind.src, startMs: l.startMs, endMs: l.endMs, hidden: hid });
+        } else if (l.kind.kind === "group") {
+          scan(l.kind.children, hid);
+        }
+      }
+    };
+    scan(project.layers, false);
+    return out;
+  }, [project.layers]);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   // User zoom (1 = fit-to-window) and pan offset (px), driven by the scroll wheel.
@@ -3002,6 +3087,21 @@ export default function Preview({
           </KLayer>
         </Stage>
       )}
+      {/* Preview sound for audio layers (video-split audio included). Rendered
+          outside the Stage as plain DOM <audio>; muted during export (ffmpeg
+          muxes the audio there instead). */}
+      {!exporting &&
+        audioLayers.map((a) => (
+          <AudioLayerPlayer
+            key={a.id}
+            src={a.src}
+            playing={playing}
+            timeMs={timeMs}
+            startMs={a.startMs}
+            endMs={a.endMs}
+            hidden={a.hidden}
+          />
+        ))}
       {!exporting && scale > 0 && (
         <button
           className="preview-zoom"
