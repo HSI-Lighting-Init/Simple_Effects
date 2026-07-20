@@ -41,8 +41,12 @@ export const setCompFps = (fps: number) =>
   invoke<Project>("set_comp_fps", { fps });
 
 /** Set one layer's play range [startMs, endMs] (when it appears on the timeline). */
-export const setLayerRange = (layerId: number, startMs: number, endMs: number) =>
-  invoke<Project>("set_layer_range", { layerId, startMs, endMs });
+export const setLayerRange = (
+  layerId: number,
+  startMs: number,
+  endMs: number,
+  inMs?: number
+) => invoke<Project>("set_layer_range", { layerId, startMs, endMs, inMs: inMs ?? null });
 
 /** Scale an image layer to contain within the comp and centre it. */
 export const scaleLayerToFit = (layerId: number) =>

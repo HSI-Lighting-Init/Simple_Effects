@@ -679,7 +679,7 @@ fn add_video_layer(
         name,
         start_ms: 0,
         end_ms,
-        kind: LayerKind::Video { src: path, width: iw, height: ih, duration_ms },
+        kind: LayerKind::Video { src: path, width: iw, height: ih, duration_ms, in_ms: 0 },
         transform,
         hidden: false,
         attach: None,
@@ -738,8 +738,10 @@ fn scale_layer_to_fit(state: State<AppState>, layer_id: u32) -> Result<Project, 
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
     let (iw, ih) = match &layer.kind {
-        LayerKind::Image { width, height, .. } => (*width as f32, *height as f32),
-        _ => return Err("scale to fit is for image layers".into()),
+        LayerKind::Image { width, height, .. } | LayerKind::Video { width, height, .. } => {
+            (*width as f32, *height as f32)
+        }
+        _ => return Err("scale to fit needs an image or video layer".into()),
     };
     let fit = (cw / iw.max(1.0)).min(ch / ih.max(1.0));
     layer.transform.scale_x = Track::constant(fit);
@@ -850,6 +852,7 @@ fn set_layer_range(
     layer_id: u32,
     start_ms: u32,
     end_ms: u32,
+    in_ms: Option<u32>,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
@@ -891,6 +894,13 @@ fn set_layer_range(
     }
     layer.start_ms = s;
     layer.end_ms = e;
+    // A video trim can also move its source in-point (head trim / uncrop). Clamp
+    // so it stays within the source and always leaves the trimmed span playable.
+    if let (Some(new_in), LayerKind::Video { duration_ms, in_ms, .. }) = (in_ms, &mut layer.kind) {
+        let span = e.saturating_sub(s);
+        let max_in = duration_ms.saturating_sub(span);
+        *in_ms = new_in.min(max_in);
+    }
     Ok(project.clone())
 }
 
@@ -4971,11 +4981,16 @@ fn split_layer(state: State<AppState>, layer_id: u32, t_ms: u32) -> Result<Proje
         }
     }
     state.snapshot(&project);
+    let orig_start = project.layers[idx].start_ms;
     let mut next = max_layer_id(&project.layers) + 1;
     let mut second = project.layers[idx].clone();
     reassign_ids(&mut second, &mut next); // fresh ids for it + any nested children
     second.start_ms = t_ms;
     second.transition_in = None; // it now starts mid-clip
+    // A video's second piece continues from the cut, not from the source start.
+    if let LayerKind::Video { duration_ms, in_ms, .. } = &mut second.kind {
+        *in_ms = (*in_ms + (t_ms - orig_start)).min(*duration_ms);
+    }
     project.layers[idx].end_ms = t_ms;
     project.layers[idx].transition_out = None; // it now ends at the cut
     project.layers.insert(idx + 1, second);

@@ -276,6 +276,11 @@ pub enum LayerKind {
         height: u32,
         #[serde(default, rename = "durationMs")]
         duration_ms: u32,
+        /// Source in-point: the media time (ms) shown at the layer's start.
+        /// Trimming the head or splitting the clip advances this, so each piece
+        /// plays its own portion of the source instead of restarting from 0.
+        #[serde(default, rename = "inMs")]
+        in_ms: u32,
     },
     /// An audio clip. No visual — it plays during preview playback, synced to the
     /// playhead over its `[start_ms, end_ms]` range. `duration_ms` is the clip's

@@ -145,4 +145,10 @@ lineColorKeys: Array<ColorKey>,
  * single photo) instead of its own `src`, and each cell's effect stack
  * applies to that slice. `None` = per-cell images (the classic mode).
  */
-background: string | null, } | { "kind": "video", src: string, width: number, height: number, durationMs: number, } | { "kind": "audio", src: string, durationMs: number, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", } | { "kind": "shape2d", style: Shape2DStyle, };
+background: string | null, } | { "kind": "video", src: string, width: number, height: number, durationMs: number, 
+/**
+ * Source in-point: the media time (ms) shown at the layer's start.
+ * Trimming the head or splitting the clip advances this, so each piece
+ * plays its own portion of the source instead of restarting from 0.
+ */
+inMs: number, } | { "kind": "audio", src: string, durationMs: number, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", } | { "kind": "shape2d", style: Shape2DStyle, };

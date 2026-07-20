@@ -141,7 +141,7 @@ interface Props {
   onMoveCellKeyframe: (layerId: number, cell: number, fromMs: number, toMs: number) => void;
   /** Delete a grid cell's keyframe (click a diamond in its child row). */
   onDeleteCellKeyframe: (layerId: number, cell: number, tMs: number) => void;
-  onSetLayerRange: (id: number, startMs: number, endMs: number) => void;
+  onSetLayerRange: (id: number, startMs: number, endMs: number, inMs?: number) => void;
   /** Commit a new z-order (full list of layer ids, bottom-first). */
   onReorder: (order: number[]) => void;
   /** Cut tool: when true, clicking a block splits it at the click. */
@@ -476,6 +476,15 @@ export default function Timeline({
     const span = layer.endMs - layer.startMs;
     const startX = e.clientX;
 
+    // A video can only be trimmed within its source: the head can't reveal media
+    // before the source start (in-point ≥ 0), and the tail can't show past the
+    // source end. So trimming stops at the source's own bounds.
+    const vk = layer.kind.kind === "video" ? layer.kind : null;
+    const srcDur = vk?.durationMs ?? 0;
+    const curIn = vk?.inMs ?? 0;
+    const minStart = vk && srcDur > 0 ? Math.max(0, layer.startMs - curIn) : 0;
+    const maxEnd = vk && srcDur > 0 ? layer.startMs + (srcDur - curIn) : dur;
+
     // The layers that move together, and their ranges at drag start.
     const groupIds = inGroup ? selectedIds.slice() : [layer.id];
     const orig = new Map<number, { s: number; e: number }>();
@@ -539,11 +548,11 @@ export default function Timeline({
         s = Math.round(layer.startMs + delta);
         en = Math.round(layer.endMs + delta);
       } else if (mode === "start") {
-        s = Math.round(Math.max(0, Math.min(layer.endMs - MIN_SPAN_MS, snap(layer.startMs + dMs))));
+        s = Math.round(Math.max(minStart, Math.min(layer.endMs - MIN_SPAN_MS, snap(layer.startMs + dMs))));
         en = layer.endMs;
       } else {
         s = layer.startMs;
-        en = Math.round(Math.min(dur, Math.max(layer.startMs + MIN_SPAN_MS, snap(layer.endMs + dMs))));
+        en = Math.round(Math.min(maxEnd, Math.max(layer.startMs + MIN_SPAN_MS, snap(layer.endMs + dMs))));
       }
       next = {
         ...next,
@@ -564,7 +573,13 @@ export default function Timeline({
             if (o) onSetLayerRange(gid, Math.round(o.s + next.deltaMs), Math.round(o.e + next.deltaMs));
           }
         } else {
-          onSetLayerRange(next.id, next.startMs, next.endMs);
+          // Head-trimming a video advances its source in-point by the same
+          // amount, so the frame under the new start is where it was cut to.
+          const newIn =
+            vk && mode === "start"
+              ? Math.max(0, Math.min(srcDur - (next.endMs - next.startMs), curIn + (next.startMs - layer.startMs)))
+              : undefined;
+          onSetLayerRange(next.id, next.startMs, next.endMs, newIn);
         }
       } else if (inGroup) {
         // A plain click (no drag) on a member of a multi-selection collapses to

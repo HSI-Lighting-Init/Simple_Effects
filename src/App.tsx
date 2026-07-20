@@ -2088,8 +2088,8 @@ export default function App() {
 
   // Trim/move a layer's play range on the timeline (drag the block or its edges).
   const onSetLayerRange = useCallback(
-    async (layerId: number, startMs: number, endMs: number) => {
-      const p = await setLayerRange(layerId, startMs, endMs);
+    async (layerId: number, startMs: number, endMs: number, inMs?: number) => {
+      const p = await setLayerRange(layerId, startMs, endMs, inMs);
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("layer_range", { layerId, startMs, endMs });
@@ -2480,10 +2480,12 @@ export default function App() {
                   .filter((l) => l.kind.kind === "video")
                   .map((l) => {
                     const durMs = l.kind.kind === "video" ? l.kind.durationMs : 0;
-                    const localSec = Math.max(0, (tMs - l.startMs) / 1000);
+                    const inMs = l.kind.kind === "video" ? (l.kind.inMs ?? 0) : 0;
+                    // Source time = in-point + how far past the layer start we are.
+                    const wanted = Math.max(0, inMs / 1000 + (tMs - l.startMs) / 1000);
                     return {
                       layerId: l.id,
-                      timeSec: durMs > 0 ? Math.min(localSec, durMs / 1000 - 0.001) : localSec,
+                      timeSec: durMs > 0 ? Math.min(wanted, durMs / 1000 - 0.001) : wanted,
                     };
                   });
                 if (videoTargets.length) await seekVideosForFrame(videoTargets);
@@ -3849,16 +3851,25 @@ export default function App() {
                   ]
                 : ctxMenu.layerId != null
                 ? [
-                    ...(project.layers.find((l) => l.id === ctxMenu.layerId)?.kind.kind === "image"
-                      ? [
-                          {
-                            label: "⇄ Replace media…",
-                            onClick: () => void onReplaceMedia(ctxMenu.layerId!),
-                          },
-                          {
-                            label: "⤢ Scale to fit",
-                            onClick: () => onScaleToFit(ctxMenu.layerId!),
-                          },
+                    ...(() => {
+                      const lk = project.layers.find((l) => l.id === ctxMenu.layerId)?.kind.kind;
+                      // Transitions render for image AND video (a video fades via
+                      // its wrapping group's opacity); colour/blur effects only
+                      // apply to images, so those stay image-only.
+                      const transitions = [
+                        {
+                          label: "⇋ Transition in…",
+                          onClick: () => setTransitionPick({ ids: [ctxMenu.layerId!], slot: "in" as const }),
+                        },
+                        {
+                          label: "⇋ Transition out…",
+                          onClick: () => setTransitionPick({ ids: [ctxMenu.layerId!], slot: "out" as const }),
+                        },
+                      ];
+                      if (lk === "image")
+                        return [
+                          { label: "⇄ Replace media…", onClick: () => void onReplaceMedia(ctxMenu.layerId!) },
+                          { label: "⤢ Scale to fit", onClick: () => onScaleToFit(ctxMenu.layerId!) },
                           {
                             label: "＋ Add effect",
                             submenu: effectKinds.map(([kind, label]) => ({
@@ -3866,20 +3877,16 @@ export default function App() {
                               onClick: () => onAddEffect(ctxMenu.layerId!, kind),
                             })),
                           },
-                          {
-                            label: "✎ Open effect editor…",
-                            onClick: () => setFxEditorId(ctxMenu.layerId!),
-                          },
-                          {
-                            label: "⇋ Transition in…",
-                            onClick: () => setTransitionPick({ ids: [ctxMenu.layerId!], slot: "in" }),
-                          },
-                          {
-                            label: "⇋ Transition out…",
-                            onClick: () => setTransitionPick({ ids: [ctxMenu.layerId!], slot: "out" }),
-                          },
-                        ]
-                      : [{ label: "Effects — image layers only" }]),
+                          { label: "✎ Open effect editor…", onClick: () => setFxEditorId(ctxMenu.layerId!) },
+                          ...transitions,
+                        ];
+                      if (lk === "video")
+                        return [
+                          { label: "⤢ Scale to fit", onClick: () => onScaleToFit(ctxMenu.layerId!) },
+                          ...transitions,
+                        ];
+                      return [{ label: "Effects — image layers only" }];
+                    })(),
                     ...(selectedIds.length >= 2
                       ? [
                           {
