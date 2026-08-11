@@ -23,4 +23,9 @@ staggerMs: number,
 /**
  * For `ScatterIn`: how far letters explode out before gathering (px radius).
  */
-areaPx: number, };
+areaPx: number, 
+/**
+ * Reverse the letter order: animate right-to-left (last letter first) instead
+ * of the default left-to-right. Older projects default to left-to-right.
+ */
+reverse: boolean, };

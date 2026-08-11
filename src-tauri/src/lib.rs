@@ -2214,15 +2214,93 @@ fn set_image_crop(state: State<AppState>, layer_id: u32, x: f32, y: f32) -> Resu
     }
 }
 
+/// Set a layer's anchor / pivot (normalized 0..1; 0.5,0.5 = centre) — the point
+/// scale and rotation happen about. The layer's position is compensated (using
+/// its transform at `t_ms`) so moving the anchor doesn't visually jump the layer.
+/// Undoable. Applies to image / video / shape / text layers.
+#[tauri::command]
+fn set_layer_anchor(
+    state: State<AppState>,
+    layer_id: u32,
+    ax: f32,
+    ay: f32,
+    t_ms: u32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let shaped = state.shaped.lock().unwrap();
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    // The layer's local bounds (what the anchor is normalized against).
+    let (w, h) = match &layer.kind {
+        LayerKind::Image { width, height, crop, .. } => match crop {
+            Some(c) => (c.width, c.height),
+            None => (*width as f32, *height as f32),
+        },
+        LayerKind::Video { width, height, .. } => (*width as f32, *height as f32),
+        LayerKind::Shape2D { style } => (
+            eval::sample_track(&style.width, t_ms),
+            eval::sample_track(&style.height, t_ms),
+        ),
+        LayerKind::Text { .. } => match shaped.get(&layer_id) {
+            Some(s) => (s.width, (s.lines.max(1) as f32) * s.line_height),
+            None => (0.0, 0.0),
+        },
+        _ => (0.0, 0.0),
+    };
+    let ax = ax.clamp(-1.0, 2.0);
+    let ay = ay.clamp(-1.0, 2.0);
+    let tf = &mut layer.transform;
+    // World shift that keeps the layer in place: Rot(θ)·Scale·(newAnchor - oldAnchor),
+    // with the anchor delta taken in local (unscaled) pixels.
+    let dlx = (ax - tf.anchor_x) * w;
+    let dly = (ay - tf.anchor_y) * h;
+    let vx = eval::sample_track(&tf.scale_x, t_ms) * dlx;
+    let vy = eval::sample_track(&tf.scale_y, t_ms) * dly;
+    let rad = eval::sample_track(&tf.rotation, t_ms).to_radians();
+    let (c, s) = (rad.cos(), rad.sin());
+    let dx = vx * c - vy * s;
+    let dy = vx * s + vy * c;
+    tf.x.default += dx;
+    for k in tf.x.keys.iter_mut() {
+        k.value += dx;
+    }
+    tf.y.default += dy;
+    for k in tf.y.keys.iter_mut() {
+        k.value += dy;
+    }
+    tf.anchor_x = ax;
+    tf.anchor_y = ay;
+    Ok(project.clone())
+}
+
 /// Swap an image layer's source for `path`, keeping its whole effect stack,
 /// transitions, timing, position, rotation and opacity intact — only the media
 /// changes. The transform scale is rescaled so the new image occupies the same
 /// on-screen box as the old one; a cover-cropped layer's crop is recomputed to
 /// the same aspect so it keeps filling its slot. Undoable.
 #[tauri::command]
-fn replace_layer_media(state: State<AppState>, layer_id: u32, path: String) -> Result<Project, String> {
-    let (nw, nh) = image::image_dimensions(&path).map_err(|e| format!("read image: {e}"))?;
-    let (nw, nh) = (nw.max(1), nh.max(1));
+fn replace_layer_media(
+    state: State<AppState>,
+    layer_id: u32,
+    path: String,
+    kind: String,
+    width: u32,
+    height: u32,
+    duration_ms: u32,
+) -> Result<Project, String> {
+    let new_is_image = kind != "video";
+    // For images the backend reads the true dimensions; for video the frontend
+    // supplies them (the image crate can't decode a video).
+    let (nw, nh) = if new_is_image {
+        let (w, h) = image::image_dimensions(&path).map_err(|e| format!("read image: {e}"))?;
+        (w.max(1), h.max(1))
+    } else {
+        (width.max(1), height.max(1))
+    };
 
     fn mul_track(t: &mut Track, f: f32) {
         t.default *= f;
@@ -2236,35 +2314,63 @@ fn replace_layer_media(state: State<AppState>, layer_id: u32, path: String) -> R
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()
     }
-    fn replace_in(layers: &mut [Layer], id: u32, path: &str, nw: u32, nh: u32) -> Option<bool> {
+    fn replace_in(
+        layers: &mut [Layer],
+        id: u32,
+        path: &str,
+        new_is_image: bool,
+        nw: u32,
+        nh: u32,
+        dur: u32,
+    ) -> Option<bool> {
         for l in layers.iter_mut() {
             if l.id == id {
-                let LayerKind::Image { src, width, height, crop } = &mut l.kind else {
-                    return Some(false);
-                };
-                let (ow, oh) = (*width as f32, *height as f32);
-                let old_base = base_name(src);
-                let (rx, ry) = match crop {
-                    // Recompute the cover-crop for the new image at the old crop's
-                    // aspect; the scale ratio keeps the on-screen block the same size.
-                    Some(c) => {
-                        let (new_crop, _) = cover_crop(nw as f32, nh as f32, c.width, c.height);
-                        let r = c.width / new_crop.width.max(1e-6);
-                        *crop = Some(new_crop);
-                        (r, r)
+                // Old effective bounds + crop aspect (only images can be cropped).
+                let (old_w, old_h, old_crop_aspect, old_src) = match &l.kind {
+                    LayerKind::Image { src, width, height, crop } => {
+                        let (ew, eh) = crop
+                            .as_ref()
+                            .map(|c| (c.width, c.height))
+                            .unwrap_or((*width as f32, *height as f32));
+                        (ew, eh, crop.as_ref().map(|c| (c.width, c.height)), src.clone())
                     }
-                    // No crop: a single uniform ratio (contain) keeps the new
-                    // image's aspect and fits it into the old on-screen footprint.
-                    None => {
-                        let r = (ow / nw as f32).min(oh / nh as f32);
-                        (r, r)
+                    LayerKind::Video { src, width, height, .. } => {
+                        (*width as f32, *height as f32, None, src.clone())
+                    }
+                    _ => return Some(false), // only image/video layers can be replaced
+                };
+                let old_base = base_name(&old_src);
+                // A cover-crop carries over only when replacing an image with an
+                // image; otherwise the new media fills the old footprint uncropped.
+                let new_crop = if new_is_image {
+                    old_crop_aspect.map(|(aw, ah)| cover_crop(nw as f32, nh as f32, aw, ah).0)
+                } else {
+                    None
+                };
+                let (new_ew, new_eh) = new_crop
+                    .as_ref()
+                    .map(|c| (c.width, c.height))
+                    .unwrap_or((nw as f32, nh as f32));
+                // Rescale so the new media keeps the same on-screen box: an exact
+                // block match when a crop is preserved, else a uniform "contain".
+                let r = if new_crop.is_some() {
+                    old_w / new_ew.max(1e-6)
+                } else {
+                    (old_w / new_ew.max(1e-6)).min(old_h / new_eh.max(1e-6))
+                };
+                mul_track(&mut l.transform.scale_x, r);
+                mul_track(&mut l.transform.scale_y, r);
+                l.kind = if new_is_image {
+                    LayerKind::Image { src: path.to_string(), width: nw, height: nh, crop: new_crop }
+                } else {
+                    LayerKind::Video {
+                        src: path.to_string(),
+                        width: nw,
+                        height: nh,
+                        duration_ms: dur,
+                        in_ms: 0,
                     }
                 };
-                *src = path.to_string();
-                *width = nw;
-                *height = nh;
-                mul_track(&mut l.transform.scale_x, rx);
-                mul_track(&mut l.transform.scale_y, ry);
                 // Refresh an auto-named layer to the new file; keep a custom name.
                 if l.name == old_base {
                     l.name = base_name(path);
@@ -2272,7 +2378,7 @@ fn replace_layer_media(state: State<AppState>, layer_id: u32, path: String) -> R
                 return Some(true);
             }
             if let LayerKind::Group { children } = &mut l.kind {
-                if let Some(r) = replace_in(children, id, path, nw, nh) {
+                if let Some(r) = replace_in(children, id, path, new_is_image, nw, nh, dur) {
                     return Some(r);
                 }
             }
@@ -2282,9 +2388,9 @@ fn replace_layer_media(state: State<AppState>, layer_id: u32, path: String) -> R
 
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    match replace_in(&mut project.layers, layer_id, &path, nw, nh) {
+    match replace_in(&mut project.layers, layer_id, &path, new_is_image, nw, nh, duration_ms) {
         Some(true) => Ok(project.clone()),
-        Some(false) => Err("that layer isn't an image".into()),
+        Some(false) => Err("only image or video layers can be replaced".into()),
         None => Err("layer not found".into()),
     }
 }
@@ -4307,6 +4413,59 @@ fn paste_cell_effects(
     Ok(project.clone())
 }
 
+/// Copy a layer's "look" onto another layer: its whole effect stack, the
+/// transform's scale / rotation / opacity / anchor (its position is left alone so
+/// the target keeps its own spot), and its in/out transitions. Recurses into
+/// groups. Undoable.
+#[tauri::command]
+fn apply_layer_style(
+    state: State<AppState>,
+    layer_id: u32,
+    effects: Vec<Effect>,
+    transform: Transform,
+    transition_in: Option<Transition>,
+    transition_out: Option<Transition>,
+) -> Result<Project, String> {
+    fn apply(
+        layers: &mut [Layer],
+        id: u32,
+        effects: &[Effect],
+        tf: &Transform,
+        tin: &Option<Transition>,
+        tout: &Option<Transition>,
+    ) -> bool {
+        for l in layers.iter_mut() {
+            if l.id == id {
+                l.effects = effects.to_vec();
+                // Copy the look (keyframed tracks included) but keep the target's
+                // own position so it doesn't jump to the source's spot.
+                l.transform.scale_x = tf.scale_x.clone();
+                l.transform.scale_y = tf.scale_y.clone();
+                l.transform.rotation = tf.rotation.clone();
+                l.transform.opacity = tf.opacity.clone();
+                l.transform.anchor_x = tf.anchor_x;
+                l.transform.anchor_y = tf.anchor_y;
+                l.transition_in = tin.clone();
+                l.transition_out = tout.clone();
+                return true;
+            }
+            if let LayerKind::Group { children } = &mut l.kind {
+                if apply(children, id, effects, tf, tin, tout) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    if apply(&mut project.layers, layer_id, &effects, &transform, &transition_in, &transition_out) {
+        Ok(project.clone())
+    } else {
+        Err("layer not found".into())
+    }
+}
+
 /// Paste the same effect stack onto EVERY cell of a grid at once (except the
 /// `except` cell, if given — normally the source cell keeps its original). One
 /// undo step. Undoable.
@@ -5198,6 +5357,8 @@ pub fn run() {
             create_grid_call,
             create_before_after,
             set_image_crop,
+            set_layer_anchor,
+            apply_layer_style,
             replace_layer_media,
             create_slideshow_template,
             create_carousel_video,

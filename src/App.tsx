@@ -54,6 +54,8 @@ import {
   createMixedVideo,
   createBeforeAfter,
   setImageCrop,
+  setLayerAnchor,
+  applyLayerStyle,
   replaceLayerMedia,
   renameLayer,
   setShape2d,
@@ -180,6 +182,8 @@ import type { Font } from "./bindings/Font";
 import type { Rgba } from "./bindings/Rgba";
 import type { TextAlign } from "./bindings/TextAlign";
 import type { Effect } from "./bindings/Effect";
+import type { Transform } from "./bindings/Transform";
+import type { Transition } from "./bindings/Transition";
 import type { SurfaceShape } from "./bindings/SurfaceShape";
 import type { VectorShape } from "./bindings/VectorShape";
 import type { Shape2DStyle } from "./bindings/Shape2DStyle";
@@ -855,6 +859,18 @@ export default function App() {
     []
   );
 
+  // Set a layer's anchor/pivot. Position is compensated (at the playhead) so the
+  // layer stays put; scale/rotation then pivot about the new anchor.
+  const onSetLayerAnchor = useCallback(
+    async (layerId: number, ax: number, ay: number) => {
+      const p = await setLayerAnchor(layerId, ax, ay, Math.round(timeRef.current));
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("layer_anchor", { layerId, ax, ay });
+    },
+    [applyTime, recordAction]
+  );
+
   // Lazily decode a waveform strip for every audio layer's source (from import
   // or a reopened project). Cached per path so each file decodes at most once.
   useEffect(() => {
@@ -1176,6 +1192,40 @@ export default function App() {
   // Clipboard for a grid cell's whole effect stack (copy one cell → paste onto
   // others). Held in state so the context menu's "Paste" enables reactively.
   const [cellClip, setCellClip] = useState<Effect[] | null>(null);
+  // Clipboard for copying a layer's look (effects + transform + transitions) onto
+  // another layer.
+  const [layerStyleClip, setLayerStyleClip] = useState<{
+    effects: Effect[];
+    transform: Transform;
+    transitionIn: Transition | null;
+    transitionOut: Transition | null;
+  } | null>(null);
+
+  // Copy a layer's look (deep clone), then paste it onto another layer.
+  const onCopyLayerEffects = useCallback((layerId: number) => {
+    const layer = projectRef.current?.layers.find((l) => l.id === layerId);
+    if (!layer) return;
+    setLayerStyleClip(
+      structuredClone({
+        effects: layer.effects,
+        transform: layer.transform,
+        transitionIn: layer.transitionIn,
+        transitionOut: layer.transitionOut,
+      })
+    );
+  }, []);
+
+  const onPasteLayerEffects = useCallback(
+    async (layerId: number) => {
+      if (!layerStyleClip) return;
+      const c = structuredClone(layerStyleClip);
+      const p = await applyLayerStyle(layerId, c.effects, c.transform, c.transitionIn, c.transitionOut);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("paste_layer_style", { layerId });
+    },
+    [layerStyleClip, applyTime, recordAction]
+  );
 
   // Copy one cell's effect stack (a deep clone so later edits don't mutate it).
   const onCopyCellEffects = useCallback((layerId: number, cell: number) => {
@@ -1927,23 +1977,41 @@ export default function App() {
     if (selectedIdRef.current != null) void duplicateLayerById(selectedIdRef.current);
   }, [duplicateLayerById]);
 
-  // Replace an image layer's media with another file, keeping every effect,
-  // transition, keyframe and transform on the layer — only the pixels change.
+  // Replace an image/video layer's media with another file (image OR video),
+  // keeping every effect, transition, keyframe and transform — only the media
+  // changes. Cross-type is allowed (swap an image for a video, or vice versa).
   const onReplaceMedia = useCallback(
     async (layerId: number) => {
       const sel = await open({
         multiple: false,
-        filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
+        filters: [
+          {
+            name: "Media",
+            extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "webm", "mov", "mkv", "m4v"],
+          },
+        ],
       });
       if (typeof sel !== "string") return;
-      const p = await replaceLayerMedia(layerId, sel);
+      const kind = mediaKind(sel);
+      if (kind !== "image" && kind !== "video") return; // audio can't replace a visual layer
+      let width = 0;
+      let height = 0;
+      let durationMs = 0;
+      if (kind === "video") {
+        const meta = await getVideoMeta(sel).catch(() => ({ width: 1280, height: 720, durationMs: 0 }));
+        width = meta.width;
+        height = meta.height;
+        durationMs = meta.durationMs;
+      }
+      const p = await replaceLayerMedia(layerId, sel, kind, width, height, durationMs);
       setProject(p);
       await resolveImages(p);
+      await loadProjectMedia(p);
       await addMediaPaths([sel]);
       await applyTime(timeRef.current);
-      recordAction("replace_media", { layerId });
+      recordAction("replace_media", { layerId, kind });
     },
-    [resolveImages, addMediaPaths, applyTime, recordAction]
+    [resolveImages, loadProjectMedia, addMediaPaths, applyTime, recordAction]
   );
 
   // Cut a layer at a time into two segments; selects the new (second) segment.
@@ -3625,6 +3693,7 @@ export default function App() {
             onEnterGroup={onEnterGroup}
             onSetFlapAxis={onSetFlapAxis}
             exporting={exporting}
+            onSetLayerAnchor={onSetLayerAnchor}
             previewQuality={previewQuality}
             onSetPreviewQuality={setPreviewQuality}
             fpsOverlay={fpsOverlay}
@@ -3696,6 +3765,7 @@ export default function App() {
           transformNow={transformNow}
           onCommitTransform={onCommit}
           onSetImageCrop={onSetImageCrop}
+          onSetLayerAnchor={onSetLayerAnchor}
           selectedCell={selectedCell?.layerId === selectedLayer?.id ? selectedCell?.cell ?? null : null}
           cellZoomNow={cellZoomNow}
           cellMerged={cellMerged}
@@ -3882,10 +3952,20 @@ export default function App() {
                             })),
                           },
                           { label: "✎ Open effect editor…", onClick: () => setFxEditorId(ctxMenu.layerId!) },
+                          { label: "⧉ Copy effects + transform", onClick: () => onCopyLayerEffects(ctxMenu.layerId!) },
+                          ...(layerStyleClip
+                            ? [
+                                {
+                                  label: `⧉ Paste effects + transform (${layerStyleClip.effects.length} fx)`,
+                                  onClick: () => void onPasteLayerEffects(ctxMenu.layerId!),
+                                },
+                              ]
+                            : []),
                           ...transitions,
                         ];
                       if (lk === "video")
                         return [
+                          { label: "⇄ Replace media…", onClick: () => void onReplaceMedia(ctxMenu.layerId!) },
                           { label: "⤢ Scale to fit", onClick: () => onScaleToFit(ctxMenu.layerId!) },
                           ...transitions,
                         ];

@@ -32,6 +32,10 @@ pub struct ResolvedLayer {
     pub scale_y: f32,
     pub rotation: f32,
     pub opacity: f32,
+    /// Anchor / pivot in normalized layer coords (0.5,0.5 = centre). The renderer
+    /// places the layer's position at this point and pivots scale/rotation on it.
+    pub anchor_x: f32,
+    pub anchor_y: f32,
     /// Per-letter offsets for animated `Text` layers (one per shaped glyph,
     /// in glyph order). Empty for everything else.
     pub letters: Vec<LetterTransform>,
@@ -958,6 +962,8 @@ fn resolve_layers(
                 scale_y: if attached { 1.0 } else { sample_track(&tf.scale_y, t_ms) },
                 rotation: if attached { 0.0 } else { sample_track(&tf.rotation, t_ms) },
                 opacity,
+                anchor_x: tf.anchor_x,
+                anchor_y: tf.anchor_y,
                 color: text_color,
                 letters,
                 surface: decal,
@@ -981,24 +987,28 @@ pub fn eval_letters(
     layer_start_ms: u32,
 ) -> Vec<LetterTransform> {
     (0..count)
-        .map(|i| letter_at(anim, i, size, t_ms, layer_start_ms))
+        .map(|i| letter_at(anim, i, count, size, t_ms, layer_start_ms))
         .collect()
 }
 
 fn letter_at(
     anim: &LetterAnimation,
     i: usize,
+    count: usize,
     size: f32,
     t_ms: u32,
     layer_start_ms: u32,
 ) -> LetterTransform {
+    // Order index for the stagger: reversed animates right-to-left (last letter
+    // first). The scatter randomness below still keys off the real index `i`.
+    let order = if anim.reverse { count.saturating_sub(1).saturating_sub(i) } else { i };
     // The animation is anchored to the LAYER'S start, with `anim.start_ms` an
     // offset from there — so applying a preset animates over the layer's own
     // intro regardless of where the block sits on the timeline. (If it were
     // anchored to absolute comp time, a layer starting after the animation
     // window would show its letters already at rest — i.e. no visible effect.)
     let start =
-        layer_start_ms as f32 + anim.start_ms as f32 + i as f32 * anim.stagger_ms as f32;
+        layer_start_ms as f32 + anim.start_ms as f32 + order as f32 * anim.stagger_ms as f32;
     let dur = anim.duration_ms.max(1) as f32;
     let local = ((t_ms as f32 - start) / dur).clamp(0.0, 1.0);
     let e = 1.0 - (1.0 - local) * (1.0 - local); // ease-out

@@ -5,6 +5,8 @@ import type { Project } from "../bindings/Project";
 import type { Track } from "../bindings/Track";
 import type { ResolvedLayer } from "../bindings/ResolvedLayer";
 import type { TransformEdit } from "../bindings/TransformEdit";
+import type { Transform } from "../bindings/Transform";
+import type { Transition } from "../bindings/Transition";
 import type { ShapedText } from "../bindings/ShapedText";
 import type { LetterAnimation } from "../bindings/LetterAnimation";
 import type { Font } from "../bindings/Font";
@@ -170,10 +172,23 @@ export const createSlideshowTemplate = (
 export const setImageCrop = (layerId: number, x: number, y: number) =>
   invoke<Project>("set_image_crop", { layerId, x, y });
 
-/** Replace an image layer's source with `path`, keeping its effects, transitions,
- *  timing and transform (rescaled so the new media fills the same on-screen box). */
-export const replaceLayerMedia = (layerId: number, path: string) =>
-  invoke<Project>("replace_layer_media", { layerId, path });
+/** Set a layer's anchor / pivot (normalized 0..1; 0.5,0.5 = centre) — the point
+ *  scale and rotation happen about. Position is compensated at `tMs` so the layer
+ *  doesn't jump. Applies to image / video / shape / text layers. */
+export const setLayerAnchor = (layerId: number, ax: number, ay: number, tMs: number) =>
+  invoke<Project>("set_layer_anchor", { layerId, ax, ay, tMs });
+
+/** Replace an image/video layer's media with `path` (image or video), keeping its
+ *  effects, transitions, timing and transform (rescaled to the same on-screen box).
+ *  For a video, pass its `width`/`height`/`durationMs`; images are measured backend-side. */
+export const replaceLayerMedia = (
+  layerId: number,
+  path: string,
+  kind: "image" | "video",
+  width = 0,
+  height = 0,
+  durationMs = 0
+) => invoke<Project>("replace_layer_media", { layerId, path, kind, width, height, durationMs });
 
 /** Template: a before/after reveal — `before` fills the frame and `after` is
  *  revealed by a divider bar that sweeps across (`orientation` "horizontal" or
@@ -662,6 +677,16 @@ export const pasteCellEffects = (layerId: number, cell: number, effects: Effect[
 
 export const pasteCellEffectsAll = (layerId: number, effects: Effect[], except: number | null) =>
   invoke<Project>("paste_cell_effects_all", { layerId, effects, except });
+
+/** Copy a layer's look onto another: effects + transform (scale/rotation/opacity/
+ *  anchor, keeping the target's position) + in/out transitions. */
+export const applyLayerStyle = (
+  layerId: number,
+  effects: Effect[],
+  transform: Transform,
+  transitionIn: Transition | null,
+  transitionOut: Transition | null
+) => invoke<Project>("apply_layer_style", { layerId, effects, transform, transitionIn, transitionOut });
 
 export const moveCellKeyframesAt = (layerId: number, cell: number, fromMs: number, toMs: number) =>
   invoke<Project>("move_cell_keyframes_at", { layerId, cell, fromMs, toMs });

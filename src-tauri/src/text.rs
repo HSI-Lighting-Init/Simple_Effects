@@ -367,7 +367,10 @@ pub fn shape_aligned(
             gs.push(ShapedGlyph {
                 d: b.d,
                 x: pen + pos.x_offset as f32 * s,
-                y: 0.0, // filled in the layout pass below
+                // GPOS vertical offset (font y is up, screen y is down → negate).
+                // Nastaliq / "broken" fonts cascade letters down the line via this;
+                // the line offset is added in the layout pass below.
+                y: -(pos.y_offset as f32 * s),
                 advance: pos.x_advance as f32 * s,
                 cx,
                 cy,
@@ -397,7 +400,7 @@ pub fn shape_aligned(
                 let mut added = 0.0f32;
                 let spaces = std::mem::take(&mut line.space);
                 for (g, is_sp) in line.glyphs.drain(..).zip(spaces) {
-                    glyphs.push(ShapedGlyph { x: g.x + added, y: y_off, ..g });
+                    glyphs.push(ShapedGlyph { x: g.x + added, y: y_off + g.y, ..g });
                     if is_sp {
                         added += extra;
                     }
@@ -411,7 +414,7 @@ pub fn shape_aligned(
             TextAlign::Right => max_width - line.width,
         };
         for g in line.glyphs.drain(..) {
-            glyphs.push(ShapedGlyph { x: g.x + x_off, y: y_off, ..g });
+            glyphs.push(ShapedGlyph { x: g.x + x_off, y: y_off + g.y, ..g });
         }
     }
 

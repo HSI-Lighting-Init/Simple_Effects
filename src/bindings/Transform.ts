@@ -13,4 +13,10 @@ rotation: Track,
 /**
  * 0.0 .. 1.0
  */
-opacity: Track, };
+opacity: Track, 
+/**
+ * Anchor / pivot in normalized layer coordinates (0..1; 0.5,0.5 = centre).
+ * The layer's position places THIS point, and scale/rotation happen about
+ * it. Static (not keyframed). Older projects default to the centre.
+ */
+anchorX: number, anchorY: number, };

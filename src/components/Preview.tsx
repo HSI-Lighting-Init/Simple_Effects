@@ -144,6 +144,8 @@ type Interaction = {
   onClick: (e: Konva.KonvaEventObject<MouseEvent>) => void;
   onDragMove: (e: Konva.KonvaEventObject<DragEvent>) => void;
   onDragEnd: () => void;
+  onTransformStart: (e: Konva.KonvaEventObject<Event>) => void;
+  onTransform: (e: Konva.KonvaEventObject<Event>) => void;
   onTransformEnd: () => void;
   onContextMenu: (e: Konva.KonvaEventObject<MouseEvent>) => void;
 };
@@ -291,8 +293,8 @@ function EffectImageNode({
       y={r.y}
       width={w}
       height={h}
-      offsetX={w / 2}
-      offsetY={h / 2}
+      offsetX={r.anchorX * w}
+      offsetY={r.anchorY * h}
       scaleX={r.scaleX}
       scaleY={r.scaleY}
       rotation={r.rotation}
@@ -420,8 +422,8 @@ function TransitionImageNode({
       y={r.y}
       width={w}
       height={h}
-      offsetX={w / 2}
-      offsetY={h / 2}
+      offsetX={r.anchorX * w}
+      offsetY={r.anchorY * h}
       scaleX={r.scaleX}
       scaleY={r.scaleY}
       rotation={r.rotation}
@@ -864,8 +866,8 @@ function ImageNode({
       height={h}
       x={r.x}
       y={r.y}
-      offsetX={w / 2}
-      offsetY={h / 2}
+      offsetX={r.anchorX * w}
+      offsetY={r.anchorY * h}
       scaleX={r.scaleX}
       scaleY={r.scaleY}
       rotation={r.rotation}
@@ -958,8 +960,8 @@ function Shape2DNode({
           key={key}
           width={w}
           height={h}
-          offsetX={w / 2}
-          offsetY={h / 2}
+          offsetX={r.anchorX * w}
+          offsetY={r.anchorY * h}
           cornerRadius={s2.cornerRadius}
           {...extra}
         />
@@ -1171,8 +1173,8 @@ function VideoNode({
         y={r.y}
         width={w}
         height={h}
-        offsetX={w / 2}
-        offsetY={h / 2}
+        offsetX={r.anchorX * w}
+        offsetY={r.anchorY * h}
         scaleX={r.scaleX}
         scaleY={r.scaleY}
         rotation={r.rotation}
@@ -1209,8 +1211,8 @@ function VideoNode({
       y={r.y}
       width={w}
       height={h}
-      offsetX={w / 2}
-      offsetY={h / 2}
+      offsetX={r.anchorX * w}
+      offsetY={r.anchorY * h}
       scaleX={r.scaleX}
       scaleY={r.scaleY}
       rotation={r.rotation}
@@ -2302,6 +2304,8 @@ interface Props {
   onEnterGroup: (layerId: number) => void;
   /** Move a Flap effect's hinge axis (drag the dashed line in the preview). */
   onSetFlapAxis?: (layerId: number, index: number, axis: number) => void;
+  /** Set a layer's anchor/pivot by dragging the crosshair (normalized 0..1). */
+  onSetLayerAnchor?: (layerId: number, ax: number, ay: number) => void;
   exporting?: boolean;
   /** Preview render quality — caps the texture size used for drawing so heavy
    *  projects play smoothly. Ignored during export (always full fidelity). */
@@ -2531,6 +2535,7 @@ export default function Preview({
   onMoveVertices,
   onEnterGroup,
   onSetFlapAxis,
+  onSetLayerAnchor,
   exporting = false,
   previewQuality = "balanced",
   onSetPreviewQuality,
@@ -2550,6 +2555,9 @@ export default function Preview({
   const [panY, setPanY] = useState(0);
   const nodeRefs = useRef<Record<number, Konva.Node>>({});
   const trRef = useRef<Konva.Transformer>(null);
+  // Anchor position pinned during a transform so a custom-anchor layer pivots
+  // scale/rotation about its anchor instead of the transformer's box corner.
+  const transformLockRef = useRef<{ x: number; y: number } | null>(null);
   // On-screen size (px) of the Transformer handles. Shrinks for small objects so
   // the anchors scale down with the object and don't cover it (see the attach
   // effect below, which measures the selected node).
@@ -2729,7 +2737,27 @@ export default function Preview({
     },
     onDragMove: (e) => snapToCenter(e.target),
     onDragEnd: () => commit(id),
-    onTransformEnd: () => commit(id),
+    // A layer with a CUSTOM anchor should scale/rotate about that anchor when the
+    // transformer handles are dragged. A node's position IS its anchor point (the
+    // offset), so pinning the position during the transform makes the handles
+    // pivot about the anchor instead of the opposite corner / box centre. Centre-
+    // anchored layers keep Konva's default behaviour.
+    onTransformStart: (e) => {
+      const r = resolved[id];
+      const custom = !!r && (Math.abs(r.anchorX - 0.5) > 0.001 || Math.abs(r.anchorY - 0.5) > 0.001);
+      transformLockRef.current = custom ? { x: e.target.x(), y: e.target.y() } : null;
+    },
+    onTransform: (e) => {
+      const lock = transformLockRef.current;
+      if (lock) {
+        e.target.x(lock.x);
+        e.target.y(lock.y);
+      }
+    },
+    onTransformEnd: () => {
+      transformLockRef.current = null;
+      commit(id);
+    },
     onContextMenu: (e) => {
       e.evt.preventDefault();
       e.cancelBubble = true;
@@ -2780,6 +2808,8 @@ export default function Preview({
     onClick: () => {},
     onDragMove: () => {},
     onDragEnd: () => {},
+    onTransformStart: () => {},
+    onTransform: () => {},
     onTransformEnd: () => {},
     onContextMenu: () => {},
   };
@@ -2822,8 +2852,8 @@ export default function Preview({
           y={r.y}
           width={k.width}
           height={k.height}
-          offsetX={k.width / 2}
-          offsetY={k.height / 2}
+          offsetX={r.anchorX * k.width}
+          offsetY={r.anchorY * k.height}
           fill={rgbaCss(k.color)}
           scaleX={r.scaleX}
           scaleY={r.scaleY}
@@ -3061,6 +3091,64 @@ export default function Preview({
                 rotationSnaps={[0, 90, 180, 270]}
               />
             )}
+
+            {/* Anchor / pivot handle for the selected layer — a crosshair at its
+                position (= the anchor). Scale/rotation pivot about it, and it can
+                be DRAGGED to move the pivot (the layer stays put; the backend
+                compensates). Only image/video/shape have known local bounds. */}
+            {!playing && !exporting && selectedId != null && resolved[selectedId] && !resolved[selectedId].surface &&
+              (() => {
+                const rs = resolved[selectedId]!;
+                const sel = project.layers.find((l) => l.id === selectedId);
+                // Local bounds the anchor is normalized against.
+                let aw = 0;
+                let ah = 0;
+                if (sel) {
+                  const k = sel.kind;
+                  if (k.kind === "image") {
+                    aw = k.crop ? k.crop.width : k.width;
+                    ah = k.crop ? k.crop.height : k.height;
+                  } else if (k.kind === "video") {
+                    aw = k.width;
+                    ah = k.height;
+                  } else if (k.kind === "shape2d" && rs.shape2d) {
+                    aw = rs.shape2d.width;
+                    ah = rs.shape2d.height;
+                  }
+                }
+                const canDrag = aw > 0 && ah > 0 && !!onSetLayerAnchor;
+                const rad = 7 / scale;
+                const arm = rad * 1.7;
+                const sw = 1.5 / scale;
+                return (
+                  <Group
+                    x={rs.x}
+                    y={rs.y}
+                    listening={canDrag}
+                    draggable={canDrag}
+                    onDragEnd={(e) => {
+                      const g = e.target;
+                      // Inverse of world = pos + Rot(θ)·Scale·(local - anchor·bounds):
+                      // recover the dropped point's normalized position in the layer.
+                      const dxw = g.x() - rs.x;
+                      const dyw = g.y() - rs.y;
+                      const t = (rs.rotation * Math.PI) / 180;
+                      const c = Math.cos(t);
+                      const s = Math.sin(t);
+                      const lx = (dxw * c + dyw * s) / (rs.scaleX || 1e-4);
+                      const ly = (-dxw * s + dyw * c) / (rs.scaleY || 1e-4);
+                      onSetLayerAnchor?.(selectedId, rs.anchorX + lx / aw, rs.anchorY + ly / ah);
+                    }}
+                  >
+                    {/* Small invisible grab area (kept tight so it doesn't steal
+                        drags meant to move the layer itself). */}
+                    <Circle radius={rad * 1.3} fill="#000" opacity={0.01} />
+                    <Line points={[-arm, 0, arm, 0]} stroke="#ffcf3f" strokeWidth={sw} listening={false} />
+                    <Line points={[0, -arm, 0, arm]} stroke="#ffcf3f" strokeWidth={sw} listening={false} />
+                    <Circle radius={rad} stroke="#ffcf3f" strokeWidth={sw} listening={false} />
+                  </Group>
+                );
+              })()}
           </KLayer>
         </Stage>
       )}

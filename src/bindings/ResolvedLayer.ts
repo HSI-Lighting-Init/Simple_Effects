@@ -19,6 +19,11 @@ export type ResolvedLayer = { id: number,
  */
 visible: boolean, x: number, y: number, scaleX: number, scaleY: number, rotation: number, opacity: number, 
 /**
+ * Anchor / pivot in normalized layer coords (0.5,0.5 = centre). The renderer
+ * places the layer's position at this point and pivots scale/rotation on it.
+ */
+anchorX: number, anchorY: number, 
+/**
  * Per-letter offsets for animated `Text` layers (one per shaped glyph,
  * in glyph order). Empty for everything else.
  */

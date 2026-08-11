@@ -875,6 +875,7 @@ function TextInspector({
       durationMs: anim?.durationMs ?? 700,
       staggerMs: anim?.staggerMs ?? 70,
       areaPx: anim?.areaPx ?? 500,
+      reverse: anim?.reverse ?? false,
     });
   };
 
@@ -1032,6 +1033,23 @@ function TextInspector({
           {effSlider("Start (ms)", anim.startMs, 0, 5000, 10, (v) => setTiming({ startMs: Math.round(v) }))}
           {effSlider("Letter duration (ms)", anim.durationMs, 1, 3000, 10, (v) => setTiming({ durationMs: Math.round(v) }))}
           {effSlider("Stagger per letter (ms)", anim.staggerMs, 0, 1000, 5, (v) => setTiming({ staggerMs: Math.round(v) }))}
+          <div className="insp-field">
+            <span>Direction</span>
+            <div className="row2" style={{ gap: 6, marginTop: 4 }}>
+              <button
+                className={"insp-btn" + (!anim.reverse ? " active" : "")}
+                onClick={() => setTiming({ reverse: false })}
+              >
+                Left → Right
+              </button>
+              <button
+                className={"insp-btn" + (anim.reverse ? " active" : "")}
+                onClick={() => setTiming({ reverse: true })}
+              >
+                Right → Left
+              </button>
+            </div>
+          </div>
           <p className="insp-hint">Scrub or press Play to see the letters animate.</p>
         </>
       )}
@@ -1622,12 +1640,47 @@ function TransformSection({
   compH: number;
   onCommit: (layerId: number, edit: TransformEdit) => void;
 }) {
+  // Linked scale keeps X and Y proportional (persisted). Editing one axis scales
+  // the other by the same ratio, so the layer keeps its aspect.
+  const [linked, setLinked] = useState(() => localStorage.getItem("sefx.linkScale") !== "0");
+  const toggleLinked = () =>
+    setLinked((v) => {
+      const n = !v;
+      try {
+        localStorage.setItem("sefx.linkScale", n ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return n;
+    });
+  const setScaleX = (v: number) => {
+    if (linked) {
+      const ny = Math.abs(tr.scaleX) > 1e-4 ? tr.scaleY * (v / tr.scaleX) : v;
+      onCommit(layerId, { scaleX: v, scaleY: ny });
+    } else onCommit(layerId, { scaleX: v });
+  };
+  const setScaleY = (v: number) => {
+    if (linked) {
+      const nx = Math.abs(tr.scaleY) > 1e-4 ? tr.scaleX * (v / tr.scaleY) : v;
+      onCommit(layerId, { scaleX: nx, scaleY: v });
+    } else onCommit(layerId, { scaleY: v });
+  };
   return (
     <Section title="Transform / Position">
       {effSlider("Position X", tr.x, -compW, compW * 2, 1, (v) => onCommit(layerId, { x: Math.round(v) }))}
       {effSlider("Position Y", tr.y, -compH, compH * 2, 1, (v) => onCommit(layerId, { y: Math.round(v) }))}
-      {effSlider("Scale X", tr.scaleX, 0.05, 5, 0.05, (v) => onCommit(layerId, { scaleX: v }))}
-      {effSlider("Scale Y", tr.scaleY, 0.05, 5, 0.05, (v) => onCommit(layerId, { scaleY: v }))}
+      <div className="row2" style={{ justifyContent: "space-between", alignItems: "center", marginTop: 2 }}>
+        <span className="muted" style={{ fontSize: 11 }}>Scale</span>
+        <button
+          className={"insp-btn tiny" + (linked ? " active" : "")}
+          title={linked ? "X/Y linked (proportional) — click to unlink" : "X/Y unlinked — click to link"}
+          onClick={toggleLinked}
+        >
+          {linked ? "🔗 Linked" : "🔓 Unlinked"}
+        </button>
+      </div>
+      {effSlider("Scale X", tr.scaleX, 0.05, 5, 0.05, setScaleX)}
+      {effSlider("Scale Y", tr.scaleY, 0.05, 5, 0.05, setScaleY)}
       {effSlider("Rotation°", tr.rotation, -360, 360, 1, (v) => onCommit(layerId, { rotation: v }))}
       {effSlider("Opacity", tr.opacity, 0, 1, 0.01, (v) => onCommit(layerId, { opacity: v }))}
       <p className="insp-hint">Nudge the numbers or drag on the canvas — both keyframe here.</p>
@@ -1670,6 +1723,43 @@ function CropSection({
       ) : (
         <p className="insp-hint">Slide to choose which part of the image shows in the frame.</p>
       )}
+    </Section>
+  );
+}
+
+// Anchor / pivot point for a layer: the point scale and rotation happen about.
+// A 3×3 grid picks the common spots (corners / edges / centre); the X/Y fields
+// give precise control (in % of the layer, can go outside 0–100). Changing it
+// keeps the layer visually in place (the backend compensates the position).
+function AnchorSection({
+  layerId,
+  ax,
+  ay,
+  onSet,
+}: {
+  layerId: number;
+  ax: number;
+  ay: number;
+  onSet: (layerId: number, ax: number, ay: number) => void;
+}) {
+  const near = (a: number, b: number) => Math.abs(a - b) < 0.001;
+  return (
+    <Section title="Anchor / Pivot">
+      <div className="anchor-grid">
+        {[0, 0.5, 1].map((py) =>
+          [0, 0.5, 1].map((px) => (
+            <button
+              key={`${px}-${py}`}
+              className={"anchor-cell" + (near(ax, px) && near(ay, py) ? " active" : "")}
+              title={`Anchor ${px * 100}% , ${py * 100}%`}
+              onClick={() => onSet(layerId, px, py)}
+            />
+          ))
+        )}
+      </div>
+      {effSlider("Anchor X %", Math.round(ax * 100), -100, 200, 1, (v) => onSet(layerId, v / 100, ay))}
+      {effSlider("Anchor Y %", Math.round(ay * 100), -100, 200, 1, (v) => onSet(layerId, ax, v / 100))}
+      <p className="insp-hint">Scale and rotation pivot about this point. The layer stays put when you move it.</p>
     </Section>
   );
 }
@@ -2230,6 +2320,8 @@ interface Props {
   onCommitTransform: (layerId: number, edit: TransformEdit) => void;
   /** Pan an image layer's crop window within its source (reframe it). */
   onSetImageCrop: (layerId: number, x: number, y: number) => void;
+  /** Set a layer's anchor / pivot (normalized 0..1). */
+  onSetLayerAnchor: (layerId: number, ax: number, ay: number) => void;
   /** Selected grid cell (row-major index) for a FrameGrid layer, or null. */
   selectedCell: number | null;
   /** The selected cell's zoom at the playhead (for the slider readout). */
@@ -3022,6 +3114,7 @@ export default function Inspector({
   transformNow,
   onCommitTransform,
   onSetImageCrop,
+  onSetLayerAnchor,
 }: Props) {
   const decalControls = layer && (layer.kind.kind === "image" || layer.kind.kind === "text") && (
     <DecalControls
@@ -3052,6 +3145,18 @@ export default function Inspector({
       {layer && transformNow && (
         <TransformSection layerId={layer.id} tr={transformNow} compW={compWidth} compH={compHeight} onCommit={onCommitTransform} />
       )}
+      {layer &&
+        (layer.kind.kind === "image" ||
+          layer.kind.kind === "video" ||
+          layer.kind.kind === "shape2d" ||
+          layer.kind.kind === "text") && (
+          <AnchorSection
+            layerId={layer.id}
+            ax={layer.transform.anchorX}
+            ay={layer.transform.anchorY}
+            onSet={onSetLayerAnchor}
+          />
+        )}
       {layer && layer.kind.kind === "image" && layer.kind.crop && (
         <CropSection
           layerId={layer.id}

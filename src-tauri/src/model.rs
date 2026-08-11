@@ -501,6 +501,17 @@ pub struct Transform {
     pub rotation: Track,
     /// 0.0 .. 1.0
     pub opacity: Track,
+    /// Anchor / pivot in normalized layer coordinates (0..1; 0.5,0.5 = centre).
+    /// The layer's position places THIS point, and scale/rotation happen about
+    /// it. Static (not keyframed). Older projects default to the centre.
+    #[serde(default = "half")]
+    pub anchor_x: f32,
+    #[serde(default = "half")]
+    pub anchor_y: f32,
+}
+
+fn half() -> f32 {
+    0.5
 }
 
 /// A single animatable property: a list of keyframes plus the value to use when
@@ -579,6 +590,10 @@ pub struct LetterAnimation {
     pub stagger_ms: u32,
     /// For `ScatterIn`: how far letters explode out before gathering (px radius).
     pub area_px: f32,
+    /// Reverse the letter order: animate right-to-left (last letter first) instead
+    /// of the default left-to-right. Older projects default to left-to-right.
+    #[serde(default)]
+    pub reverse: bool,
 }
 
 /// The predefined per-letter effects the user can pick from.
@@ -1336,6 +1351,8 @@ impl Transform {
             scale_y: Track::constant(1.0),
             rotation: Track::constant(0.0),
             opacity: Track::constant(1.0),
+            anchor_x: 0.5,
+            anchor_y: 0.5,
         }
     }
 }
@@ -1423,6 +1440,7 @@ impl Project {
                     duration_ms: 700,
                     stagger_ms: 70,
                     area_px: 500.0,
+                    reverse: false,
                 }),
                 parts: vec![],
                 decompose: Track::constant(0.0),

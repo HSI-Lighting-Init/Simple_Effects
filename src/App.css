@@ -58,6 +58,30 @@ body {
   z-index: 200;
 }
 
+/* Anchor / pivot 3×3 quick-pick grid in the inspector. */
+.anchor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  width: 72px;
+  margin: 4px 0 8px;
+}
+.anchor-cell {
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--panel);
+  cursor: pointer;
+  padding: 0;
+}
+.anchor-cell:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.anchor-cell.active {
+  border-color: #5b8cff;
+  background: rgba(91, 140, 255, 0.4);
+}
+
 /* Build/version badge, pushed to the far right of the menu bar. */
 .menubar-build {
   margin-left: auto;
