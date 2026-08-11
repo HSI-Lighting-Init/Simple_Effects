@@ -41,9 +41,13 @@ Write-Host "==> Installing silently: $($setup.Name)" -ForegroundColor Cyan
 $p = Start-Process -FilePath $setup.FullName -ArgumentList "/S" -PassThru -Wait
 if ($p.ExitCode -ne 0) { throw "installer failed (exit $($p.ExitCode))" }
 
-# Refresh the shareable installer on the Desktop.
-$desktopSetup = Join-Path ([Environment]::GetFolderPath("Desktop")) "Simple Effects Setup.exe"
+# Refresh the shareable installer on the Desktop: a stable "latest" name plus a
+# build-stamped copy so downloaded/shared installers can be told apart.
+$desktop = [Environment]::GetFolderPath("Desktop")
+$desktopSetup = Join-Path $desktop "Simple Effects Setup.exe"
+$desktopStamped = Join-Path $desktop "Simple Effects Setup build $buildNum.exe"
 Copy-Item $setup.FullName $desktopSetup -Force
+Copy-Item $setup.FullName $desktopStamped -Force
 
 # Report where it landed (per-user install by default).
 $installed = "$env:LOCALAPPDATA\Simple Effects\simple-effects.exe"
@@ -55,4 +59,5 @@ if (Test-Path $installed) {
   Write-Host "    Installed (check Start Menu 'Simple Effects')."
 }
 Write-Host "    Desktop installer refreshed: $desktopSetup"
+Write-Host "    Build-stamped copy:          $desktopStamped"
 Write-Host "    Launch from the Desktop 'Simple Effects' shortcut or the Start Menu."
