@@ -1208,12 +1208,61 @@ fn launch_file_from_args() -> Option<String> {
     })
 }
 
+/// Re-point every media reference in `project` that no longer exists on disk to a
+/// same-named file sitting next to the project file (`dir`). This makes a project
+/// portable: share the .sefx together with its media in one folder and it opens
+/// with all images/audio/video intact on any machine, even though the saved paths
+/// are absolute to the author's drive.
+fn relink_media(project: &mut Project, dir: &std::path::Path) {
+    fn fix(path: &mut String, dir: &std::path::Path) {
+        if path.is_empty() || std::path::Path::new(path.as_str()).exists() {
+            return;
+        }
+        if let Some(name) = std::path::Path::new(path.as_str()).file_name() {
+            let cand = dir.join(name);
+            if cand.exists() {
+                *path = cand.to_string_lossy().into_owned();
+            }
+        }
+    }
+    fn walk(layers: &mut [Layer], dir: &std::path::Path) {
+        for l in layers.iter_mut() {
+            match &mut l.kind {
+                LayerKind::Image { src, .. }
+                | LayerKind::Video { src, .. }
+                | LayerKind::Audio { src, .. } => fix(src, dir),
+                LayerKind::FrameGrid { cells, background, .. } => {
+                    for c in cells.iter_mut() {
+                        if let Some(s) = c.src.as_mut() {
+                            fix(s, dir);
+                        }
+                    }
+                    if let Some(bg) = background.as_mut() {
+                        fix(bg, dir);
+                    }
+                }
+                LayerKind::Group { children } => walk(children, dir),
+                _ => {}
+            }
+        }
+    }
+    for m in project.media.iter_mut() {
+        fix(m, dir);
+    }
+    walk(&mut project.layers, dir);
+}
+
 /// Open a Simple Effects (.sefx) project file, replacing the current project and
-/// re-shaping its text layers. Returns the loaded project. Undoable.
+/// re-shaping its text layers. Media whose saved (absolute) path is missing is
+/// relinked to a same-named file beside the .sefx, so a shared folder just works.
+/// Returns the loaded project. Undoable.
 #[tauri::command]
 fn open_project_file(state: State<AppState>, path: String) -> Result<Project, String> {
     let text = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
-    let loaded: Project = serde_json::from_str(&text).map_err(|e| format!("parse {path}: {e}"))?;
+    let mut loaded: Project = serde_json::from_str(&text).map_err(|e| format!("parse {path}: {e}"))?;
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        relink_media(&mut loaded, dir);
+    }
     let mut current = state.project.lock().unwrap();
     state.snapshot(&current);
     let mut shaped = state.shaped.lock().unwrap();

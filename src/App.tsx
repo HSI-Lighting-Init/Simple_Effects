@@ -21,6 +21,7 @@ import { hasAudio, waveformPng } from "./lib/waveform";
 import RecorderPanel from "./components/RecorderPanel";
 import ContextMenu from "./components/ContextMenu";
 import MenuBar, { type MenuDef } from "./components/MenuBar";
+import { BUILD_INFO } from "./buildInfo";
 import CompSettings from "./components/CompSettings";
 import UiSizeDialog from "./components/UiSizeDialog";
 import EffectEditor from "./components/EffectEditor";
@@ -3485,7 +3486,10 @@ export default function App() {
       className="app"
       style={{ gridTemplateRows: `30px 48px 1fr 6px ${timelineH}px` }}
     >
-      <MenuBar menus={menus} />
+      <MenuBar
+        menus={menus}
+        buildLabel={`v${BUILD_INFO.version} · build ${BUILD_INFO.build}${BUILD_INFO.commit ? ` · ${BUILD_INFO.commit}` : ""}`}
+      />
       {fileDragging && (
         <div className="drop-overlay">
           <div className="drop-card">⤓ Drop media (image / video / audio) to add it to the bin</div>

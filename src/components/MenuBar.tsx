@@ -16,7 +16,7 @@ export interface MenuDef {
   items: MenuItemDef[];
 }
 
-export default function MenuBar({ menus }: { menus: MenuDef[] }) {
+export default function MenuBar({ menus, buildLabel }: { menus: MenuDef[]; buildLabel?: string }) {
   const [open, setOpen] = useState<number | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
 
@@ -73,6 +73,11 @@ export default function MenuBar({ menus }: { menus: MenuDef[] }) {
           )}
         </div>
       ))}
+      {buildLabel && (
+        <span className="menubar-build" title="Current build — increments with each update">
+          {buildLabel}
+        </span>
+      )}
     </div>
   );
 }
