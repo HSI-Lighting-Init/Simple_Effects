@@ -322,6 +322,74 @@ function EffectImageNode({
 // as ImageNode/EffectImageNode, so it selects/drags/keyframes identically. The
 // instance is rebuilt per frame so keyframed effects on B stay current.
 const DIRS: ("left" | "right" | "up" | "down")[] = ["left", "right", "up", "down"];
+
+// Render one frame of a transition-engine effect for a source (image frame or
+// video frame) into the layer's own canvas coordinate space (w×h). Shared by
+// image and video nodes so video clips get the real transition, not just a fade.
+function drawTransitionFrame(
+  c: CanvasRenderingContext2D,
+  base: CanvasImageSource,
+  w: number,
+  h: number,
+  transition: ResolvedTransition,
+  effects: ResolvedEffect[],
+  bcv: HTMLCanvasElement,
+  off: HTMLCanvasElement
+) {
+  // Effects only ever apply to image sources (the video UI has no effect stack),
+  // so the cast is safe; applyEffects draws via drawImage which accepts a video.
+  const texClip: CanvasImageSource =
+    effects.length > 0 ? applyEffects(bcv, base as Texture, w, h, effects) : base;
+  const clip: Clip = { source: texClip, width: w, height: h };
+  const empty: Clip = { source: null, width: 0, height: 0 };
+  const featureA = getTransitionMeta(transition.engine ?? "")?.feature === "a";
+  const A: Clip = featureA ? clip : empty;
+  const B: Clip = featureA ? empty : clip;
+  const texB = texClip;
+  const dir = DIRS[transition.direction] ?? "left";
+  let userParams: Record<string, unknown> = {};
+  if (transition.params) {
+    try {
+      userParams = JSON.parse(transition.params) as Record<string, unknown>;
+    } catch {
+      userParams = {};
+    }
+  }
+  const f = transition.factor;
+  // Crossfade the engine output to the plain clip at the window edges so the
+  // hand-off to the resting frame is seamless (see the original note above).
+  const EDGE = 0.12;
+  const fromEmpty = f <= EDGE ? f / EDGE : 1;
+  const toPlain = f >= 1 - EDGE ? (f - (1 - EDGE)) / EDGE : 0;
+  try {
+    const tr = createTransition(transition.engine ?? "fade", A, B, {
+      outWidth: w,
+      outHeight: h,
+      direction: dir,
+      solo: true,
+      ...userParams,
+    });
+    tr.render(off, featureA ? 1 - f : f);
+    TRANSITION_DEBUG = `OK engine=${transition.engine} f=${f.toFixed(2)} featureA=${featureA}`;
+    if (featureA) {
+      c.drawImage(off, 0, 0, w, h);
+    } else {
+      c.globalAlpha = fromEmpty;
+      c.drawImage(off, 0, 0, w, h);
+      if (toPlain > 0) {
+        c.globalAlpha = toPlain;
+        c.drawImage(texB, 0, 0, w, h);
+      }
+      c.globalAlpha = 1;
+    }
+  } catch (err) {
+    TRANSITION_DEBUG = `CATCH engine=${transition.engine}: ${err instanceof Error ? err.message : String(err)}`;
+    c.globalAlpha = f;
+    c.drawImage(texB, 0, 0, w, h);
+    c.globalAlpha = 1;
+  }
+}
+
 function TransitionImageNode({
   src,
   r,
@@ -359,82 +427,18 @@ function TransitionImageNode({
       rotation={r.rotation}
       opacity={r.opacity}
       sceneFunc={(ctx) => {
-        // The clip, with its effect stack baked in.
         const bcv = bRef.current ?? (bRef.current = document.createElement("canvas"));
-        const texClip: CanvasImageSource = r.effects.length > 0 ? applyEffects(bcv, base, w, h, r.effects) : base;
-        const clip: Clip = { source: texClip, width: w, height: h };
-        const empty: Clip = { source: null, width: 0, height: 0 };
-        // Most transitions build up clip B (reveal it in) → clip = B, A = empty.
-        // But "feature A" transitions (disintegration/fold/peel) animate clip A to
-        // reveal B; with an empty A there's nothing to animate, so they'd collapse
-        // to a fade. For those, put the clip on A and play the transition in
-        // reverse so the clip assembles in (or breaks apart on the way out).
-        const featureA = getTransitionMeta(transition.engine ?? "")?.feature === "a";
-        const A: Clip = featureA ? clip : empty;
-        const B: Clip = featureA ? empty : clip;
-        const texB = texClip; // the plain resting clip, for the seam hand-off
-        const dir = DIRS[transition.direction] ?? "left";
         const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
-        // Per-clip variables (the math knobs), stored as a JSON object.
-        let userParams: Record<string, unknown> = {};
-        if (transition.params) {
-          try {
-            userParams = JSON.parse(transition.params) as Record<string, unknown>;
-          } catch {
-            userParams = {};
-          }
-        }
-        const c = ctx as unknown as CanvasRenderingContext2D;
-        const f = transition.factor;
-        // Smooth the seams: many transitions (esp. the 3D camera moves) don't
-        // land on an identity framing at f=1, so a hard hand-off to the plain
-        // image node pops. Over the last EDGE of the window we crossfade the
-        // engine output → the plain clip (so f=1 == the normal render), and over
-        // the first EDGE we ramp up from fully transparent (so f=0 reveals what's
-        // beneath). Both ends therefore match their neighbours exactly.
-        const EDGE = 0.12;
-        const fromEmpty = f <= EDGE ? f / EDGE : 1; // 0 at f=0 → 1 after the edge
-        const toPlain = f >= 1 - EDGE ? (f - (1 - EDGE)) / EDGE : 0; // →1 as f→1
-        try {
-          const tr = createTransition(transition.engine ?? "fade", A, B, {
-            outWidth: w,
-            outHeight: h,
-            direction: dir,
-            // This is always a single-clip transition (the other side is empty),
-            // so distortion transitions drive themselves instead of a crossfade.
-            solo: true,
-            ...userParams,
-          });
-          // Feature-A transitions run in reverse: the clip (on A) is fully present
-          // at f=1 (progress 0) and gone at f=0 (progress 1), so it assembles in /
-          // breaks apart with the window instead of just fading.
-          tr.render(off, featureA ? 1 - f : f);
-          TRANSITION_DEBUG = `OK engine=${transition.engine} f=${f.toFixed(2)} featureA=${featureA}`;
-          if (featureA) {
-            // The effect itself carries the transition (the clip disintegrates /
-            // folds / distorts, or is opaque and resolves). Drawing it through the
-            // seam alpha ramp would just fade it — which, on a long transition,
-            // is ALL you'd see. So draw it straight; it already lands on the clean
-            // clip at f=1 and on transparency/scramble at f=0.
-            c.drawImage(off, 0, 0, w, h);
-          } else {
-            c.globalAlpha = fromEmpty;
-            c.drawImage(off, 0, 0, w, h);
-            if (toPlain > 0) {
-              c.globalAlpha = toPlain; // converge onto the exact resting frame
-              // Draw at the logical size: texB may be a downscaled texture, so
-              // drawing it at natural size would leave a small ghost in the corner.
-              c.drawImage(texB, 0, 0, w, h);
-            }
-            c.globalAlpha = 1;
-          }
-        } catch (err) {
-          // Unknown/failed transition → fall back to a plain opacity fade.
-          TRANSITION_DEBUG = `CATCH engine=${transition.engine}: ${err instanceof Error ? err.message : String(err)}`;
-          c.globalAlpha = f;
-          c.drawImage(texB, 0, 0, w, h);
-          c.globalAlpha = 1;
-        }
+        drawTransitionFrame(
+          ctx as unknown as CanvasRenderingContext2D,
+          base,
+          w,
+          h,
+          transition,
+          r.effects,
+          bcv,
+          off
+        );
       }}
       hitFunc={(ctx, shape) => {
         ctx.beginPath();
@@ -1076,7 +1080,9 @@ function VideoNode({
   registerRef: NodeRef;
 }) {
   const [vid, setVid] = useState<HTMLVideoElement | null>(null);
-  const imgRef = useRef<Konva.Image | null>(null);
+  const imgRef = useRef<Konva.Node | null>(null);
+  const bRef = useRef<HTMLCanvasElement | null>(null);
+  const offRef = useRef<HTMLCanvasElement | null>(null);
 
   // Create the element once per source (blob URL is canvas-safe for export).
   useEffect(() => {
@@ -1149,12 +1155,55 @@ function VideoNode({
   if (!vid) return null;
   const w = vid.videoWidth || 1;
   const h = vid.videoHeight || 1;
+  const setRef = (n: Konva.Node | null) => {
+    imgRef.current = n;
+    registerRef(n);
+  };
+  // With an engine transition active, draw the current video frame through the
+  // transition engine (cube / slide / glitch / …) — so video gets the real
+  // effect, not just an opacity fade.
+  const engineTr = r.transition?.engine ? r.transition : null;
+  if (engineTr) {
+    return (
+      <Shape
+        ref={setRef}
+        x={r.x}
+        y={r.y}
+        width={w}
+        height={h}
+        offsetX={w / 2}
+        offsetY={h / 2}
+        scaleX={r.scaleX}
+        scaleY={r.scaleY}
+        rotation={r.rotation}
+        opacity={r.opacity}
+        sceneFunc={(ctx) => {
+          const bcv = bRef.current ?? (bRef.current = document.createElement("canvas"));
+          const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
+          drawTransitionFrame(
+            ctx as unknown as CanvasRenderingContext2D,
+            vid,
+            w,
+            h,
+            engineTr,
+            r.effects,
+            bcv,
+            off
+          );
+        }}
+        hitFunc={(ctx, shape) => {
+          ctx.beginPath();
+          ctx.rect(0, 0, w, h);
+          ctx.closePath();
+          ctx.fillStrokeShape(shape);
+        }}
+        {...interaction}
+      />
+    );
+  }
   return (
     <KImage
-      ref={(n) => {
-        imgRef.current = n;
-        registerRef(n);
-      }}
+      ref={setRef}
       image={vid}
       x={r.x}
       y={r.y}
@@ -2910,7 +2959,9 @@ export default function Preview({
     // Engine transitions on a flat image / grid bake themselves into the node
     // above; everything else uses the legacy transition group wrap.
     const engineHandled =
-      !!r.transition?.engine && !r.surface && (k.kind === "image" || k.kind === "framegrid");
+      !!r.transition?.engine &&
+      !r.surface &&
+      (k.kind === "image" || k.kind === "framegrid" || k.kind === "video");
     const tp = engineHandled ? null : transitionGroupProps(r.transition, project.width, project.height);
     return tp ? (
       <Group key={layer.id} {...tp}>
