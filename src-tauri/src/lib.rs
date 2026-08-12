@@ -195,7 +195,30 @@ fn evaluate_at(state: State<AppState>, t_ms: u32) -> Vec<ResolvedLayer> {
             (*id, (st.width, h))
         })
         .collect();
-    eval::evaluate(&project, t_ms, &counts, &text_dims)
+    // Per-glyph line index (top line = 0), so per-letter stagger can reveal a
+    // multi-line run line-by-line and reverse only *within* each line for RTL.
+    // Each glyph's y is its line baseline (line * line_height) plus a small GPOS
+    // offset, so rounding y / line_height recovers the line.
+    let letter_lines: HashMap<u32, Vec<u32>> = shaped
+        .iter()
+        .map(|(id, st)| {
+            let lh = st.line_height;
+            let last = st.lines.max(1) - 1;
+            let idx = st
+                .glyphs
+                .iter()
+                .map(|g| {
+                    if lh > 0.0 {
+                        ((g.y / lh).round().max(0.0) as u32).min(last)
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            (*id, idx)
+        })
+        .collect();
+    eval::evaluate(&project, t_ms, &counts, &text_dims, &letter_lines)
 }
 
 /// Hand the shaped glyphs of a text layer to the frontend so it can draw the

@@ -758,8 +758,9 @@ pub fn evaluate(
     t_ms: u32,
     letter_counts: &HashMap<u32, usize>,
     text_dims: &HashMap<u32, (f32, f32)>,
+    letter_lines: &HashMap<u32, Vec<u32>>,
 ) -> Vec<ResolvedLayer> {
-    resolve_layers(&project.layers, t_ms, letter_counts, text_dims)
+    resolve_layers(&project.layers, t_ms, letter_counts, text_dims, letter_lines)
 }
 
 /// Resolve one layer list (recurses into `Group` children). Shapes are resolved
@@ -770,6 +771,7 @@ fn resolve_layers(
     t_ms: u32,
     letter_counts: &HashMap<u32, usize>,
     text_dims: &HashMap<u32, (f32, f32)>,
+    letter_lines: &HashMap<u32, Vec<u32>>,
 ) -> Vec<ResolvedLayer> {
     // Pass 1: resolve every Shape3D into a ShapeState so the images pinned to it
     // (which may appear before or after it in the list) can be projected.
@@ -811,9 +813,10 @@ fn resolve_layers(
                     ..
                 } => {
                     let count = letter_counts.get(&layer.id).copied().unwrap_or(0);
+                    let lines = letter_lines.get(&layer.id).map(|v| v.as_slice()).unwrap_or(&[]);
                     // Base per-letter transforms from the preset (or identity).
                     let mut base = match anim {
-                        Some(a) => eval_letters(a, count, *size, t_ms, layer.start_ms),
+                        Some(a) => eval_letters(a, count, lines, *size, t_ms, layer.start_ms),
                         None if parts.is_empty() && animators.is_empty() => Vec::new(),
                         None => vec![LetterTransform::IDENTITY; count],
                     };
@@ -938,7 +941,7 @@ fn resolve_layers(
             // Group → recursively resolve its children (nested precomp).
             let group = match &layer.kind {
                 LayerKind::Group { children } => Some(ResolvedGroup {
-                    children: resolve_layers(children, t_ms, letter_counts, text_dims),
+                    children: resolve_layers(children, t_ms, letter_counts, text_dims, letter_lines),
                 }),
                 _ => None,
             };
@@ -978,30 +981,97 @@ fn resolve_layers(
         .collect()
 }
 
-/// Compute every letter's offset for a preset at time `t_ms`.
+/// Compute every letter's offset for a preset at time `t_ms`. `lines` gives each
+/// glyph's line index (top line = 0); it may be empty when the caller has no line
+/// info, in which case the run is treated as a single line.
 pub fn eval_letters(
     anim: &LetterAnimation,
     count: usize,
+    lines: &[u32],
     size: f32,
     t_ms: u32,
     layer_start_ms: u32,
 ) -> Vec<LetterTransform> {
+    let orders = stagger_orders(count, lines, anim.reverse);
     (0..count)
-        .map(|i| letter_at(anim, i, count, size, t_ms, layer_start_ms))
+        .map(|i| letter_at(anim, i, orders[i], size, t_ms, layer_start_ms))
         .collect()
+}
+
+/// The reveal rank of each glyph for the stagger. Forward (`reverse = false`) is
+/// simply reading order (top line first, left-to-right). Reversed flips the
+/// *within-line* direction (right-to-left, for RTL scripts) while keeping the
+/// lines themselves in top-to-bottom order — otherwise a multi-line RTL run would
+/// type from the bottom line up. Glyphs are laid out one whole line at a time, so
+/// each line owns a contiguous span of the flat glyph array.
+fn stagger_orders(count: usize, lines: &[u32], reverse: bool) -> Vec<usize> {
+    if !reverse {
+        return (0..count).collect();
+    }
+    // No usable per-glyph line info → fall back to reversing the whole run.
+    if lines.len() != count || count == 0 {
+        return (0..count).rev().collect();
+    }
+    let mut orders = vec![0usize; count];
+    let mut i = 0;
+    while i < count {
+        let line = lines[i];
+        let start = i;
+        let mut end = i;
+        while end < count && lines[end] == line {
+            end += 1;
+        }
+        let len = end - start;
+        // Reverse within [start, end): the line keeps its global rank span, so
+        // earlier lines still reveal first; only the order inside the line flips.
+        for p in 0..len {
+            orders[start + p] = start + (len - 1 - p);
+        }
+        i = end;
+    }
+    orders
+}
+
+#[cfg(test)]
+mod stagger_tests {
+    use super::stagger_orders;
+
+    #[test]
+    fn forward_is_reading_order() {
+        assert_eq!(stagger_orders(4, &[0, 0, 1, 1], false), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn reverse_single_line_flips_whole_run() {
+        assert_eq!(stagger_orders(3, &[0, 0, 0], true), vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn reverse_multiline_keeps_lines_top_to_bottom() {
+        // Two lines of 2 glyphs. Line 0 must still reveal before line 1 (ranks
+        // 0,1 vs 2,3), with each line reversed internally.
+        let orders = stagger_orders(4, &[0, 0, 1, 1], true);
+        assert_eq!(orders, vec![1, 0, 3, 2]);
+        // The lowest ranks (revealed first) belong to the top line.
+        assert!(orders[0].max(orders[1]) < orders[2].min(orders[3]));
+    }
+
+    #[test]
+    fn reverse_without_line_info_falls_back_to_whole_reversal() {
+        assert_eq!(stagger_orders(3, &[], true), vec![2, 1, 0]);
+    }
 }
 
 fn letter_at(
     anim: &LetterAnimation,
     i: usize,
-    count: usize,
+    order: usize,
     size: f32,
     t_ms: u32,
     layer_start_ms: u32,
 ) -> LetterTransform {
-    // Order index for the stagger: reversed animates right-to-left (last letter
-    // first). The scatter randomness below still keys off the real index `i`.
-    let order = if anim.reverse { count.saturating_sub(1).saturating_sub(i) } else { i };
+    // `order` is the glyph's stagger rank (see `stagger_orders`); the scatter
+    // randomness below still keys off the real glyph index `i`.
     // The animation is anchored to the LAYER'S start, with `anim.start_ms` an
     // offset from there — so applying a preset animates over the layer's own
     // intro regardless of where the block sits on the timeline. (If it were
@@ -1401,7 +1471,7 @@ mod tests {
             transition_out: None,
         };
         let p = Project { width: 1920, height: 1080, fps: 30.0, duration_ms: 4000, layers: vec![layer], media: vec![] };
-        let bend_at = |t: u32| evaluate(&p, t, &HashMap::new(), &HashMap::new())[0].shape2d.clone().unwrap().bend;
+        let bend_at = |t: u32| evaluate(&p, t, &HashMap::new(), &HashMap::new(), &HashMap::new())[0].shape2d.clone().unwrap().bend;
         assert_eq!(bend_at(0), 0.0);
         assert!((bend_at(500) - 50.0).abs() < 1.0, "midpoint should be ~50: {}", bend_at(500));
         assert_eq!(bend_at(1000), 100.0);
@@ -1410,7 +1480,7 @@ mod tests {
     #[test]
     fn demo_evaluates() {
         let p = Project::demo();
-        let r = evaluate(&p, 0, &HashMap::new(), &HashMap::new());
+        let r = evaluate(&p, 0, &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(r.len(), 3);
         // Accent (id 2) starts fully transparent at t=0.
         let accent = r.iter().find(|l| l.id == 2).unwrap();
