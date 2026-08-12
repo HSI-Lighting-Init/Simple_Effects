@@ -76,7 +76,14 @@ weight: number,
 /**
  * Select the italic/oblique face of the family when available.
  */
-italic: boolean, anim: LetterAnimation | null, parts: Array<LetterOverride>, 
+italic: boolean, anim: LetterAnimation | null, 
+/**
+ * Optional per-letter EXIT animation, anchored to the layer's END. Same
+ * presets as `anim`, but played as an "away" effect (the letters explode
+ * out, type away, fade/scale/rise off) so they finish exactly as the
+ * layer leaves. `None` = no exit (back-compatible).
+ */
+animOut: LetterAnimation | null, parts: Array<LetterOverride>, 
 /**
  * Keyframeable 0..1: how much of `parts` is applied. 0 = composed,
  * 1 = fully decomposed. Keyframe it to animate the decompose effect.

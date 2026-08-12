@@ -80,6 +80,16 @@ const PRESETS: { value: LetterPreset | "none"; label: string }[] = [
   { value: "typewriter", label: "Typewriter" },
 ];
 
+// The same motions, played as an EXIT at the layer end (letters leave).
+const PRESETS_OUT: { value: LetterPreset | "none"; label: string }[] = [
+  { value: "none", label: "None (stays on)" },
+  { value: "fadeIn", label: "Fade away" },
+  { value: "scalePop", label: "Scale away" },
+  { value: "riseUp", label: "Rise away" },
+  { value: "scatterIn", label: "Explode away (scatter)" },
+  { value: "typewriter", label: "Type away" },
+];
+
 function rgbToHex(c: Rgba): string {
   const h = (n: number) => Math.max(0, Math.min(255, n | 0)).toString(16).padStart(2, "0");
   return `#${h(c.r)}${h(c.g)}${h(c.b)}`;
@@ -761,6 +771,7 @@ function TextInspector({
   onFontStyle,
   onSetTextAlign,
   anim,
+  animOut,
   style,
   animators,
   layerStyles,
@@ -775,6 +786,7 @@ function TextInspector({
   colorKeyCount,
   onFont,
   onAnim,
+  onAnimOut,
   onSetTextStyle,
   onSetTextAnimators,
   onSetTextLayerStyles,
@@ -801,6 +813,7 @@ function TextInspector({
   onFontStyle: (layerId: number, weight: number, italic: boolean) => void;
   onSetTextAlign: (layerId: number, align: TextAlign) => void;
   anim: LetterAnimation | null;
+  animOut: LetterAnimation | null;
   style: TextStyle | null;
   animators: TextAnimator[];
   layerStyles: TextLayerStyles | null;
@@ -815,6 +828,7 @@ function TextInspector({
   colorKeyCount: number;
   onFont: (layerId: number, font: Font) => void;
   onAnim: (layerId: number, anim: LetterAnimation | null) => void;
+  onAnimOut: (layerId: number, anim: LetterAnimation | null) => void;
   onSetTextStyle: (layerId: number, style: TextStyle | null) => void;
   onSetTextAnimators: (layerId: number, animators: TextAnimator[]) => void;
   onSetTextLayerStyles: (layerId: number, styles: TextLayerStyles | null) => void;
@@ -881,6 +895,23 @@ function TextInspector({
 
   const setTiming = (patch: Partial<LetterAnimation>) => {
     if (anim) onAnim(layerId, { ...anim, ...patch });
+  };
+
+  // Exit ("away") animation — same presets, played at the layer end.
+  const presetOut: LetterPreset | "none" = animOut?.preset ?? "none";
+  const pickPresetOut = (p: LetterPreset | "none") => {
+    if (p === "none") return onAnimOut(layerId, null);
+    onAnimOut(layerId, {
+      preset: p,
+      startMs: animOut?.startMs ?? 0,
+      durationMs: animOut?.durationMs ?? 700,
+      staggerMs: animOut?.staggerMs ?? 70,
+      areaPx: animOut?.areaPx ?? 500,
+      reverse: animOut?.reverse ?? false,
+    });
+  };
+  const setTimingOut = (patch: Partial<LetterAnimation>) => {
+    if (animOut) onAnimOut(layerId, { ...animOut, ...patch });
   };
 
   return (
@@ -1014,7 +1045,7 @@ function TextInspector({
         onSet3d={onSetTextPerChar3d}
       />
 
-      <div className="insp-sep">Per-letter effect</div>
+      <div className="insp-sep">Per-letter effect — in</div>
       <label className="insp-field">
         Preset
         <select value={preset} onChange={(e) => pickPreset(e.target.value as LetterPreset | "none")}>
@@ -1051,6 +1082,52 @@ function TextInspector({
             </div>
           </div>
           <p className="insp-hint">Scrub or press Play to see the letters animate.</p>
+        </>
+      )}
+
+      <div className="insp-sep">Per-letter effect — out (away)</div>
+      <label className="insp-field">
+        Preset
+        <select
+          value={presetOut}
+          onChange={(e) => pickPresetOut(e.target.value as LetterPreset | "none")}
+        >
+          {PRESETS_OUT.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {animOut && (
+        <>
+          {animOut.preset === "scatterIn" &&
+            effSlider("Explode area (px)", animOut.areaPx, 0, 4000, 20, (v) => setTimingOut({ areaPx: v }))}
+          {effSlider("End gap (ms)", animOut.startMs, 0, 5000, 10, (v) => setTimingOut({ startMs: Math.round(v) }))}
+          {effSlider("Letter duration (ms)", animOut.durationMs, 1, 3000, 10, (v) => setTimingOut({ durationMs: Math.round(v) }))}
+          {effSlider("Stagger per letter (ms)", animOut.staggerMs, 0, 1000, 5, (v) => setTimingOut({ staggerMs: Math.round(v) }))}
+          <div className="insp-field">
+            <span>Direction</span>
+            <div className="row2" style={{ gap: 6, marginTop: 4 }}>
+              <button
+                className={"insp-btn" + (!animOut.reverse ? " active" : "")}
+                onClick={() => setTimingOut({ reverse: false })}
+              >
+                Left → Right
+              </button>
+              <button
+                className={"insp-btn" + (animOut.reverse ? " active" : "")}
+                onClick={() => setTimingOut({ reverse: true })}
+              >
+                Right → Left
+              </button>
+            </div>
+          </div>
+          <p className="insp-hint">
+            The letters leave before the layer ends. <b>End gap</b> is how long before the
+            layer's end the last letter finishes.
+          </p>
         </>
       )}
 
@@ -2301,6 +2378,7 @@ interface Props {
   onFontStyle: (layerId: number, weight: number, italic: boolean) => void;
   onSetTextAlign: (layerId: number, align: TextAlign) => void;
   onAnim: (layerId: number, anim: LetterAnimation | null) => void;
+  onAnimOut: (layerId: number, anim: LetterAnimation | null) => void;
   onSetTextStyle: (layerId: number, style: TextStyle | null) => void;
   onSetTextAnimators: (layerId: number, animators: TextAnimator[]) => void;
   onSetTextLayerStyles: (layerId: number, styles: TextLayerStyles | null) => void;
@@ -3058,6 +3136,7 @@ export default function Inspector({
   onFontStyle,
   onSetTextAlign,
   onAnim,
+  onAnimOut,
   onSetTextStyle,
   onSetTextAnimators,
   onSetTextLayerStyles,
@@ -3183,6 +3262,7 @@ export default function Inspector({
           onFontStyle={onFontStyle}
           onSetTextAlign={onSetTextAlign}
           anim={layer.kind.anim}
+          animOut={layer.kind.animOut}
           style={layer.kind.style}
           animators={layer.kind.animators}
           layerStyles={layer.kind.layerStyles}
@@ -3196,6 +3276,7 @@ export default function Inspector({
           onClearColorKeys={onClearColorKeys}
           onFont={onFont}
           onAnim={onAnim}
+          onAnimOut={onAnimOut}
           onSetTextStyle={onSetTextStyle}
           onSetTextAnimators={onSetTextAnimators}
           onSetTextLayerStyles={onSetTextLayerStyles}

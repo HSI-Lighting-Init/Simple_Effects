@@ -802,6 +802,7 @@ fn resolve_layers(
             let letters = match &layer.kind {
                 LayerKind::Text {
                     anim,
+                    anim_out,
                     size,
                     parts,
                     decompose,
@@ -814,11 +815,32 @@ fn resolve_layers(
                 } => {
                     let count = letter_counts.get(&layer.id).copied().unwrap_or(0);
                     let lines = letter_lines.get(&layer.id).map(|v| v.as_slice()).unwrap_or(&[]);
-                    // Base per-letter transforms from the preset (or identity).
-                    let mut base = match anim {
-                        Some(a) => eval_letters(a, count, lines, *size, t_ms, layer.start_ms),
-                        None if parts.is_empty() && animators.is_empty() => Vec::new(),
-                        None => vec![LetterTransform::IDENTITY; count],
+                    // Base per-letter transforms: compose the intro (`anim`,
+                    // anchored to the layer start) and the exit (`anim_out`,
+                    // anchored to the layer end). Either may be absent.
+                    let mut base = if anim.is_some() || anim_out.is_some() {
+                        let mut v = vec![LetterTransform::IDENTITY; count];
+                        if let Some(a) = anim {
+                            let ins = eval_letters(
+                                a, count, lines, *size, t_ms, layer.start_ms, layer.end_ms, false,
+                            );
+                            for (b, x) in v.iter_mut().zip(ins) {
+                                *b = compose_letter(*b, x);
+                            }
+                        }
+                        if let Some(a) = anim_out {
+                            let outs = eval_letters(
+                                a, count, lines, *size, t_ms, layer.start_ms, layer.end_ms, true,
+                            );
+                            for (b, x) in v.iter_mut().zip(outs) {
+                                *b = compose_letter(*b, x);
+                            }
+                        }
+                        v
+                    } else if parts.is_empty() && animators.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![LetterTransform::IDENTITY; count]
                     };
                     // Blend the manual decompose pose in by the animated amount:
                     // 0 = composed, 1 = fully decomposed (the `parts` pose).
@@ -981,9 +1003,31 @@ fn resolve_layers(
         .collect()
 }
 
+/// Compose two per-letter transforms (e.g. an intro and an exit) into one.
+/// Positional terms add, multiplicative ones (scale/opacity) multiply, and a
+/// later fill override wins.
+fn compose_letter(a: LetterTransform, b: LetterTransform) -> LetterTransform {
+    LetterTransform {
+        dx: a.dx + b.dx,
+        dy: a.dy + b.dy,
+        scale: a.scale * b.scale,
+        opacity: a.opacity * b.opacity,
+        rotation: a.rotation + b.rotation,
+        skew: a.skew + b.skew,
+        skew_axis: if b.skew != 0.0 { b.skew_axis } else { a.skew_axis },
+        tracking: a.tracking + b.tracking,
+        blur: a.blur + b.blur,
+        fill: b.fill.or(a.fill),
+        rx: a.rx + b.rx,
+        ry: a.ry + b.ry,
+        dz: a.dz + b.dz,
+    }
+}
+
 /// Compute every letter's offset for a preset at time `t_ms`. `lines` gives each
 /// glyph's line index (top line = 0); it may be empty when the caller has no line
-/// info, in which case the run is treated as a single line.
+/// info, in which case the run is treated as a single line. `out = true` plays the
+/// preset as an EXIT (anchored to `layer_end_ms`): the letters rest, then leave.
 pub fn eval_letters(
     anim: &LetterAnimation,
     count: usize,
@@ -991,11 +1035,68 @@ pub fn eval_letters(
     size: f32,
     t_ms: u32,
     layer_start_ms: u32,
+    layer_end_ms: u32,
+    out: bool,
 ) -> Vec<LetterTransform> {
     let orders = stagger_orders(count, lines, anim.reverse);
     (0..count)
-        .map(|i| letter_at(anim, i, orders[i], size, t_ms, layer_start_ms))
+        .map(|i| {
+            if out {
+                letter_out(anim, i, orders[i], count, size, t_ms, layer_end_ms)
+            } else {
+                letter_at(anim, i, orders[i], size, t_ms, layer_start_ms)
+            }
+        })
         .collect()
+}
+
+/// Exit ("away") variant of a preset: the letter rests until its staggered
+/// window near the layer end, then plays the motion in reverse so it leaves. The
+/// run is timed so the last-leaving letter finishes at `layer_end_ms - start_ms`.
+fn letter_out(
+    anim: &LetterAnimation,
+    i: usize,
+    order: usize,
+    count: usize,
+    size: f32,
+    t_ms: u32,
+    layer_end_ms: u32,
+) -> LetterTransform {
+    let dur = anim.duration_ms.max(1) as f32;
+    let max_rank = count.saturating_sub(1) as f32;
+    // Order 0 exits first (reading order); each later rank leaves one stagger
+    // later, so the whole run has left by `end - start_ms`. `reverse` already
+    // flipped the ranks upstream, so it flips the exit order too.
+    let finish =
+        (layer_end_ms as f32 - anim.start_ms as f32) - (max_rank - order as f32) * anim.stagger_ms as f32;
+    let start = finish - dur;
+    let local = ((t_ms as f32 - start) / dur).clamp(0.0, 1.0);
+    // Ease-in: hold at rest, then accelerate away.
+    let e = local * local;
+
+    let mut lt = LetterTransform::IDENTITY;
+    match anim.preset {
+        LetterPreset::FadeIn => lt.opacity = 1.0 - e,
+        LetterPreset::ScalePop => {
+            lt.scale = 1.0 - 0.85 * e;
+            lt.opacity = 1.0 - e;
+        }
+        LetterPreset::RiseUp => {
+            lt.dy = -e * size * 0.6; // rise up and away
+            lt.opacity = 1.0 - e;
+        }
+        LetterPreset::ScatterIn => {
+            // Explode away: gather → scattered offset + spin while fading.
+            let (rx, ry, rr) = scatter(i);
+            lt.dx = e * rx * anim.area_px;
+            lt.dy = e * ry * anim.area_px;
+            lt.rotation = e * rr;
+            lt.opacity = (1.0 - local * 1.5).clamp(0.0, 1.0);
+        }
+        // Type away: hard-cut each letter off as its window arrives.
+        LetterPreset::Typewriter => lt.opacity = if t_ms as f32 >= start { 0.0 } else { 1.0 },
+    }
+    lt
 }
 
 /// The reveal rank of each glyph for the stagger. Forward (`reverse = false`) is
@@ -1059,6 +1160,44 @@ mod stagger_tests {
     #[test]
     fn reverse_without_line_info_falls_back_to_whole_reversal() {
         assert_eq!(stagger_orders(3, &[], true), vec![2, 1, 0]);
+    }
+}
+
+#[cfg(test)]
+mod exit_anim_tests {
+    use super::*;
+    use crate::model::{LetterAnimation, LetterPreset};
+
+    fn fade_out() -> LetterAnimation {
+        LetterAnimation {
+            preset: LetterPreset::FadeIn, // motion style; the exit channel plays it as fade-away
+            start_ms: 0,
+            duration_ms: 500,
+            stagger_ms: 0,
+            area_px: 0.0,
+            reverse: false,
+        }
+    }
+
+    #[test]
+    fn exit_rests_at_full_opacity_early_and_vanishes_by_end() {
+        let a = fade_out();
+        let (count, start, end) = (3usize, 0u32, 4000u32);
+        // Early in the layer: letters are at rest (fully visible).
+        let early = eval_letters(&a, count, &[], 40.0, 100, start, end, true);
+        assert!(early.iter().all(|l| (l.opacity - 1.0).abs() < 1e-3));
+        // At the layer end: letters have left (opacity ~0).
+        let late = eval_letters(&a, count, &[], 40.0, end, start, end, true);
+        assert!(late.iter().all(|l| l.opacity < 1e-3), "{:?}", late);
+    }
+
+    #[test]
+    fn exit_does_not_touch_letters_before_its_window() {
+        // A long stagger pushes the exit window late; mid-layer stays at rest.
+        let mut a = fade_out();
+        a.stagger_ms = 100;
+        let mid = eval_letters(&a, 5, &[], 40.0, 1000, 0, 4000, true);
+        assert!(mid.iter().all(|l| (l.opacity - 1.0).abs() < 1e-3));
     }
 }
 

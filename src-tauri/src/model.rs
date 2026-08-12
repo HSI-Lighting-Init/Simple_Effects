@@ -186,6 +186,12 @@ pub enum LayerKind {
         #[serde(default)]
         italic: bool,
         anim: Option<LetterAnimation>,
+        /// Optional per-letter EXIT animation, anchored to the layer's END. Same
+        /// presets as `anim`, but played as an "away" effect (the letters explode
+        /// out, type away, fade/scale/rise off) so they finish exactly as the
+        /// layer leaves. `None` = no exit (back-compatible).
+        #[serde(default, rename = "animOut")]
+        anim_out: Option<LetterAnimation>,
         #[serde(default)]
         parts: Vec<LetterOverride>,
         /// Keyframeable 0..1: how much of `parts` is applied. 0 = composed,
@@ -1442,6 +1448,7 @@ impl Project {
                     area_px: 500.0,
                     reverse: false,
                 }),
+                anim_out: None,
                 parts: vec![],
                 decompose: Track::constant(0.0),
                 style: None,

@@ -137,6 +137,7 @@ import {
   saveTextFile,
   setLayerHidden,
   setTextAnim,
+  setTextAnimOut,
   setTextColor,
   clearTextColorKeys,
   setTextContent,
@@ -2765,6 +2766,17 @@ export default function App() {
     [applyTime, recordAction]
   );
 
+  // Pick / clear / retune a text layer's per-letter EXIT ("away") preset.
+  const onSetAnimOut = useCallback(
+    async (layerId: number, anim: LetterAnimation | null) => {
+      const p = await setTextAnimOut(layerId, anim);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("preset_out", { layerId, anim });
+    },
+    [applyTime, recordAction]
+  );
+
   // Set / clear a text layer's typographic + fill/stroke style.
   const onSetTextStyle = useCallback(
     async (layerId: number, style: TextStyle | null) => {
@@ -3752,6 +3764,7 @@ export default function App() {
           onFontStyle={onSetFontStyle}
           onSetTextAlign={onSetTextAlign}
           onAnim={onSetAnim}
+          onAnimOut={onSetAnimOut}
           onSetTextStyle={onSetTextStyle}
           onSetTextAnimators={onSetTextAnimators}
           onSetTextLayerStyles={onSetTextLayerStyles}

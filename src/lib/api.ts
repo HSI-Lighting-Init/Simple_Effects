@@ -407,6 +407,10 @@ export const setDecomposeKey = (
 export const setTextAnim = (layerId: number, anim: LetterAnimation | null) =>
   invoke<Project>("set_text_anim", { layerId, anim });
 
+/** Set / clear a text layer's per-letter EXIT ("away") animation. */
+export const setTextAnimOut = (layerId: number, anim: LetterAnimation | null) =>
+  invoke<Project>("set_text_anim_out", { layerId, anim });
+
 /** Add an invisible 3D box/cylinder object that images can be pinned to. */
 export const addShapeLayer = (shape: SurfaceShape) =>
   invoke<Project>("add_shape_layer", { shape });

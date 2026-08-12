@@ -253,6 +253,7 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
             weight: 400,
             italic: false,
             anim: None,
+            anim_out: None,
             parts: vec![],
             // Full strength: per-letter overrides apply directly, so keyframing a
             // decomposed letter animates it without also keying this amount. Key
@@ -528,6 +529,29 @@ fn set_text_anim(
         .ok_or("layer not found")?;
     match &mut layer.kind {
         LayerKind::Text { anim: a, .. } => *a = anim,
+        _ => return Err("not a text layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Set (or clear) the per-letter EXIT animation on a text layer — the "away"
+/// effect (explode out, type away, fade/scale/rise off) anchored to the layer's
+/// end.
+#[tauri::command]
+fn set_text_anim_out(
+    state: State<AppState>,
+    layer_id: u32,
+    anim: Option<LetterAnimation>,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Text { anim_out: a, .. } => *a = anim,
         _ => return Err("not a text layer".into()),
     }
     Ok(project.clone())
@@ -2703,6 +2727,7 @@ fn create_slideshow_template(
                 weight: cfg.text_weight,
                 italic: false,
                 anim: None,
+                anim_out: None,
                 parts: vec![],
                 decompose: Track::constant(1.0),
                 style: None,
@@ -2915,6 +2940,7 @@ fn create_carousel_video(
                 weight: 600,
                 italic: false,
                 anim: None,
+                anim_out: None,
                 parts: vec![],
                 decompose: Track::constant(1.0),
                 style: None,
@@ -3008,6 +3034,7 @@ fn v_caption(
             weight: 600,
             italic: false,
             anim: None,
+            anim_out: None,
             parts: vec![],
             decompose: Track::constant(1.0),
             style: None,
@@ -5462,6 +5489,7 @@ pub fn run() {
             set_text_font,
             set_text_font_style,
             set_text_anim,
+            set_text_anim_out,
             list_fonts,
             font_styles,
             set_text_style,
