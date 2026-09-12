@@ -3313,7 +3313,7 @@ export default function Inspector({
         <Shape2DSection layerId={layer.id} style={layer.kind.style} timeMs={timeMs} onSet={onSetShape2d} />
       )}
       {decalControls}
-      {layer && layer.kind.kind === "image" && (
+      {layer && (layer.kind.kind === "image" || layer.kind.kind === "video") && (
         <EffectsSection
           layerId={layer.id}
           effects={resolvedEffects}

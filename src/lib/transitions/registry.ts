@@ -65,6 +65,15 @@ export interface TransitionMeta {
    *    they collapse to a plain fade.
    */
   feature?: "a" | "b";
+  /**
+   * True when the engine's output at progress 1 is EXACTLY clip B at its resting
+   * position (e.g. slide/push/cover — B translates in and lands centred). Such
+   * engines need no edge crossfade to the plain frame at the window end; adding
+   * one would draw a second, resting copy of B over the still-moving copy — a
+   * visible "ghost" sliding in from the push direction. Default false: the edge
+   * crossfade runs (needed by engines that leave residue, overshoot, or distort).
+   */
+  settles?: boolean;
 }
 
 const EASING: ParamSpec = {
@@ -800,6 +809,12 @@ const FEATURE_A_IDS = new Set<string>([
   "uncover", "scaleDown",
 ]);
 for (const m of REGISTRY) m.feature = FEATURE_A_IDS.has(m.id) ? "a" : "b";
+
+// Transitions whose output at progress 1 is exactly clip B at rest: B enters by
+// pure translation and lands centred, so the window-end crossfade to the plain
+// frame is unnecessary and would ghost a second copy of B (see `settles`).
+const SETTLE_EXACT_IDS = new Set<string>(["slide", "push", "cover"]);
+for (const m of REGISTRY) m.settles = SETTLE_EXACT_IDS.has(m.id);
 
 const BY_ID = new Map(REGISTRY.map((m) => [m.id, m]));
 

@@ -338,13 +338,18 @@ function drawTransitionFrame(
   bcv: HTMLCanvasElement,
   off: HTMLCanvasElement
 ) {
-  // Effects only ever apply to image sources (the video UI has no effect stack),
-  // so the cast is safe; applyEffects draws via drawImage which accepts a video.
+  // `base` may be an image OR a video frame; applyEffects draws via drawImage,
+  // which accepts both, so the cast is safe and effects apply to either.
   const texClip: CanvasImageSource =
     effects.length > 0 ? applyEffects(bcv, base as Texture, w, h, effects) : base;
   const clip: Clip = { source: texClip, width: w, height: h };
   const empty: Clip = { source: null, width: 0, height: 0 };
-  const featureA = getTransitionMeta(transition.engine ?? "")?.feature === "a";
+  const meta = getTransitionMeta(transition.engine ?? "");
+  const featureA = meta?.feature === "a";
+  // Engines that land exactly on B-at-rest (slide/push/cover) need no edge
+  // crossfade — overlaying the resting frame while B is still moving ghosts a
+  // second copy sliding in from the push direction.
+  const settles = meta?.settles === true;
   const A: Clip = featureA ? clip : empty;
   const B: Clip = featureA ? empty : clip;
   const texB = texClip;
@@ -360,9 +365,11 @@ function drawTransitionFrame(
   const f = transition.factor;
   // Crossfade the engine output to the plain clip at the window edges so the
   // hand-off to the resting frame is seamless (see the original note above).
+  // Engines that settle exactly on B-at-rest skip this — otherwise the end
+  // crossfade doubles B (a ghost sliding in from the push direction).
   const EDGE = 0.12;
-  const fromEmpty = f <= EDGE ? f / EDGE : 1;
-  const toPlain = f >= 1 - EDGE ? (f - (1 - EDGE)) / EDGE : 0;
+  const fromEmpty = settles ? 1 : f <= EDGE ? f / EDGE : 1;
+  const toPlain = settles ? 0 : f >= 1 - EDGE ? (f - (1 - EDGE)) / EDGE : 0;
   try {
     const tr = createTransition(transition.engine ?? "fade", A, B, {
       outWidth: w,
@@ -1192,6 +1199,37 @@ function VideoNode({
             bcv,
             off
           );
+        }}
+        hitFunc={(ctx, shape) => {
+          ctx.beginPath();
+          ctx.rect(0, 0, w, h);
+          ctx.closePath();
+          ctx.fillStrokeShape(shape);
+        }}
+        {...interaction}
+      />
+    );
+  }
+  // No transition, but the video carries an effect stack (colour/blur/wipe/
+  // shine/GPU): draw the current frame through applyEffects, same as an image.
+  if (r.effects.length > 0) {
+    return (
+      <Shape
+        ref={setRef}
+        x={r.x}
+        y={r.y}
+        width={w}
+        height={h}
+        offsetX={r.anchorX * w}
+        offsetY={r.anchorY * h}
+        scaleX={r.scaleX}
+        scaleY={r.scaleY}
+        rotation={r.rotation}
+        opacity={r.opacity}
+        sceneFunc={(ctx) => {
+          const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
+          const tex = applyEffects(off, vid as unknown as Texture, w, h, r.effects);
+          (ctx as unknown as CanvasRenderingContext2D).drawImage(tex, 0, 0, w, h);
         }}
         hitFunc={(ctx, shape) => {
           ctx.beginPath();

@@ -3347,7 +3347,9 @@ export default function App() {
   // The image layer open in the isolated Effect Editor (if any).
   const fxLayer = fxEditorId != null ? project.layers.find((l) => l.id === fxEditorId) ?? null : null;
 
-  const isImageSelected = selectedLayer?.kind.kind === "image";
+  // Effects apply to images and videos alike (both are pixel sources).
+  const isMediaSelected =
+    selectedLayer?.kind.kind === "image" || selectedLayer?.kind.kind === "video";
   const effectKinds: [string, string][] = [
     ["grayscale", "Black & White"],
     ["brightness", "Brightness"],
@@ -3497,14 +3499,14 @@ export default function App() {
       items: [
         {
           label: "Open Effect Editor…",
-          onClick: () => isImageSelected && selectedId != null && setFxEditorId(selectedId),
-          disabled: !isImageSelected,
+          onClick: () => isMediaSelected && selectedId != null && setFxEditorId(selectedId),
+          disabled: !isMediaSelected,
         },
         { separator: true },
         ...effectKinds.map(([kind, label]) => ({
           label,
           onClick: () => selectedId != null && onAddEffect(selectedId, kind),
-          disabled: !isImageSelected,
+          disabled: !isMediaSelected,
         })),
       ],
     },
@@ -3941,8 +3943,8 @@ export default function App() {
                     ...(() => {
                       const lk = project.layers.find((l) => l.id === ctxMenu.layerId)?.kind.kind;
                       // Transitions render for image AND video (a video fades via
-                      // its wrapping group's opacity); colour/blur effects only
-                      // apply to images, so those stay image-only.
+                      // its wrapping group's opacity). Colour/blur/etc. effects now
+                      // apply to both pixel sources too.
                       const transitions = [
                         {
                           label: "⇋ Transition in…",
@@ -3953,7 +3955,7 @@ export default function App() {
                           onClick: () => setTransitionPick({ ids: [ctxMenu.layerId!], slot: "out" as const }),
                         },
                       ];
-                      if (lk === "image")
+                      if (lk === "image" || lk === "video")
                         return [
                           { label: "⇄ Replace media…", onClick: () => void onReplaceMedia(ctxMenu.layerId!) },
                           { label: "⤢ Scale to fit", onClick: () => onScaleToFit(ctxMenu.layerId!) },
@@ -3976,13 +3978,7 @@ export default function App() {
                             : []),
                           ...transitions,
                         ];
-                      if (lk === "video")
-                        return [
-                          { label: "⇄ Replace media…", onClick: () => void onReplaceMedia(ctxMenu.layerId!) },
-                          { label: "⤢ Scale to fit", onClick: () => onScaleToFit(ctxMenu.layerId!) },
-                          ...transitions,
-                        ];
-                      return [{ label: "Effects — image layers only" }];
+                      return [{ label: "Effects — image and video layers only" }];
                     })(),
                     ...(selectedIds.length >= 2
                       ? [
@@ -4109,11 +4105,15 @@ export default function App() {
 
       {showTransitions && <TransitionsDemo onClose={() => setShowTransitions(false)} />}
 
-      {fxLayer && fxLayer.kind.kind === "image" && (
+      {fxLayer && (fxLayer.kind.kind === "image" || fxLayer.kind.kind === "video") && (
         <EffectEditor
           layerId={fxLayer.id}
           name={fxLayer.name}
-          src={images[fxLayer.kind.src]}
+          src={
+            fxLayer.kind.kind === "image"
+              ? images[fxLayer.kind.src]
+              : mediaThumbs[fxLayer.kind.src]
+          }
           effects={resolved[fxLayer.id]?.effects ?? []}
           onAddEffect={onAddEffect}
           onRemoveEffect={onRemoveEffect}
