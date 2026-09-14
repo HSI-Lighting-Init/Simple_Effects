@@ -726,7 +726,7 @@ fn add_video_layer(
         name,
         start_ms: 0,
         end_ms,
-        kind: LayerKind::Video { src: path, width: iw, height: ih, duration_ms, in_ms: 0 },
+        kind: LayerKind::Video { src: path, width: iw, height: ih, duration_ms, in_ms: 0, speed: 1.0, reverse: false },
         transform,
         hidden: false,
         attach: None,
@@ -758,7 +758,7 @@ fn add_audio_layer(state: State<AppState>, path: String, duration_ms: u32) -> Pr
         name,
         start_ms: 0,
         end_ms,
-        kind: LayerKind::Audio { src: path, duration_ms },
+        kind: LayerKind::Audio { src: path, duration_ms, in_ms: 0, volume: 1.0, speed: 1.0, reverse: false },
         transform: Transform::at(cx, cy),
         hidden: false,
         attach: None,
@@ -767,6 +767,63 @@ fn add_audio_layer(state: State<AppState>, path: String, duration_ms: u32) -> Pr
         transition_out: None,
     });
     project.clone()
+}
+
+/// Set an audio/video clip's playback speed multiplier (0.1..8, 1 = normal).
+/// Undoable.
+#[tauri::command]
+fn set_clip_speed(state: State<AppState>, layer_id: u32, speed: f32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let s = speed.clamp(0.1, 8.0);
+    match &mut layer.kind {
+        LayerKind::Video { speed, .. } => *speed = s,
+        LayerKind::Audio { speed, .. } => *speed = s,
+        _ => return Err("not an audio/video layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Play an audio/video clip forwards or backwards. Undoable.
+#[tauri::command]
+fn set_clip_reverse(state: State<AppState>, layer_id: u32, reverse: bool) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Video { reverse: r, .. } => *r = reverse,
+        LayerKind::Audio { reverse: r, .. } => *r = reverse,
+        _ => return Err("not an audio/video layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Set an audio layer's output level (0 = silent, 1 = original). Allows boosting
+/// well above 1× (capped at a generous 16× / +24 dB to avoid extreme values).
+/// Undoable.
+#[tauri::command]
+fn set_audio_volume(state: State<AppState>, layer_id: u32, volume: f32) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match &mut layer.kind {
+        LayerKind::Audio { volume: v, .. } => *v = volume.clamp(0.0, 16.0),
+        _ => return Err("not an audio layer".into()),
+    }
+    Ok(project.clone())
 }
 
 /// Scale an image layer to *contain* within the composition (preserving aspect
@@ -847,6 +904,46 @@ fn edit_keyframes(
     upsert_key(&mut tf.scale_y, t_ms, edit.scale_y, seed_start, start);
     upsert_key(&mut tf.rotation, t_ms, edit.rotation, seed_start, start);
     upsert_key(&mut tf.opacity, t_ms, edit.opacity, seed_start, start);
+    Ok(project.clone())
+}
+
+/// Toggle keyframing of ONE transform channel from the inspector's per-field ◆.
+/// `keyed = true` starts keyframing: it seeds a key at `t_ms` (and a start key, so
+/// the value animates from the layer's beginning). `keyed = false` stops it:
+/// the channel collapses to a constant at its current value.
+#[tauri::command]
+fn set_transform_channel_keyed(
+    state: State<AppState>,
+    layer_id: u32,
+    channel: String,
+    keyed: bool,
+    t_ms: u32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let start = layer.start_ms;
+    let tf = &mut layer.transform;
+    let track = match channel.as_str() {
+        "x" => &mut tf.x,
+        "y" => &mut tf.y,
+        "scaleX" => &mut tf.scale_x,
+        "scaleY" => &mut tf.scale_y,
+        "rotation" => &mut tf.rotation,
+        "opacity" => &mut tf.opacity,
+        _ => return Err("unknown transform channel".into()),
+    };
+    if keyed {
+        let v = eval::sample_track(track, t_ms);
+        upsert_key(track, t_ms, Some(v), true, start);
+    } else {
+        track.default = eval::sample_track(track, t_ms);
+        track.keys.clear();
+    }
     Ok(project.clone())
 }
 
@@ -941,9 +1038,13 @@ fn set_layer_range(
     }
     layer.start_ms = s;
     layer.end_ms = e;
-    // A video trim can also move its source in-point (head trim / uncrop). Clamp
-    // so it stays within the source and always leaves the trimmed span playable.
-    if let (Some(new_in), LayerKind::Video { duration_ms, in_ms, .. }) = (in_ms, &mut layer.kind) {
+    // A video/audio trim can also move its source in-point (head trim / uncrop).
+    // Clamp so it stays within the source and leaves the trimmed span playable.
+    if let (
+        Some(new_in),
+        LayerKind::Video { duration_ms, in_ms, .. } | LayerKind::Audio { duration_ms, in_ms, .. },
+    ) = (in_ms, &mut layer.kind)
+    {
         let span = e.saturating_sub(s);
         let max_in = duration_ms.saturating_sub(span);
         *in_ms = new_in.min(max_in);
@@ -2416,6 +2517,8 @@ fn replace_layer_media(
                         height: nh,
                         duration_ms: dur,
                         in_ms: 0,
+                        speed: 1.0,
+                        reverse: false,
                     }
                 };
                 // Refresh an auto-named layer to the new file; keep a custom name.
@@ -4896,6 +4999,38 @@ pub struct AudioTrack {
     /// export begins partway through the clip. Defaults to 0 for a full export.
     #[serde(rename = "sourceInMs", default)]
     pub source_in_ms: u32,
+    /// Output level (1 = original). Applied as an ffmpeg `volume` filter.
+    #[serde(default = "one_f32_audio")]
+    pub volume: f32,
+    /// Playback speed (1 = normal). Applied via `atempo` (pitch-preserving).
+    #[serde(default = "one_f32_audio")]
+    pub speed: f32,
+    /// Play the clip backwards (`areverse`).
+    #[serde(default)]
+    pub reverse: bool,
+}
+
+fn one_f32_audio() -> f32 {
+    1.0
+}
+
+/// Chain `atempo` filters to reach `speed` (ffmpeg's atempo only accepts
+/// 0.5..2.0 per instance, so large factors are split). Empty when speed ≈ 1.
+fn atempo_chain(speed: f32) -> String {
+    let mut s = speed.clamp(0.1, 8.0);
+    let mut parts: Vec<String> = Vec::new();
+    while s > 2.0 {
+        parts.push("atempo=2.0".into());
+        s /= 2.0;
+    }
+    while s < 0.5 {
+        parts.push("atempo=0.5".into());
+        s /= 0.5;
+    }
+    if (s - 1.0).abs() > 1e-3 {
+        parts.push(format!("atempo={s:.4}"));
+    }
+    parts.join(",")
 }
 
 /// Build the ffmpeg `-filter_complex` graph that trims each audio clip to its
@@ -4912,13 +5047,27 @@ fn audio_filter_complex(audio: &[AudioTrack], duration_ms: u32) -> Option<String
         let inp = i + 1; // input 0 is the video
         let src_in = a.source_in_ms as f64 / 1000.0;
         let play = a.play_ms as f64 / 1000.0;
-        // Trim [source_in, source_in + play] out of the file, restamp to zero, then
-        // delay to the clip's start in the exported timeline.
-        fc.push_str(&format!(
-            "[{inp}:a]atrim={src_in:.3}:{end:.3},asetpts=PTS-STARTPTS,adelay={delay}:all=1[a{i}];",
-            end = src_in + play,
-            delay = a.start_ms
-        ));
+        let speed = if a.speed > 0.0 { a.speed as f64 } else { 1.0 };
+        // At speed×, one `play`-second window of the timeline consumes `play*speed`
+        // seconds of source. Trim that, (reverse), (retime with atempo → ~play s),
+        // (apply volume), restamp, then delay to the clip's timeline start.
+        let mut chain = format!(
+            "[{inp}:a]atrim={src_in:.3}:{end:.3},asetpts=PTS-STARTPTS",
+            end = src_in + play * speed
+        );
+        if a.reverse {
+            chain.push_str(",areverse");
+        }
+        let tempo = atempo_chain(a.speed);
+        if !tempo.is_empty() {
+            chain.push(',');
+            chain.push_str(&tempo);
+        }
+        if (a.volume - 1.0).abs() > 1e-3 {
+            chain.push_str(&format!(",volume={:.4}", a.volume.max(0.0)));
+        }
+        chain.push_str(&format!(",asetpts=PTS-STARTPTS,adelay={delay}:all=1[a{i}];", delay = a.start_ms));
+        fc.push_str(&chain);
     }
     let n = audio.len();
     if n == 1 {
@@ -5245,8 +5394,11 @@ fn split_layer(state: State<AppState>, layer_id: u32, t_ms: u32) -> Result<Proje
     reassign_ids(&mut second, &mut next); // fresh ids for it + any nested children
     second.start_ms = t_ms;
     second.transition_in = None; // it now starts mid-clip
-    // A video's second piece continues from the cut, not from the source start.
-    if let LayerKind::Video { duration_ms, in_ms, .. } = &mut second.kind {
+    // A video/audio second piece continues from the cut, not from the source
+    // start — advance its in-point by how far into the layer the cut fell.
+    if let LayerKind::Video { duration_ms, in_ms, .. }
+    | LayerKind::Audio { duration_ms, in_ms, .. } = &mut second.kind
+    {
         *in_ms = (*in_ms + (t_ms - orig_start)).min(*duration_ms);
     }
     project.layers[idx].end_ms = t_ms;
@@ -5392,6 +5544,10 @@ pub fn run() {
             exit_group,
             nav_depth,
             edit_keyframes,
+            set_transform_channel_keyed,
+            set_clip_speed,
+            set_clip_reverse,
+            set_audio_volume,
             set_layer_hidden,
             set_letter_override,
             set_letter_color,

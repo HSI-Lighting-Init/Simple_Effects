@@ -109,6 +109,10 @@ import {
   clearKeyframes,
   clearLetterOverrides,
   deleteKeyframesAt,
+  setTransformChannelKeyed,
+  setClipSpeed,
+  setClipReverse,
+  setAudioVolume,
   moveKeyframesAt,
   deleteLayer,
   duplicateLayer,
@@ -371,8 +375,8 @@ export default function App() {
   const dirtyRef = useRef(false);
   const pristineRef = useRef(true); // suppress the dirty mark on load/open
   const [showClosePrompt, setShowClosePrompt] = useState(false);
-  // Layer copy/paste clipboard (holds the copied layer's id).
-  const copiedLayerRef = useRef<number | null>(null);
+  // Layer copy/paste clipboard (holds the copied layer ids — supports multi-select).
+  const copiedLayersRef = useRef<number[]>([]);
   // Razor (cut) tool: when on, clicking a timeline block splits it there.
   const [razor, setRazor] = useState(false);
   const [showTransitions, setShowTransitions] = useState(false);
@@ -1962,17 +1966,39 @@ export default function App() {
     [resolveImages, applyTime, recordAction]
   );
 
-  // Copy the selected layer to the clipboard; paste clones whatever was copied.
+  // Copy the selected layer(s) to the clipboard; paste clones whatever was copied.
   const onCopyLayer = useCallback(() => {
-    if (selectedIdRef.current != null) {
-      copiedLayerRef.current = selectedIdRef.current;
-      recordAction("copy_layer", { layerId: copiedLayerRef.current });
+    const ids = selectedIdsRef.current.length
+      ? [...selectedIdsRef.current]
+      : selectedIdRef.current != null
+        ? [selectedIdRef.current]
+        : [];
+    if (ids.length) {
+      copiedLayersRef.current = ids;
+      recordAction("copy_layer", { layerIds: ids });
     }
   }, [recordAction]);
 
-  const onPasteLayer = useCallback(() => {
-    if (copiedLayerRef.current != null) void duplicateLayerById(copiedLayerRef.current);
-  }, [duplicateLayerById]);
+  const onPasteLayer = useCallback(async () => {
+    const ids = copiedLayersRef.current;
+    if (!ids.length) return;
+    // Duplicate each copied layer that still exists; select all the new clones.
+    let p = projectRef.current;
+    const newIds: number[] = [];
+    for (const srcId of ids) {
+      if (!p?.layers.some((l) => l.id === srcId)) continue;
+      p = await duplicateLayer(srcId);
+      newIds.push(p.layers.reduce((m, l) => Math.max(m, l.id), 0));
+    }
+    if (!p || !newIds.length) return;
+    setProject(p);
+    durationRef.current = p.durationMs;
+    setSelectedId(newIds[newIds.length - 1]);
+    setSelectedIds(newIds);
+    await resolveImages(p);
+    await applyTime(timeRef.current);
+    recordAction("paste_layers", { newIds });
+  }, [resolveImages, applyTime, recordAction]);
 
   const onDuplicateLayer = useCallback(() => {
     if (selectedIdRef.current != null) void duplicateLayerById(selectedIdRef.current);
@@ -2549,13 +2575,20 @@ export default function App() {
                 const videoTargets = p.layers
                   .filter((l) => l.kind.kind === "video")
                   .map((l) => {
-                    const durMs = l.kind.kind === "video" ? l.kind.durationMs : 0;
-                    const inMs = l.kind.kind === "video" ? (l.kind.inMs ?? 0) : 0;
-                    // Source time = in-point + how far past the layer start we are.
-                    const wanted = Math.max(0, inMs / 1000 + (tMs - l.startMs) / 1000);
+                    const k = l.kind.kind === "video" ? l.kind : null;
+                    const durMs = k?.durationMs ?? 0;
+                    const inMs = k?.inMs ?? 0;
+                    const spd = k?.speed && k.speed > 0 ? k.speed : 1;
+                    const reverse = k?.reverse ?? false;
+                    // Source time honours speed & reverse (matches VideoNode).
+                    const elapsed = Math.max(0, (tMs - l.startMs) / 1000);
+                    const playLen = Math.max(0, (l.endMs - l.startMs) / 1000);
+                    const wanted = reverse
+                      ? inMs / 1000 + Math.max(0, playLen - elapsed) * spd
+                      : inMs / 1000 + elapsed * spd;
                     return {
                       layerId: l.id,
-                      timeSec: durMs > 0 ? Math.min(wanted, durMs / 1000 - 0.001) : wanted,
+                      timeSec: durMs > 0 ? Math.min(Math.max(0, wanted), durMs / 1000 - 0.001) : Math.max(0, wanted),
                     };
                   });
                 if (videoTargets.length) await seekVideosForFrame(videoTargets);
@@ -2626,17 +2659,24 @@ export default function App() {
         const audioTracks = p.layers
           .filter((l) => l.kind.kind === "audio" && !l.hidden && l.endMs > inMs && l.startMs < outMs)
           .map((l) => {
-            const durMs = l.kind.kind === "audio" ? l.kind.durationMs : 0;
+            const k = l.kind.kind === "audio" ? l.kind : null;
+            const durMs = k?.durationMs ?? 0;
+            const speed = k?.speed && k.speed > 0 ? k.speed : 1;
             const clipStart = Math.max(l.startMs, inMs);
             const clipEnd = Math.min(l.endMs, outMs);
-            const sourceInMs = clipStart - l.startMs; // offset into the source file
-            let playMs = clipEnd - clipStart;
-            if (durMs > 0) playMs = Math.min(playMs, Math.max(0, durMs - sourceInMs));
+            // Source offset (source ms) = the clip's own in-point (from trim/split)
+            // plus the comp elapsed before the visible clip start × speed.
+            const sourceInMs = Math.round((k?.inMs ?? 0) + (clipStart - l.startMs) * speed);
+            let playMs = clipEnd - clipStart; // comp ms; backend consumes play×speed of source
+            if (durMs > 0) playMs = Math.min(playMs, Math.max(0, Math.floor((durMs - sourceInMs) / speed)));
             return {
-              path: l.kind.kind === "audio" ? l.kind.src : "",
+              path: k?.src ?? "",
               startMs: clipStart - inMs,
               playMs,
               sourceInMs,
+              volume: k?.volume ?? 1,
+              speed,
+              reverse: k?.reverse ?? false,
             };
           })
           .filter((a) => a.path && a.playMs > 0);
@@ -2829,6 +2869,46 @@ export default function App() {
       durationRef.current = p.durationMs;
       await applyTime(timeRef.current);
       recordAction("transform_commit", { layerId, edit });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Audio/video clip playback: speed, reverse, and (audio) output level.
+  const onSetClipSpeed = useCallback(
+    async (layerId: number, speed: number) => {
+      const p = await setClipSpeed(layerId, speed);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("clip_speed", { layerId, speed });
+    },
+    [applyTime, recordAction]
+  );
+  const onSetClipReverse = useCallback(
+    async (layerId: number, reverse: boolean) => {
+      const p = await setClipReverse(layerId, reverse);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("clip_reverse", { layerId, reverse });
+    },
+    [applyTime, recordAction]
+  );
+  const onSetAudioVolume = useCallback(
+    async (layerId: number, volume: number) => {
+      const p = await setAudioVolume(layerId, volume);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("audio_volume", { layerId, volume });
+    },
+    [applyTime, recordAction]
+  );
+
+  // Per-field ◆ on a transform channel: start / stop keyframing that channel.
+  const onToggleTransformKey = useCallback(
+    async (layerId: number, channel: "x" | "y" | "scaleX" | "scaleY" | "rotation" | "opacity", keyed: boolean) => {
+      const p = await setTransformChannelKeyed(layerId, channel, keyed, Math.round(timeRef.current));
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("transform_key_toggle", { layerId, channel, keyed });
     },
     [applyTime, recordAction]
   );
@@ -3180,9 +3260,9 @@ export default function App() {
         return;
       }
       if (mod && (e.key === "v" || e.key === "V")) {
-        if (inField || copiedLayerRef.current == null) return;
+        if (inField || copiedLayersRef.current.length === 0) return;
         e.preventDefault();
-        onPasteLayer();
+        void onPasteLayer();
         return;
       }
       if (mod && (e.key === "d" || e.key === "D")) {
@@ -3396,14 +3476,14 @@ export default function App() {
         { label: "Redo", onClick: () => void doRedo(), shortcut: "Ctrl+Shift+Z" },
         { separator: true },
         {
-          label: "Copy Layer",
+          label: selectedIds.length > 1 ? `Copy ${selectedIds.length} Layers` : "Copy Layer",
           onClick: onCopyLayer,
           disabled: selectedId == null,
           shortcut: "Ctrl+C",
         },
         {
-          label: "Paste Layer",
-          onClick: onPasteLayer,
+          label: "Paste Layer(s)",
+          onClick: () => void onPasteLayer(),
           shortcut: "Ctrl+V",
         },
         {
@@ -3779,6 +3859,10 @@ export default function App() {
           onSetLayerTransition={onSetLayerTransition}
           transformNow={transformNow}
           onCommitTransform={onCommit}
+          onToggleTransformKey={onToggleTransformKey}
+          onSetClipSpeed={onSetClipSpeed}
+          onSetClipReverse={onSetClipReverse}
+          onSetAudioVolume={onSetAudioVolume}
           onSetImageCrop={onSetImageCrop}
           onSetLayerAnchor={onSetLayerAnchor}
           selectedCell={selectedCell?.layerId === selectedLayer?.id ? selectedCell?.cell ?? null : null}

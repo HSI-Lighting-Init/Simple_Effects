@@ -23,6 +23,7 @@ import {
   Transformer,
 } from "react-konva";
 import Konva from "konva";
+import type { Box } from "konva/lib/shapes/Transformer";
 
 import { getShaped } from "../lib/api";
 import type { LetterPose } from "../lib/api";
@@ -744,12 +745,14 @@ function rasterizeStyledText(
   style: TextStyle | null,
   layerStyles: TextLayerStyles | null,
   perChar3d: boolean,
-  align: string
+  align: string,
+  timeMs: number
 ): { logicalW: number; logicalH: number; imageX: number; imageY: number } {
   const SS = 2;
   const count = shaped.glyphs.length;
-  const baseTrack = style?.tracking ?? 0;
-  const baselineShift = style?.baselineShift ?? 0;
+  // Tracking / baseline are keyframeable Tracks — sample at the playhead.
+  const baseTrack = style ? sampleTrack(style.tracking, timeMs) : 0;
+  const baselineShift = style ? sampleTrack(style.baselineShift, timeMs) : 0;
   const perLetterTrack = letters.reduce((s, l) => s + (l?.tracking ?? 0), 0);
   const trackedWidth = Math.max(1, shaped.width + baseTrack * Math.max(0, count - 1) + perLetterTrack);
   const maxStroke = (style?.strokes ?? []).reduce((m, s) => Math.max(m, s.position === "center" ? s.width / 2 : s.width), 0);
@@ -1071,8 +1074,11 @@ function VideoNode({
   playing,
   timeMs,
   layerStartMs,
+  layerEndMs,
   durationMs,
   inMs,
+  speed,
+  reverse,
   interaction,
   registerRef,
 }: {
@@ -1082,9 +1088,14 @@ function VideoNode({
   playing: boolean;
   timeMs: number;
   layerStartMs: number;
+  layerEndMs: number;
   durationMs: number;
   /** Source in-point (ms) shown at the layer start. */
   inMs: number;
+  /** Playback speed multiplier (1 = normal). */
+  speed: number;
+  /** Play the clip backwards over its range. */
+  reverse: boolean;
   interaction: Interaction;
   registerRef: NodeRef;
 }) {
@@ -1126,28 +1137,34 @@ function VideoNode({
     };
   }, [src, layerId]);
 
-  // Sync the source time / play state to the playhead.
+  // Sync the source time / play state to the playhead, honouring speed & reverse.
   useEffect(() => {
     const v = vid;
     if (!v) return;
-    // Source time = the in-point plus how far the playhead is past the layer
-    // start. The real element length is authoritative (durationMs may be stale).
+    const spd = speed > 0 ? speed : 1;
+    // The real element length is authoritative (durationMs may be stale).
     const srcLen = v.duration && isFinite(v.duration) ? v.duration : durationMs > 0 ? durationMs / 1000 : Infinity;
-    const wanted = Math.max(0, inMs / 1000 + (timeMs - layerStartMs) / 1000);
+    const elapsed = Math.max(0, (timeMs - layerStartMs) / 1000);
+    const playLen = Math.max(0, (layerEndMs - layerStartMs) / 1000);
+    const base = inMs / 1000;
+    // Source time: forward advances at `spd`; reverse counts down from the far
+    // end of the window so the clip plays backwards over its timeline range.
+    const wanted = reverse ? base + Math.max(0, playLen - elapsed) * spd : base + elapsed * spd;
     const atEnd = isFinite(srcLen) && wanted >= srcLen - 0.05;
-    const target = isFinite(srcLen) ? Math.min(wanted, srcLen - 0.05) : wanted;
-    if (playing && !atEnd) {
+    const target = isFinite(srcLen) ? Math.min(Math.max(0, wanted), srcLen - 0.05) : Math.max(0, wanted);
+    // Reverse can't play natively, so seek every frame. Forward plays at `spd`.
+    if (playing && !reverse && !atEnd) {
+      v.playbackRate = spd;
       if (Math.abs(v.currentTime - target) > 0.3) v.currentTime = target;
       // Muted playback is always allowed by the autoplay policy.
       if (v.paused) v.play().catch(() => {});
     } else {
-      // Paused, or the layer has run past the source: hold the frame. Pausing
-      // (instead of letting the element reach 'ended') stops the glitch where it
-      // flickered between the last and first frame.
+      // Paused / reverse / past the source: hold (or step) the frame. Pausing
+      // (vs letting it reach 'ended') stops the last/first-frame flicker.
       if (!v.paused) v.pause();
       if (Math.abs(v.currentTime - target) > 0.02) v.currentTime = target;
     }
-  }, [vid, playing, timeMs, layerStartMs, durationMs, inMs]);
+  }, [vid, playing, timeMs, layerStartMs, layerEndMs, durationMs, inMs, speed, reverse]);
 
   // While playing, keep the layer repainting so the moving frame shows.
   useEffect(() => {
@@ -2168,7 +2185,8 @@ function TextGlyphs({
           style,
           layerStyles,
           perChar3d,
-          align
+          align,
+          timeMs
         )
       : null;
 
@@ -2753,17 +2771,89 @@ export default function Preview({
     if (Object.keys(edit).length) onCommit(id, edit);
   };
 
-  // While dragging a layer, snap its anchor onto the composition centre when it
-  // gets within ~8 screen px. Mutates the node position in place (no React state,
-  // so it doesn't fight Konva's own drag). Works in comp coords: the frame centre
-  // is (width/2, height/2) and every node is centre-anchored, so its x/y is where
-  // its centre lands.
-  const snapToCenter = (node: Konva.Node) => {
+  // While dragging a layer, snap it to the composition guides — the frame edges
+  // (0 / width, 0 / height) and centre lines — when a matching edge or the
+  // object's own centre comes within ~8 screen px. Mutates the node position in
+  // place (no React state, so it doesn't fight Konva's own drag). All maths is in
+  // comp coords: a node's x/y is where its anchor lands, and its box spans from
+  // that anchor by the (unscaled) offset times the current scale.
+  const snapAxis = (edges: number[], guides: number[], thr: number): number | null => {
+    let best: number | null = null;
+    let bestAbs = thr;
+    for (const e of edges) {
+      for (const g of guides) {
+        const d = g - e;
+        if (Math.abs(d) < bestAbs) {
+          bestAbs = Math.abs(d);
+          best = d;
+        }
+      }
+    }
+    return best;
+  };
+  const snapToGuides = (node: Konva.Node) => {
     const thr = 8 / (scale || 1);
-    const cx = project.width / 2;
-    const cy = project.height / 2;
-    if (Math.abs(node.x() - cx) < thr) node.x(cx);
-    if (Math.abs(node.y() - cy) < thr) node.y(cy);
+    const cxg = project.width / 2;
+    const cyg = project.height / 2;
+    const gX = [0, cxg, project.width];
+    const gY = [0, cyg, project.height];
+    // Rotated boxes: only snap the anchor to the centre lines (axis-aligned edge
+    // maths doesn't hold under rotation).
+    if (Math.abs(node.rotation()) > 0.5) {
+      if (Math.abs(node.x() - cxg) < thr) node.x(cxg);
+      if (Math.abs(node.y() - cyg) < thr) node.y(cyg);
+      return;
+    }
+    const sx = node.scaleX();
+    const sy = node.scaleY();
+    const left = node.x() - sx * node.offsetX();
+    const right = node.x() + sx * (node.width() - node.offsetX());
+    const top = node.y() - sy * node.offsetY();
+    const bottom = node.y() + sy * (node.height() - node.offsetY());
+    const dx = snapAxis([left, (left + right) / 2, right], gX, thr);
+    if (dx != null) node.x(node.x() + dx);
+    const dy = snapAxis([top, (top + bottom) / 2, bottom], gY, thr);
+    if (dy != null) node.y(node.y() + dy);
+  };
+
+  // Snap the Transformer's live resize box to the frame edges / centre lines.
+  // Konva calls this with boxes in ABSOLUTE (screen) coords after applying any
+  // ratio lock, so nudging an edge here cooperates with the transformer instead
+  // of fighting it. Skipped while rotated (the box maths assumes axis-aligned).
+  const snapBoundBox = (_oldBox: Box, newBox: Box): Box => {
+    const klayer = trRef.current?.getLayer();
+    if (!klayer || Math.abs(newBox.rotation) > 0.01) return newBox;
+    const at = klayer.getAbsoluteTransform();
+    const thr = 8; // screen px
+    const gX = [0, project.width / 2, project.width].map((cx) => at.point({ x: cx, y: 0 }).x);
+    const gY = [0, project.height / 2, project.height].map((cy) => at.point({ x: 0, y: cy }).y);
+    let { x, y, width, height } = newBox;
+    const right = x + width;
+    const bottom = y + height;
+    for (const g of gX) {
+      if (Math.abs(x - g) < thr) {
+        width = right - g;
+        x = g;
+        break;
+      }
+      if (Math.abs(right - g) < thr) {
+        width = g - x;
+        break;
+      }
+    }
+    for (const g of gY) {
+      if (Math.abs(y - g) < thr) {
+        height = bottom - g;
+        y = g;
+        break;
+      }
+      if (Math.abs(bottom - g) < thr) {
+        height = g - y;
+        break;
+      }
+    }
+    if (width < 5 || height < 5) return newBox; // never collapse the box
+    return { ...newBox, x, y, width, height };
   };
 
   const interaction = (id: number): Interaction => ({
@@ -2773,7 +2863,7 @@ export default function Preview({
       e.cancelBubble = true;
       onSelect(id);
     },
-    onDragMove: (e) => snapToCenter(e.target),
+    onDragMove: (e) => snapToGuides(e.target),
     onDragEnd: () => commit(id),
     // A layer with a CUSTOM anchor should scale/rotate about that anchor when the
     // transformer handles are dragged. A node's position IS its anchor point (the
@@ -2967,8 +3057,11 @@ export default function Preview({
           playing={playing}
           timeMs={timeMs}
           layerStartMs={layer.startMs}
+          layerEndMs={layer.endMs}
           durationMs={k.durationMs ?? 0}
           inMs={k.inMs ?? 0}
+          speed={k.speed ?? 1}
+          reverse={k.reverse ?? false}
           interaction={inter}
           registerRef={reg}
         />
@@ -3127,6 +3220,7 @@ export default function Preview({
                 ignoreStroke
                 flipEnabled={false}
                 rotationSnaps={[0, 90, 180, 270]}
+                boundBoxFunc={snapBoundBox}
               />
             )}
 

@@ -1071,6 +1071,15 @@ body {
 .kf-dot.on {
   color: var(--accent);
 }
+/* Colour key for a parameter: a small square that matches its timeline diamonds. */
+.kf-swatch {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  transform: rotate(45deg);
+  border: 1px solid rgba(0, 0, 0, 0.35);
+}
 
 .row2 {
   display: grid;

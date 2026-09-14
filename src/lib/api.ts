@@ -757,6 +757,12 @@ export interface AudioTrackSpec {
   startMs: number;
   playMs: number;
   sourceInMs?: number;
+  /** Output level (1 = original). */
+  volume?: number;
+  /** Playback speed (1 = normal). */
+  speed?: number;
+  /** Play the clip backwards. */
+  reverse?: boolean;
 }
 
 export const exportVideo = (
@@ -835,6 +841,27 @@ export const editKeyframes = (
   edit: TransformEdit,
   seedStart: boolean
 ) => invoke<Project>("edit_keyframes", { layerId, tMs, edit, seedStart });
+
+/** Toggle one transform channel's keyframing from the inspector's per-field ◆.
+ *  `keyed=true` starts animating (seeds a key at `tMs`); `false` freezes it. */
+export const setTransformChannelKeyed = (
+  layerId: number,
+  channel: "x" | "y" | "scaleX" | "scaleY" | "rotation" | "opacity",
+  keyed: boolean,
+  tMs: number
+) => invoke<Project>("set_transform_channel_keyed", { layerId, channel, keyed, tMs });
+
+/** Set an audio/video clip's playback speed (0.1..8, 1 = normal). */
+export const setClipSpeed = (layerId: number, speed: number) =>
+  invoke<Project>("set_clip_speed", { layerId, speed });
+
+/** Play an audio/video clip forwards or backwards. */
+export const setClipReverse = (layerId: number, reverse: boolean) =>
+  invoke<Project>("set_clip_reverse", { layerId, reverse });
+
+/** Set an audio layer's output level (0 = silent, 1 = original, up to 4). */
+export const setAudioVolume = (layerId: number, volume: number) =>
+  invoke<Project>("set_audio_volume", { layerId, volume });
 
 /** Read an image off disk as a data: URL the webview can render. */
 export const loadImageDataUrl = (path: string) =>

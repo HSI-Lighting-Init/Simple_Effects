@@ -20,6 +20,7 @@ import type { Track } from "../bindings/Track";
 import type { FontFace } from "../bindings/FontFace";
 import { fontStyles } from "../lib/api";
 import { sampleTrack, constTrack, upsertKey, isKeyed, sampleColor, isColorKeyed, upsertColorKey } from "../lib/track";
+import { labelColor, paramColor } from "../lib/paramColors";
 import type { ColorKey } from "../bindings/ColorKey";
 import type { Shape2DStyle } from "../bindings/Shape2DStyle";
 import type { VectorShape } from "../bindings/VectorShape";
@@ -38,6 +39,7 @@ import type { ResolvedEffect } from "../bindings/ResolvedEffect";
 import type { ResolvedLinkedEffect } from "../bindings/ResolvedLinkedEffect";
 import type { Transition } from "../bindings/Transition";
 import type { TransformEdit } from "../bindings/TransformEdit";
+import type { Transform } from "../bindings/Transform";
 import { REGISTRY, getTransitionMeta, type ParamSpec } from "../lib/transitions";
 
 type TransitionSlot = "in" | "out";
@@ -104,9 +106,9 @@ const DEFAULT_TEXT_STYLE: TextStyle = {
   fills: [],
   strokes: [],
   fillOverStroke: false,
-  tracking: 0,
+  tracking: constTrack(0),
   leading: 0,
-  baselineShift: 0,
+  baselineShift: constTrack(0),
   fontFamily: null,
   fallbackStack: [],
   fontStyle: null,
@@ -118,11 +120,13 @@ function TextStyleSection({
   layerId,
   style,
   color,
+  timeMs,
   onSet,
 }: {
   layerId: number;
   style: TextStyle | null;
   color: Rgba;
+  timeMs: number;
   onSet: (layerId: number, style: TextStyle | null) => void;
 }) {
   const s = style ?? DEFAULT_TEXT_STYLE;
@@ -166,8 +170,8 @@ function TextStyleSection({
       </label>
 
       <div className="insp-sep">Typography</div>
-      {effSlider("Tracking (px)", s.tracking, -50, 100, 0.5, (v) => patch({ tracking: v }))}
-      {effSlider("Baseline (px)", s.baselineShift, -100, 100, 0.5, (v) => patch({ baselineShift: v }))}
+      <KeyNumField label="Tracking (px)" track={s.tracking} tMs={timeMs} step={0.5} min={-50} max={100} onChange={(t) => patch({ tracking: t })} />
+      <KeyNumField label="Baseline (px)" track={s.baselineShift} tMs={timeMs} step={0.5} min={-100} max={100} onChange={(t) => patch({ baselineShift: t })} />
       {style && (
         <button className="insp-btn" onClick={() => onSet(layerId, null)}>
           Reset to plain
@@ -304,10 +308,10 @@ function KeyNumField({
     <label className="an-num">
       <span className="an-num-label">
         <span className="an-num-name">
-          {label}
           <button
             type="button"
             className={"kf-dot" + (keyed ? " on" : "")}
+            style={{ color: labelColor(label), opacity: keyed ? 1 : 0.4 }}
             title={keyed ? `Keyframed (${track.keys.length}) — click to freeze at this value` : "Keyframe at the playhead"}
             onClick={(e) => {
               e.preventDefault();
@@ -316,6 +320,7 @@ function KeyNumField({
           >
             ◆
           </button>
+          {label}
         </span>
         <input className="an-num-box" type="number" value={disp} step={step} min={min} max={max} onChange={(e) => setVal(Number(e.target.value))} />
       </span>
@@ -1028,7 +1033,7 @@ function TextInspector({
         </label>
       </div>
 
-      <TextStyleSection layerId={layerId} style={style} color={color} onSet={onSetTextStyle} />
+      <TextStyleSection layerId={layerId} style={style} color={color} timeMs={timeMs} onSet={onSetTextStyle} />
 
       <div className="insp-sep">Text animators</div>
       <TextAnimatorsSection layerId={layerId} animators={animators} timeMs={timeMs} onSet={onSetTextAnimators} />
@@ -1625,13 +1630,32 @@ function effSlider(
   min: number,
   max: number,
   step: number,
-  onChange: (v: number) => void
+  onChange: (v: number) => void,
+  // Optional per-field keyframe control (◆ + colour swatch), matching KeyNumField.
+  kf?: { colorKey: string; keyed: boolean; onToggle: () => void }
 ) {
   const set = (v: number) => onChange(snapToStep(Math.max(min, Math.min(max, v)), min, step));
   return (
     <label className="insp-field insp-slider">
       <span className="insp-slider-head">
-        <span>{label}</span>
+        <span className="an-num-name" style={{ flex: 1 }}>
+          {kf && (
+            <button
+              type="button"
+              className={"kf-dot" + (kf.keyed ? " on" : "")}
+              style={{ color: paramColor(kf.colorKey), opacity: kf.keyed ? 1 : 0.4 }}
+              title={kf.keyed ? "Keyframed — click to stop animating this parameter" : "Keyframe this parameter at the playhead"}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                kf.onToggle();
+              }}
+            >
+              ◆
+            </button>
+          )}
+          {label}
+        </span>
         <input
           className="insp-num"
           type="number"
@@ -1707,16 +1731,26 @@ function TimingSection({
 function TransformSection({
   layerId,
   tr,
+  transform,
   compW,
   compH,
   onCommit,
+  onToggleKey,
 }: {
   layerId: number;
   tr: { x: number; y: number; scaleX: number; scaleY: number; rotation: number; opacity: number };
+  transform: Transform;
   compW: number;
   compH: number;
   onCommit: (layerId: number, edit: TransformEdit) => void;
+  onToggleKey: (layerId: number, channel: "x" | "y" | "scaleX" | "scaleY" | "rotation" | "opacity", keyed: boolean) => void;
 }) {
+  // Per-channel keyframe control for the ◆ next to each field.
+  const kfFor = (channel: "x" | "y" | "scaleX" | "scaleY" | "rotation" | "opacity", track: Track) => ({
+    colorKey: channel,
+    keyed: isKeyed(track),
+    onToggle: () => onToggleKey(layerId, channel, !isKeyed(track)),
+  });
   // Linked scale keeps X and Y proportional (persisted). Editing one axis scales
   // the other by the same ratio, so the layer keeps its aspect.
   const [linked, setLinked] = useState(() => localStorage.getItem("sefx.linkScale") !== "0");
@@ -1744,8 +1778,8 @@ function TransformSection({
   };
   return (
     <Section title="Transform / Position">
-      {effSlider("Position X", tr.x, -compW, compW * 2, 1, (v) => onCommit(layerId, { x: Math.round(v) }))}
-      {effSlider("Position Y", tr.y, -compH, compH * 2, 1, (v) => onCommit(layerId, { y: Math.round(v) }))}
+      {effSlider("Position X", tr.x, -compW, compW * 2, 1, (v) => onCommit(layerId, { x: Math.round(v) }), kfFor("x", transform.x))}
+      {effSlider("Position Y", tr.y, -compH, compH * 2, 1, (v) => onCommit(layerId, { y: Math.round(v) }), kfFor("y", transform.y))}
       <div className="row2" style={{ justifyContent: "space-between", alignItems: "center", marginTop: 2 }}>
         <span className="muted" style={{ fontSize: 11 }}>Scale</span>
         <button
@@ -1756,11 +1790,74 @@ function TransformSection({
           {linked ? "🔗 Linked" : "🔓 Unlinked"}
         </button>
       </div>
-      {effSlider("Scale X", tr.scaleX, 0.05, 5, 0.05, setScaleX)}
-      {effSlider("Scale Y", tr.scaleY, 0.05, 5, 0.05, setScaleY)}
-      {effSlider("Rotation°", tr.rotation, -360, 360, 1, (v) => onCommit(layerId, { rotation: v }))}
-      {effSlider("Opacity", tr.opacity, 0, 1, 0.01, (v) => onCommit(layerId, { opacity: v }))}
+      {effSlider("Scale X", tr.scaleX, 0.05, 5, 0.05, setScaleX, kfFor("scaleX", transform.scaleX))}
+      {effSlider("Scale Y", tr.scaleY, 0.05, 5, 0.05, setScaleY, kfFor("scaleY", transform.scaleY))}
+      {effSlider("Rotation°", tr.rotation, -360, 360, 1, (v) => onCommit(layerId, { rotation: v }), kfFor("rotation", transform.rotation))}
+      {effSlider("Opacity", tr.opacity, 0, 1, 0.01, (v) => onCommit(layerId, { opacity: v }), kfFor("opacity", transform.opacity))}
       <p className="insp-hint">Nudge the numbers or drag on the canvas — both keyframe here.</p>
+    </Section>
+  );
+}
+
+// Playback controls for an audio/video clip: output level (audio), speed, and a
+// reverse toggle. Speed and reverse affect both preview and export; louder-than-
+// original volume and audio reverse only take effect in the exported file.
+function PlaybackSection({
+  layer,
+  onSpeed,
+  onReverse,
+  onVolume,
+}: {
+  layer: Layer;
+  onSpeed: (layerId: number, speed: number) => void;
+  onReverse: (layerId: number, reverse: boolean) => void;
+  onVolume: (layerId: number, volume: number) => void;
+}) {
+  const k = layer.kind;
+  if (k.kind !== "video" && k.kind !== "audio") return null;
+  const speed = k.speed ?? 1;
+  const reverse = k.reverse ?? false;
+  return (
+    <Section title="Playback">
+      {k.kind === "audio" && (
+        // Volume: a fine slider for the everyday 0–4× range, plus a number box the
+        // user can push higher (up to 16×) to boost quiet clips as much as they like.
+        <label className="insp-field insp-slider">
+          <span className="insp-slider-head">
+            <span>Volume ×</span>
+            <input
+              className="insp-num"
+              type="number"
+              min={0}
+              max={16}
+              step={0.01}
+              value={k.volume ?? 1}
+              onChange={(e) =>
+                e.target.value !== "" && onVolume(layer.id, Math.max(0, Math.min(16, Number(e.target.value))))
+              }
+            />
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={4}
+            step={0.01}
+            value={Math.min(4, k.volume ?? 1)}
+            onChange={(e) => onVolume(layer.id, Number(e.target.value))}
+          />
+        </label>
+      )}
+      {effSlider("Speed ×", speed, 0.1, 8, 0.05, (v) => onSpeed(layer.id, v))}
+      <label className="insp-field ts-check">
+        <input type="checkbox" checked={reverse} onChange={(e) => onReverse(layer.id, e.target.checked)} />
+        Reverse (play backwards)
+      </label>
+      {k.kind === "audio" && (
+        <p className="insp-hint">
+          {reverse ? "Audio reverse applies to the export; preview plays forward. " : ""}
+          Volume above 1× (louder) is applied in the exported file.
+        </p>
+      )}
     </Section>
   );
 }
@@ -2396,6 +2493,10 @@ interface Props {
   transformNow: { x: number; y: number; scaleX: number; scaleY: number; rotation: number; opacity: number } | null;
   /** Keyframe a transform edit at the playhead (numeric position/scale fields). */
   onCommitTransform: (layerId: number, edit: TransformEdit) => void;
+  onToggleTransformKey: (layerId: number, channel: "x" | "y" | "scaleX" | "scaleY" | "rotation" | "opacity", keyed: boolean) => void;
+  onSetClipSpeed: (layerId: number, speed: number) => void;
+  onSetClipReverse: (layerId: number, reverse: boolean) => void;
+  onSetAudioVolume: (layerId: number, volume: number) => void;
   /** Pan an image layer's crop window within its source (reframe it). */
   onSetImageCrop: (layerId: number, x: number, y: number) => void;
   /** Set a layer's anchor / pivot (normalized 0..1). */
@@ -3192,6 +3293,10 @@ export default function Inspector({
   onUnlinkCell,
   transformNow,
   onCommitTransform,
+  onToggleTransformKey,
+  onSetClipSpeed,
+  onSetClipReverse,
+  onSetAudioVolume,
   onSetImageCrop,
   onSetLayerAnchor,
 }: Props) {
@@ -3222,7 +3327,10 @@ export default function Inspector({
         />
       )}
       {layer && transformNow && (
-        <TransformSection layerId={layer.id} tr={transformNow} compW={compWidth} compH={compHeight} onCommit={onCommitTransform} />
+        <TransformSection layerId={layer.id} tr={transformNow} transform={layer.transform} compW={compWidth} compH={compHeight} onCommit={onCommitTransform} onToggleKey={onToggleTransformKey} />
+      )}
+      {layer && (layer.kind.kind === "video" || layer.kind.kind === "audio") && (
+        <PlaybackSection layer={layer} onSpeed={onSetClipSpeed} onReverse={onSetClipReverse} onVolume={onSetAudioVolume} />
       )}
       {layer &&
         (layer.kind.kind === "image" ||

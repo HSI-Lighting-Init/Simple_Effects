@@ -7,6 +7,7 @@ import type { Layer } from "../bindings/Layer";
 import type { FrameCell } from "../bindings/FrameCell";
 import type { Effect } from "../bindings/Effect";
 import type { Track } from "../bindings/Track";
+import { paramColor } from "../lib/paramColors";
 
 /** Smallest range a layer block may be trimmed to (ms) — matches the Rust floor. */
 const MIN_SPAN_MS = 50;
@@ -49,63 +50,134 @@ function kindColor(l: Layer): string {
   return "#3bb6a6"; // image
 }
 
-/** Unique keyframe times across a layer's transform tracks (+ text decompose,
- *  + 3D-shape rotations). */
-/** Push every keyframeable `Track` of an effect stack onto `tracks`. Shared by
- *  layer-level rows and per-cell child rows. */
-function pushEffectTracks(effects: Effect[], tracks: Track[]) {
-  for (const e of effects) {
-    if (e.kind === "blur") tracks.push(e.radius);
-    else if (e.kind === "hue") tracks.push(e.degrees);
-    else if (e.kind === "wipe") tracks.push(e.position, e.softness);
-    else if (e.kind === "shinyclouds")
-      tracks.push(e.intensity, e.scale, e.speed, e.complexity, e.contrast, e.brightness, e.opacity);
-    else if (e.kind === "gpuoverlay")
-      tracks.push(e.intensity, e.scale, e.speed, e.detail, e.softness, e.extra, e.opacity);
-    else tracks.push(e.amount);
+// A keyframe time plus the colours of the parameter families keyed there — so the
+// timeline can draw each diamond in its parameter's colour (and blend when several
+// parameters share a time).
+export interface KeyTime {
+  tMs: number;
+  colors: string[];
+}
+
+/** Collector that groups keyframe times and remembers which parameter colours
+ *  land on each, then emits sorted `KeyTime`s. */
+class KeyTimeSet {
+  private map = new Map<number, Set<string>>();
+  add(track: Track, colorKey: string) {
+    for (const k of track.keys) this.bucket(k.timeMs).add(paramColor(colorKey));
+  }
+  addColorKeys(keys: { timeMs: number }[], colorKey: string) {
+    for (const k of keys) this.bucket(k.timeMs).add(paramColor(colorKey));
+  }
+  private bucket(tMs: number): Set<string> {
+    let s = this.map.get(tMs);
+    if (!s) this.map.set(tMs, (s = new Set()));
+    return s;
+  }
+  list(): KeyTime[] {
+    return [...this.map.entries()]
+      .map(([tMs, colors]) => ({ tMs, colors: [...colors] }))
+      .sort((a, b) => a.tMs - b.tMs);
   }
 }
 
-function keyframeTimes(l: Layer): number[] {
+/** Push every keyframeable `Track` of an effect stack into the set (all tagged
+ *  as the "effect" family). Shared by layer-level rows and per-cell child rows. */
+function pushEffectTracks(effects: Effect[], out: KeyTimeSet) {
+  for (const e of effects) {
+    if (e.kind === "blur") out.add(e.radius, "effect");
+    else if (e.kind === "hue") out.add(e.degrees, "effect");
+    else if (e.kind === "wipe") {
+      out.add(e.position, "effect");
+      out.add(e.softness, "effect");
+    } else if (e.kind === "shinyclouds")
+      for (const tr of [e.intensity, e.scale, e.speed, e.complexity, e.contrast, e.brightness, e.opacity])
+        out.add(tr, "effect");
+    else if (e.kind === "gpuoverlay")
+      for (const tr of [e.intensity, e.scale, e.speed, e.detail, e.softness, e.extra, e.opacity])
+        out.add(tr, "effect");
+    else out.add(e.amount, "effect");
+  }
+}
+
+/** Unique keyframe times across a layer's tracks, each carrying the colours of the
+ *  parameter families keyed there (transform, text typography/decompose/colour,
+ *  shape params, attach, effects). */
+function keyframeTimes(l: Layer): KeyTime[] {
   const t = l.transform;
-  const tracks = [t.x, t.y, t.scaleX, t.scaleY, t.rotation, t.opacity];
-  const set = new Set<number>();
+  const out = new KeyTimeSet();
+  out.add(t.x, "x");
+  out.add(t.y, "y");
+  out.add(t.scaleX, "scaleX");
+  out.add(t.scaleY, "scaleY");
+  out.add(t.rotation, "rotation");
+  out.add(t.opacity, "opacity");
   if (l.kind.kind === "text") {
-    tracks.push(l.kind.decompose);
-    for (const k of l.kind.colorKeys) set.add(k.timeMs);
+    out.add(l.kind.decompose, "decompose");
+    out.addColorKeys(l.kind.colorKeys, "color");
+    // Keyframeable typography (added when the layer has a style).
+    if (l.kind.style) {
+      out.add(l.kind.style.tracking, "tracking");
+      out.add(l.kind.style.baselineShift, "baseline");
+    }
+    // Per-character animator selectors + properties are keyframeable too.
+    for (const a of l.kind.animators) {
+      const s = a.selector;
+      for (const tr of [s.start, s.end, s.offset, s.smoothness, s.easeHigh, s.easeLow, s.amount, s.correlation, s.wigglesPerSec])
+        if (tr) out.add(tr, "anim");
+      const p = a.props;
+      out.add(p.position[0], "anim");
+      out.add(p.position[1], "anim");
+      for (const tr of [p.scale, p.rotation, p.opacity, p.tracking, p.skew, p.blur])
+        if (tr) out.add(tr, "anim");
+    }
   }
   if (l.kind.kind === "shape3d")
-    tracks.push(
+    for (const tr of [
       l.kind.width, l.kind.height, l.kind.depth,
       l.kind.rotation_x, l.kind.rotation_y, l.kind.rotation_z,
-      l.kind.perspective, l.kind.focal_length, l.kind.coverage, l.kind.radius
-    );
+      l.kind.perspective, l.kind.focal_length, l.kind.coverage, l.kind.radius,
+    ])
+      out.add(tr, "shape");
   if (l.kind.kind === "shape2d") {
     const s = l.kind.style;
-    tracks.push(
+    for (const tr of [
       s.width, s.height, s.sides,
       s.cornerRadius, s.bend, s.borderWidth, s.glowSize, s.glowOpacity, s.glowIntensity,
-      s.shadowBlur, s.shadowOffsetX, s.shadowOffsetY, s.shadowOpacity
-    );
-    // Keyframeable colours (fill / border / glow / shadow) carry their own key
-    // lists, so collect their times too.
+      s.shadowBlur, s.shadowOffsetX, s.shadowOffsetY, s.shadowOpacity,
+    ])
+      out.add(tr, "shape");
     for (const keys of [s.fillKeys, s.borderColorKeys, s.glowColorKeys, s.shadowColorKeys])
-      for (const k of keys) set.add(k.timeMs);
+      out.addColorKeys(keys, "color");
   }
-  if (l.attach) tracks.push(l.attach.u, l.attach.v, l.attach.scale, l.attach.rotation);
-  pushEffectTracks(l.effects, tracks);
-  for (const tr of tracks) for (const k of tr.keys) set.add(k.timeMs);
-  return [...set];
+  if (l.attach) {
+    out.add(l.attach.u, "attach");
+    out.add(l.attach.v, "attach");
+    out.add(l.attach.scale, "attach");
+    out.add(l.attach.rotation, "attach");
+  }
+  pushEffectTracks(l.effects, out);
+  return out.list();
 }
 
-/** Unique keyframe times for one grid cell (its zoom + effect stack) — drives the
- *  cell's child-timeline row. */
-function cellKeyTimes(cell: FrameCell): number[] {
-  const tracks: Track[] = [cell.zoom, cell.panX, cell.panY];
-  pushEffectTracks(cell.effects, tracks);
-  const set = new Set<number>();
-  for (const tr of tracks) for (const k of tr.keys) set.add(k.timeMs);
-  return [...set];
+/** Unique keyframe times for one grid cell (its zoom/pan + effect stack) — drives
+ *  the cell's child-timeline row. */
+function cellKeyTimes(cell: FrameCell): KeyTime[] {
+  const out = new KeyTimeSet();
+  out.add(cell.zoom, "scale");
+  out.add(cell.panX, "x");
+  out.add(cell.panY, "y");
+  pushEffectTracks(cell.effects, out);
+  return out.list();
+}
+
+/** CSS `background` for a keyframe diamond: solid for one parameter family, an
+ *  even conic blend when several parameters are keyed at the same time. */
+function kfBackground(colors: string[]): string | undefined {
+  if (colors.length === 0) return undefined;
+  if (colors.length === 1) return colors[0];
+  const step = 360 / colors.length;
+  const stops = colors.map((c, i) => `${c} ${i * step}deg ${(i + 1) * step}deg`).join(", ");
+  return `conic-gradient(${stops})`;
 }
 
 interface Props {
@@ -476,14 +548,14 @@ export default function Timeline({
     const span = layer.endMs - layer.startMs;
     const startX = e.clientX;
 
-    // A video can only be trimmed within its source: the head can't reveal media
-    // before the source start (in-point ≥ 0), and the tail can't show past the
-    // source end. So trimming stops at the source's own bounds.
-    const vk = layer.kind.kind === "video" ? layer.kind : null;
-    const srcDur = vk?.durationMs ?? 0;
-    const curIn = vk?.inMs ?? 0;
-    const minStart = vk && srcDur > 0 ? Math.max(0, layer.startMs - curIn) : 0;
-    const maxEnd = vk && srcDur > 0 ? layer.startMs + (srcDur - curIn) : dur;
+    // A video/audio clip can only be trimmed within its source: the head can't
+    // reveal media before the source start (in-point ≥ 0), and the tail can't
+    // show past the source end. So trimming stops at the source's own bounds.
+    const mk = layer.kind.kind === "video" || layer.kind.kind === "audio" ? layer.kind : null;
+    const srcDur = mk?.durationMs ?? 0;
+    const curIn = mk?.inMs ?? 0;
+    const minStart = mk && srcDur > 0 ? Math.max(0, layer.startMs - curIn) : 0;
+    const maxEnd = mk && srcDur > 0 ? layer.startMs + (srcDur - curIn) : dur;
 
     // The layers that move together, and their ranges at drag start.
     const groupIds = inGroup ? selectedIds.slice() : [layer.id];
@@ -573,10 +645,10 @@ export default function Timeline({
             if (o) onSetLayerRange(gid, Math.round(o.s + next.deltaMs), Math.round(o.e + next.deltaMs));
           }
         } else {
-          // Head-trimming a video advances its source in-point by the same
-          // amount, so the frame under the new start is where it was cut to.
+          // Head-trimming a video/audio clip advances its source in-point by the
+          // same amount, so the media under the new start is where it was cut to.
           const newIn =
-            vk && mode === "start"
+            mk && mode === "start"
               ? Math.max(0, Math.min(srcDur - (next.endMs - next.startMs), curIn + (next.startMs - layer.startMs)))
               : undefined;
           onSetLayerRange(next.id, next.startMs, next.endMs, newIn);
@@ -663,9 +735,9 @@ export default function Timeline({
     // tightest target so scrubbing lands exactly on a diamond.
     const thresholdMs = (7 / (r.width || 1)) * dur;
     const kfTargets = project.layers.flatMap((l) => {
-      const times = keyframeTimes(l);
+      const times = keyframeTimes(l).map((k) => k.tMs);
       if (l.kind.kind === "framegrid") {
-        for (const cell of l.kind.cells) times.push(...cellKeyTimes(cell));
+        for (const cell of l.kind.cells) times.push(...cellKeyTimes(cell).map((k) => k.tMs));
       }
       return times;
     });
@@ -689,10 +761,10 @@ export default function Timeline({
 
   // Which cells (row-major) of a grid get a child row: the ones carrying their
   // own effects or keyframes (the ones you'd want to retime).
-  const gridChildRows = (l: Layer): { cell: number; label: string; times: number[] }[] => {
+  const gridChildRows = (l: Layer): { cell: number; label: string; times: KeyTime[] }[] => {
     if (l.kind.kind !== "framegrid") return [];
     const cols = l.kind.cols || 1;
-    const out: { cell: number; label: string; times: number[] }[] = [];
+    const out: { cell: number; label: string; times: KeyTime[] }[] = [];
     l.kind.cells.forEach((c, i) => {
       const times = cellKeyTimes(c);
       if (c.effects.length === 0 && times.length === 0) return;
@@ -1181,7 +1253,7 @@ export default function Timeline({
                     title="Trim end"
                     onMouseDown={(e) => startBlockDrag(e, l, "end")}
                   />
-                  {keyframeTimes(l).map((tm, i) => {
+                  {keyframeTimes(l).map(({ tMs: tm, colors }, i) => {
                     const dragging =
                       kfDrag != null && kfDrag.id === l.id && kfDrag.cell == null && kfDrag.fromMs === tm;
                     const effTm = dragging ? kfDrag!.toMs : tm;
@@ -1190,7 +1262,7 @@ export default function Timeline({
                         key={i}
                         className={"tl-kf" + (dragging ? " dragging" : "")}
                         title="Drag to retime · click to delete"
-                        style={{ left: `${((effTm - sMs) / span) * 100}%` }}
+                        style={{ left: `${((effTm - sMs) / span) * 100}%`, background: dragging ? undefined : kfBackground(colors) }}
                         onMouseDown={(e) => startKfDrag(e, l, tm)}
                       />
                     );
@@ -1218,7 +1290,7 @@ export default function Timeline({
                   >
                     {/* Faint bar marking the grid layer's span for context. */}
                     <div className="tl-child-span" style={{ left: `${left}%`, width: `${width}%` }} />
-                    {cr.times.map((tm, i) => {
+                    {cr.times.map(({ tMs: tm, colors }, i) => {
                       const dragging =
                         kfDrag != null &&
                         kfDrag.id === l.id &&
@@ -1230,7 +1302,7 @@ export default function Timeline({
                           key={i}
                           className={"tl-kf tl-cell-kf" + (dragging ? " dragging" : "")}
                           title="Drag to retime · click to delete"
-                          style={{ left: `${(effTm / dur) * 100}%` }}
+                          style={{ left: `${(effTm / dur) * 100}%`, background: dragging ? undefined : kfBackground(colors) }}
                           onMouseDown={(e) => startCellKfDrag(e, l.id, cr.cell, tm)}
                         />
                       );

@@ -158,4 +158,31 @@ background: string | null, } | { "kind": "video", src: string, width: number, he
  * Trimming the head or splitting the clip advances this, so each piece
  * plays its own portion of the source instead of restarting from 0.
  */
-inMs: number, } | { "kind": "audio", src: string, durationMs: number, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", } | { "kind": "shape2d", style: Shape2DStyle, };
+inMs: number, 
+/**
+ * Playback speed multiplier (1 = normal, 2 = twice as fast). Scales how
+ * much source time each comp frame consumes.
+ */
+speed: number, 
+/**
+ * Play the clip backwards over its timeline range.
+ */
+reverse: boolean, } | { "kind": "audio", src: string, durationMs: number, 
+/**
+ * Source in-point: the media time (ms) played at the layer's start.
+ * Head-trimming or splitting the clip advances this, so each piece plays
+ * its own portion of the source instead of restarting from 0.
+ */
+inMs: number, 
+/**
+ * Output level (1 = original, 0 = silent, >1 = louder).
+ */
+volume: number, 
+/**
+ * Playback speed multiplier (1 = normal).
+ */
+speed: number, 
+/**
+ * Play the clip backwards.
+ */
+reverse: boolean, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", } | { "kind": "shape2d", style: Shape2DStyle, };

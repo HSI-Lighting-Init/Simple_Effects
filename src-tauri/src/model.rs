@@ -287,6 +287,13 @@ pub enum LayerKind {
         /// plays its own portion of the source instead of restarting from 0.
         #[serde(default, rename = "inMs")]
         in_ms: u32,
+        /// Playback speed multiplier (1 = normal, 2 = twice as fast). Scales how
+        /// much source time each comp frame consumes.
+        #[serde(default = "one_f32")]
+        speed: f32,
+        /// Play the clip backwards over its timeline range.
+        #[serde(default)]
+        reverse: bool,
     },
     /// An audio clip. No visual — it plays during preview playback, synced to the
     /// playhead over its `[start_ms, end_ms]` range. `duration_ms` is the clip's
@@ -295,6 +302,20 @@ pub enum LayerKind {
         src: String,
         #[serde(default, rename = "durationMs")]
         duration_ms: u32,
+        /// Source in-point: the media time (ms) played at the layer's start.
+        /// Head-trimming or splitting the clip advances this, so each piece plays
+        /// its own portion of the source instead of restarting from 0.
+        #[serde(default, rename = "inMs")]
+        in_ms: u32,
+        /// Output level (1 = original, 0 = silent, >1 = louder).
+        #[serde(default = "one_f32")]
+        volume: f32,
+        /// Playback speed multiplier (1 = normal).
+        #[serde(default = "one_f32")]
+        speed: f32,
+        /// Play the clip backwards.
+        #[serde(default)]
+        reverse: bool,
     },
     /// A nested composition ("precomp"): a set of child layers composited as one
     /// unit under this layer's own transform / opacity / effects / transition.
@@ -419,6 +440,12 @@ pub struct FrameCell {
 
 fn one_track() -> Track {
     Track::constant(1.0)
+}
+fn zero_track() -> Track {
+    Track::constant(0.0)
+}
+fn one_f32() -> f32 {
+    1.0
 }
 fn one_u32() -> u32 {
     1
@@ -703,14 +730,15 @@ pub struct TextStyle {
     #[serde(default)]
     pub fill_over_stroke: bool,
     /// Letter-spacing added between glyphs, px (negative = tighter).
-    #[serde(default)]
-    pub tracking: f32,
+    /// Keyframeable; old projects storing a bare number still load (de_track).
+    #[serde(default = "zero_track", deserialize_with = "de_track")]
+    pub tracking: Track,
     /// Line spacing, px. 0 = auto (single-line today). Reserved for multi-line.
     #[serde(default)]
     pub leading: f32,
-    /// Baseline offset for the whole block, px (positive = up).
-    #[serde(default)]
-    pub baseline_shift: f32,
+    /// Baseline offset for the whole block, px (positive = up). Keyframeable.
+    #[serde(default = "zero_track", deserialize_with = "de_track")]
+    pub baseline_shift: Track,
     // --- persisted, not yet applied to rendering ---
     #[serde(default)]
     pub font_family: Option<String>,

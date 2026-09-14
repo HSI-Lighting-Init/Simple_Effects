@@ -57,8 +57,14 @@ export default function AudioLayers({
       const a = els.current.get(l.id);
       if (!a) continue;
       const durMs = l.kind.durationMs;
+      const spd = l.kind.speed && l.kind.speed > 0 ? l.kind.speed : 1;
+      const inSec = (l.kind.inMs ?? 0) / 1000; // source in-point (trim/split)
+      // Output level + speed (reverse only affects export — an <audio> element
+      // can't play backwards, so preview plays it forward).
+      a.volume = Math.max(0, Math.min(1, l.kind.volume ?? 1));
+      a.playbackRate = spd;
       const inRange = timeMs >= l.startMs && timeMs < l.endMs;
-      const localSec = Math.max(0, (timeMs - l.startMs) / 1000);
+      const localSec = inSec + Math.max(0, ((timeMs - l.startMs) / 1000) * spd);
       const target = durMs > 0 ? Math.min(localSec, durMs / 1000) : localSec;
       if (playing && inRange && !l.hidden) {
         if (a.paused) {
