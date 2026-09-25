@@ -1807,16 +1807,22 @@ function PlaybackSection({
   onSpeed,
   onReverse,
   onVolume,
+  onFade,
 }: {
   layer: Layer;
   onSpeed: (layerId: number, speed: number) => void;
   onReverse: (layerId: number, reverse: boolean) => void;
   onVolume: (layerId: number, volume: number) => void;
+  onFade: (layerId: number, fadeInMs: number, fadeOutMs: number) => void;
 }) {
   const k = layer.kind;
   if (k.kind !== "video" && k.kind !== "audio") return null;
   const speed = k.speed ?? 1;
   const reverse = k.reverse ?? false;
+  // Fades can't exceed the clip's own length on the timeline.
+  const spanMs = Math.max(1, layer.endMs - layer.startMs);
+  const fadeIn = k.kind === "audio" ? k.fadeInMs ?? 0 : 0;
+  const fadeOut = k.kind === "audio" ? k.fadeOutMs ?? 0 : 0;
   return (
     <Section title="Playback">
       {k.kind === "audio" && (
@@ -1847,6 +1853,10 @@ function PlaybackSection({
           />
         </label>
       )}
+      {k.kind === "audio" &&
+        effSlider("Fade in (ms)", fadeIn, 0, spanMs, 10, (v) => onFade(layer.id, Math.round(v), fadeOut))}
+      {k.kind === "audio" &&
+        effSlider("Fade out (ms)", fadeOut, 0, spanMs, 10, (v) => onFade(layer.id, fadeIn, Math.round(v)))}
       {effSlider("Speed ×", speed, 0.1, 8, 0.05, (v) => onSpeed(layer.id, v))}
       <label className="insp-field ts-check">
         <input type="checkbox" checked={reverse} onChange={(e) => onReverse(layer.id, e.target.checked)} />
@@ -2497,6 +2507,7 @@ interface Props {
   onSetClipSpeed: (layerId: number, speed: number) => void;
   onSetClipReverse: (layerId: number, reverse: boolean) => void;
   onSetAudioVolume: (layerId: number, volume: number) => void;
+  onSetAudioFade: (layerId: number, fadeInMs: number, fadeOutMs: number) => void;
   /** Pan an image layer's crop window within its source (reframe it). */
   onSetImageCrop: (layerId: number, x: number, y: number) => void;
   /** Set a layer's anchor / pivot (normalized 0..1). */
@@ -3297,6 +3308,7 @@ export default function Inspector({
   onSetClipSpeed,
   onSetClipReverse,
   onSetAudioVolume,
+  onSetAudioFade,
   onSetImageCrop,
   onSetLayerAnchor,
 }: Props) {
@@ -3330,7 +3342,7 @@ export default function Inspector({
         <TransformSection layerId={layer.id} tr={transformNow} transform={layer.transform} compW={compWidth} compH={compHeight} onCommit={onCommitTransform} onToggleKey={onToggleTransformKey} />
       )}
       {layer && (layer.kind.kind === "video" || layer.kind.kind === "audio") && (
-        <PlaybackSection layer={layer} onSpeed={onSetClipSpeed} onReverse={onSetClipReverse} onVolume={onSetAudioVolume} />
+        <PlaybackSection layer={layer} onSpeed={onSetClipSpeed} onReverse={onSetClipReverse} onVolume={onSetAudioVolume} onFade={onSetAudioFade} />
       )}
       {layer &&
         (layer.kind.kind === "image" ||

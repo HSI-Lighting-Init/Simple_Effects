@@ -2405,11 +2405,14 @@ body {
 .tl-block-name {
   position: absolute;
   left: 7px;
+  right: 7px; /* clip the name to the block's own width */
   top: 50%;
   transform: translateY(-50%);
   font-size: 11px;
   color: rgba(255, 255, 255, 0.92);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   pointer-events: none;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
   z-index: 1;

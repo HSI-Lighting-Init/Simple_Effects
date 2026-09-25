@@ -26,6 +26,8 @@ import CompSettings from "./components/CompSettings";
 import UiSizeDialog from "./components/UiSizeDialog";
 import EffectEditor from "./components/EffectEditor";
 import ExportDialog from "./components/ExportDialog";
+import ScenarioPanel from "./components/ScenarioPanel";
+import type { AgentCtx, MediaAsset } from "./agent/tools";
 import TemplateDialog, { type TemplateSpec } from "./components/TemplateDialog";
 import VideoTemplateDialog, { VIDEO_STYLES } from "./components/VideoTemplateDialog";
 import MixedTemplateDialog, { MIXED_TEMPLATES } from "./components/MixedTemplateDialog";
@@ -113,6 +115,7 @@ import {
   setClipSpeed,
   setClipReverse,
   setAudioVolume,
+  setAudioFade,
   moveKeyframesAt,
   deleteLayer,
   duplicateLayer,
@@ -348,6 +351,7 @@ export default function App() {
   const [showCompSettings, setShowCompSettings] = useState(false);
   const [fxEditorId, setFxEditorId] = useState<number | null>(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
+  const [showScenario, setShowScenario] = useState(false);
   const [showTemplate, setShowTemplate] = useState(false);
   const [videoStyle, setVideoStyle] = useState<string | null>(null);
   const [mixedTemplate, setMixedTemplate] = useState<string | null>(null);
@@ -963,7 +967,46 @@ export default function App() {
     durationRef.current = p.durationMs;
     await applyTime(timeRef.current);
     recordAction("add_media", { layerId: newId, path, kind });
+    return newId;
   }, [resolveImages, applyTime, recordAction]);
+
+  // Probe a file into the agent's MediaAsset shape (kind + duration + pixel size).
+  const probeAsset = useCallback(async (path: string): Promise<MediaAsset> => {
+    const kind = (mediaKind(path) ?? "image") as MediaAsset["kind"];
+    if (kind === "video") {
+      const m = await getVideoMeta(path).catch(() => ({ width: 1280, height: 720, durationMs: 0 }));
+      return { path, kind, durationMs: m.durationMs, width: m.width, height: m.height };
+    }
+    if (kind === "audio") {
+      const m = await getAudioMeta(path).catch(() => ({ durationMs: 0 }));
+      return { path, kind, durationMs: m.durationMs, width: 0, height: 0 };
+    }
+    return { path, kind, durationMs: 0, width: 0, height: 0 };
+  }, []);
+
+  // Assemble the live context the agent's tools run against. Every mutation
+  // commits the returned project so the timeline updates as the agent works.
+  const buildAgentCtx = useCallback(
+    (media: MediaAsset[]): AgentCtx => ({
+      media,
+      project: () => projectRef.current!,
+      commit: async (p) => {
+        setProject(p);
+        durationRef.current = p.durationMs;
+        await resolveImages(p);
+        await applyTime(timeRef.current);
+      },
+      addMedia: async (i) => (await onAddMediaToTimeline(media[i].path)) ?? -1,
+      renderPreview: async (tMs) => {
+        setTime(tMs);
+        await applyTime(tMs);
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        return previewStageRef.current?.toDataURL({ pixelRatio: 0.5 }) ?? "";
+      },
+      log: () => {},
+    }),
+    [resolveImages, applyTime, onAddMediaToTimeline]
+  );
 
   const onRemoveMedia = useCallback(async (path: string) => {
     const next = (projectRef.current?.media ?? []).filter((p) => p !== path);
@@ -2677,6 +2720,8 @@ export default function App() {
               volume: k?.volume ?? 1,
               speed,
               reverse: k?.reverse ?? false,
+              fadeInMs: k?.fadeInMs ?? 0,
+              fadeOutMs: k?.fadeOutMs ?? 0,
             };
           })
           .filter((a) => a.path && a.playMs > 0);
@@ -2898,6 +2943,15 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("audio_volume", { layerId, volume });
+    },
+    [applyTime, recordAction]
+  );
+  const onSetAudioFade = useCallback(
+    async (layerId: number, fadeInMs: number, fadeOutMs: number) => {
+      const p = await setAudioFade(layerId, fadeInMs, fadeOutMs);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("audio_fade", { layerId, fadeInMs, fadeOutMs });
     },
     [applyTime, recordAction]
   );
@@ -3572,6 +3626,8 @@ export default function App() {
         })),
         { separator: true },
         { label: "Before / After…", onClick: () => setShowBeforeAfter(true) },
+        { separator: true },
+        { label: "🤖 AI: Scenario → Video…", onClick: () => setShowScenario(true) },
       ],
     },
     {
@@ -3863,6 +3919,7 @@ export default function App() {
           onSetClipSpeed={onSetClipSpeed}
           onSetClipReverse={onSetClipReverse}
           onSetAudioVolume={onSetAudioVolume}
+          onSetAudioFade={onSetAudioFade}
           onSetImageCrop={onSetImageCrop}
           onSetLayerAnchor={onSetLayerAnchor}
           selectedCell={selectedCell?.layerId === selectedLayer?.id ? selectedCell?.cell ?? null : null}
@@ -4146,6 +4203,16 @@ export default function App() {
           height={project.height}
           onExport={onExport}
           onClose={() => setShowExportDialog(false)}
+        />
+      )}
+
+      {showScenario && (
+        <ScenarioPanel
+          buildCtx={buildAgentCtx}
+          probe={probeAsset}
+          mediaPaths={project.media}
+          onDone={() => setShowExportDialog(true)}
+          onClose={() => setShowScenario(false)}
         />
       )}
 

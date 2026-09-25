@@ -763,6 +763,9 @@ export interface AudioTrackSpec {
   speed?: number;
   /** Play the clip backwards. */
   reverse?: boolean;
+  /** Fade in / out durations (ms). */
+  fadeInMs?: number;
+  fadeOutMs?: number;
 }
 
 export const exportVideo = (
@@ -859,9 +862,13 @@ export const setClipSpeed = (layerId: number, speed: number) =>
 export const setClipReverse = (layerId: number, reverse: boolean) =>
   invoke<Project>("set_clip_reverse", { layerId, reverse });
 
-/** Set an audio layer's output level (0 = silent, 1 = original, up to 4). */
+/** Set an audio layer's output level (0 = silent, 1 = original, up to 16). */
 export const setAudioVolume = (layerId: number, volume: number) =>
   invoke<Project>("set_audio_volume", { layerId, volume });
+
+/** Set an audio layer's start / end fade durations (ms). */
+export const setAudioFade = (layerId: number, fadeInMs: number, fadeOutMs: number) =>
+  invoke<Project>("set_audio_fade", { layerId, fadeInMs, fadeOutMs });
 
 /** Read an image off disk as a data: URL the webview can render. */
 export const loadImageDataUrl = (path: string) =>

@@ -185,4 +185,12 @@ speed: number,
 /**
  * Play the clip backwards.
  */
-reverse: boolean, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", } | { "kind": "shape2d", style: Shape2DStyle, };
+reverse: boolean, 
+/**
+ * Fade the level up over this many ms at the clip's start (0 = no fade).
+ */
+fadeInMs: number, 
+/**
+ * Fade the level down over this many ms into the clip's end (0 = none).
+ */
+fadeOutMs: number, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", } | { "kind": "shape2d", style: Shape2DStyle, };

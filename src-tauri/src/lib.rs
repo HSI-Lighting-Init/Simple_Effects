@@ -228,6 +228,17 @@ fn get_shaped(state: State<AppState>, layer_id: u32) -> Option<ShapedText> {
     state.shaped.lock().unwrap().get(&layer_id).cloned()
 }
 
+/// The auto layer name for a text layer: its content on one line, trimmed, capped
+/// so it stays a sensible label (the timeline clips it to the block anyway). Empty
+/// content falls back to "Text".
+fn text_layer_name(content: &str) -> String {
+    let flat: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return "Text".into();
+    }
+    flat.chars().take(80).collect()
+}
+
 /// Add a new text layer centred in the comp, and shape it.
 #[tauri::command]
 fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project {
@@ -240,7 +251,7 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
     let shaped = text::shape(&content, size, &font, 400, false);
     project.layers.push(Layer {
         id: next_id,
-        name: "Text".into(),
+        name: text_layer_name(&content),
         start_ms: 0,
         end_ms,
         kind: LayerKind::Text {
@@ -319,6 +330,12 @@ fn set_text_content(
         .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
+    // If the layer still carries its auto name (derived from the old text), keep it
+    // following the content; a custom rename is left untouched.
+    let auto_named = match &layer.kind {
+        LayerKind::Text { content: c, .. } => layer.name == text_layer_name(c),
+        _ => false,
+    };
     let (font, weight, italic, align) = match &mut layer.kind {
         LayerKind::Text { content: c, size: s, font, weight, italic, align, .. } => {
             *c = content.clone();
@@ -327,6 +344,9 @@ fn set_text_content(
         }
         _ => return Err("not a text layer".into()),
     };
+    if auto_named {
+        layer.name = text_layer_name(&content);
+    }
     state
         .shaped
         .lock()
@@ -758,7 +778,7 @@ fn add_audio_layer(state: State<AppState>, path: String, duration_ms: u32) -> Pr
         name,
         start_ms: 0,
         end_ms,
-        kind: LayerKind::Audio { src: path, duration_ms, in_ms: 0, volume: 1.0, speed: 1.0, reverse: false },
+        kind: LayerKind::Audio { src: path, duration_ms, in_ms: 0, volume: 1.0, speed: 1.0, reverse: false, fade_in_ms: 0, fade_out_ms: 0 },
         transform: Transform::at(cx, cy),
         hidden: false,
         attach: None,
@@ -821,6 +841,34 @@ fn set_audio_volume(state: State<AppState>, layer_id: u32, volume: f32) -> Resul
         .ok_or("layer not found")?;
     match &mut layer.kind {
         LayerKind::Audio { volume: v, .. } => *v = volume.clamp(0.0, 16.0),
+        _ => return Err("not an audio layer".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Set an audio layer's start / end fade durations (ms). The level ramps up over
+/// `fade_in_ms` at the clip start and down over `fade_out_ms` into its end, each
+/// clamped so the two can't overlap past the clip's own length. Undoable.
+#[tauri::command]
+fn set_audio_fade(
+    state: State<AppState>,
+    layer_id: u32,
+    fade_in_ms: u32,
+    fade_out_ms: u32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let span = layer.end_ms.saturating_sub(layer.start_ms);
+    match &mut layer.kind {
+        LayerKind::Audio { fade_in_ms: fi, fade_out_ms: fo, .. } => {
+            *fi = fade_in_ms.min(span);
+            *fo = fade_out_ms.min(span);
+        }
         _ => return Err("not an audio layer".into()),
     }
     Ok(project.clone())
@@ -5008,6 +5056,11 @@ pub struct AudioTrack {
     /// Play the clip backwards (`areverse`).
     #[serde(default)]
     pub reverse: bool,
+    /// Fade in / out durations (ms) applied at the clip's start / end (`afade`).
+    #[serde(rename = "fadeInMs", default)]
+    pub fade_in_ms: u32,
+    #[serde(rename = "fadeOutMs", default)]
+    pub fade_out_ms: u32,
 }
 
 fn one_f32_audio() -> f32 {
@@ -5065,6 +5118,14 @@ fn audio_filter_complex(audio: &[AudioTrack], duration_ms: u32) -> Option<String
         }
         if (a.volume - 1.0).abs() > 1e-3 {
             chain.push_str(&format!(",volume={:.4}", a.volume.max(0.0)));
+        }
+        // Fades over the clip's own timeline length (`play` seconds, after retiming).
+        if a.fade_in_ms > 0 {
+            chain.push_str(&format!(",afade=t=in:st=0:d={:.3}", a.fade_in_ms as f64 / 1000.0));
+        }
+        if a.fade_out_ms > 0 {
+            let d = (a.fade_out_ms as f64 / 1000.0).min(play);
+            chain.push_str(&format!(",afade=t=out:st={:.3}:d={:.3}", (play - d).max(0.0), d));
         }
         chain.push_str(&format!(",asetpts=PTS-STARTPTS,adelay={delay}:all=1[a{i}];", delay = a.start_ms));
         fc.push_str(&chain);
@@ -5548,6 +5609,7 @@ pub fn run() {
             set_clip_speed,
             set_clip_reverse,
             set_audio_volume,
+            set_audio_fade,
             set_layer_hidden,
             set_letter_override,
             set_letter_color,

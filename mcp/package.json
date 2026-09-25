@@ -1,0 +1,10 @@
+{
+  "name": "simple-effects-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "simple-effects-mcp": "./simple-effects-mcp.mjs" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

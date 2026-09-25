@@ -316,6 +316,12 @@ pub enum LayerKind {
         /// Play the clip backwards.
         #[serde(default)]
         reverse: bool,
+        /// Fade the level up over this many ms at the clip's start (0 = no fade).
+        #[serde(default, rename = "fadeInMs")]
+        fade_in_ms: u32,
+        /// Fade the level down over this many ms into the clip's end (0 = none).
+        #[serde(default, rename = "fadeOutMs")]
+        fade_out_ms: u32,
     },
     /// A nested composition ("precomp"): a set of child layers composited as one
     /// unit under this layer's own transform / opacity / effects / transition.

@@ -59,9 +59,15 @@ export default function AudioLayers({
       const durMs = l.kind.durationMs;
       const spd = l.kind.speed && l.kind.speed > 0 ? l.kind.speed : 1;
       const inSec = (l.kind.inMs ?? 0) / 1000; // source in-point (trim/split)
+      // Start/end fades: ramp the level over the clip's own timeline edges.
+      const fadeInMs = l.kind.fadeInMs ?? 0;
+      const fadeOutMs = l.kind.fadeOutMs ?? 0;
+      let fade = 1;
+      if (fadeInMs > 0) fade = Math.min(fade, Math.max(0, (timeMs - l.startMs) / fadeInMs));
+      if (fadeOutMs > 0) fade = Math.min(fade, Math.max(0, (l.endMs - timeMs) / fadeOutMs));
       // Output level + speed (reverse only affects export — an <audio> element
       // can't play backwards, so preview plays it forward).
-      a.volume = Math.max(0, Math.min(1, l.kind.volume ?? 1));
+      a.volume = Math.max(0, Math.min(1, (l.kind.volume ?? 1) * fade));
       a.playbackRate = spd;
       const inRange = timeMs >= l.startMs && timeMs < l.endMs;
       const localSec = inSec + Math.max(0, ((timeMs - l.startMs) / 1000) * spd);
