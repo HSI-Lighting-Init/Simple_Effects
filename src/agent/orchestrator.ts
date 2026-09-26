@@ -8,7 +8,7 @@ import { stylePackById } from "../lib/stylePacks";
 
 const READONLY = new Set([
   "get_timeline", "list_media", "list_effects", "list_transitions", "list_styles",
-  "validate_timeline", "render_preview", "contact_sheet",
+  "validate_timeline", "render_preview", "contact_sheet", "audit_export",
 ]);
 
 export interface RunOpts {

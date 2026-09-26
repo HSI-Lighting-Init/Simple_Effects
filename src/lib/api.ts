@@ -21,6 +21,7 @@ import type { ConstrainMode } from "../bindings/ConstrainMode";
 import type { TextStyle } from "../bindings/TextStyle";
 import type { TextAnimator } from "../bindings/TextAnimator";
 import type { TextLayerStyles } from "../bindings/TextLayerStyles";
+import type { AuditReport } from "../bindings/AuditReport";
 
 export const getProject = () => invoke<Project>("get_project");
 
@@ -788,6 +789,13 @@ export const exportVideo = (
     audio,
     durationMs,
   });
+
+/** Check an already-exported video against the CURRENT project's image layers:
+ *  every 250ms, does the frame actually look like whichever image layer should
+ *  be visible there? Flags frames that don't — the checker built ahead of the
+ *  handoff §11.1 fix (template-extractor roadmap, Phase 0.2). */
+export const auditExport = (path: string, verbose = false) =>
+  invoke<AuditReport>("audit_export", { path, verbose });
 
 /** Delete a layer (object). Shapes detach any layers pinned to them. */
 export const deleteLayer = (layerId: number) =>

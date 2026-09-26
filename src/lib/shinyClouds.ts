@@ -58,6 +58,15 @@ function init(): GL | null {
     const canvas = document.createElement("canvas");
     const gl = canvas.getContext("webgl2", { premultipliedAlpha: false, alpha: true });
     if (!gl) return null;
+    // See the matching handler in gpuFx.ts: a lost context makes every WebGL
+    // call a silent no-op, so the canvas just keeps showing its last frame.
+    // Drop the cache so the next call rebuilds instead of drawing into a dead
+    // context.
+    canvas.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      console.error("shinyClouds: WebGL context lost — will reinitialize on next use");
+      cache = undefined;
+    });
 
     const vs = compile(gl, gl.VERTEX_SHADER, vertSrc);
     const fs = compile(gl, gl.FRAGMENT_SHADER, fragSrc);

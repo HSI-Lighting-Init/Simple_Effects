@@ -54,6 +54,17 @@ function init(): GL | null {
     const canvas = document.createElement("canvas");
     const gl = canvas.getContext("webgl2", { premultipliedAlpha: false, alpha: true });
     if (!gl) return null;
+    // A lost context (GPU driver reset, memory pressure — plausible mid-export,
+    // decoding many large images) makes every subsequent WebGL call silently a
+    // no-op per spec, not an error: gl.drawArrays would do nothing and the
+    // canvas would just keep showing whatever it last successfully drew —
+    // exactly the handoff §11.1 symptom. Drop the cache on loss so the next
+    // render call rebuilds a fresh context instead of drawing into a dead one.
+    canvas.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      console.error("gpuOverlay: WebGL context lost — will reinitialize on next use");
+      cache = undefined;
+    });
 
     const vs = compile(gl, gl.VERTEX_SHADER, vertSrc);
     const fs = compile(gl, gl.FRAGMENT_SHADER, fragSrc);

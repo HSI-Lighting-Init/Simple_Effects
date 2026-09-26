@@ -4,6 +4,7 @@
 //! frontend reads structure once with `get_project` and asks for resolved
 //! transforms per playhead time with `evaluate_at`.
 
+mod analyze;
 mod eval;
 mod mcp_bridge;
 mod model;
@@ -5285,6 +5286,20 @@ fn export_video(
     Ok(())
 }
 
+/// The checker built *before* attempting the handoff §11.1 fix (template-
+/// extractor roadmap, Phase 0.2): does an already-exported video actually show,
+/// every 250ms, an image the current project's layers say should be visible
+/// there? See `analyze::audit_export` for the matching logic.
+#[tauri::command]
+fn audit_export(
+    state: State<AppState>,
+    path: String,
+    verbose: Option<bool>,
+) -> Result<analyze::AuditReport, String> {
+    let project = state.project.lock().unwrap();
+    analyze::audit_export(&project, &path, verbose.unwrap_or(false))
+}
+
 /// Visit every keyframeable Track on a layer (transform + kind-specific + decal
 /// placement + effect params), so delete/clear can act on all of them at once.
 /// Shift a layer's whole timing by `delta` ms — its play range and every
@@ -5727,6 +5742,7 @@ pub fn run() {
             ffmpeg_status,
             install_ffmpeg,
             export_video,
+            audit_export,
             add_text_layer,
             add_adjustment_layer,
             set_text_content,

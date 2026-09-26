@@ -27,6 +27,7 @@ import {
   editKeyframes,
   createBeforeAfter,
   createCarouselVideo,
+  auditExport,
 } from "../lib/api";
 
 /** One selected source asset the agent may place. */
@@ -482,6 +483,30 @@ export const TOOLS: ToolDef[] = [
         return ok(`exported to ${saved}`);
       } catch (e) {
         return err(`export failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  },
+  {
+    name: "audit_export",
+    description: "Check an already-exported video against the CURRENT project's image layers: every 250ms, does the frame actually look like whichever image layer(s) should be visible there (a luminance + colour fingerprint match)? Flags frames whose closest match is a different layer or nothing expected — the signature of the known intermittent content-swap export bug (handoff §11.1). Only image-kind layers are checked (video/text/shapes have no single static source to fingerprint). Run this after every export while that bug is open; it must flag a known-bad export before its result can be trusted on a fix. verbose also returns every frame's numbers (not just flagged ones), for calibrating the match threshold against a known-bad export.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "absolute path to the exported video file" },
+        verbose: { type: "boolean", description: "include every scanned frame's numbers, not just flagged ones (default false)" },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+    handler: async (a) => {
+      const path = str(a.path);
+      if (!path) return err("path is required — an absolute exported video file path");
+      try {
+        const report = await auditExport(path, a.verbose === true);
+        const { sheet, ...rest } = report;
+        return ok(JSON.stringify({ ...rest, sheetAvailable: !!sheet }));
+      } catch (e) {
+        return err(`audit failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     },
   },

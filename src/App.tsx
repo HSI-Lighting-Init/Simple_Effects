@@ -288,6 +288,30 @@ function revealableBox(p: Project, shapeId: number): boolean {
   return !animated;
 }
 
+/** Decode every image in `urls` once, up front, before a capture run's
+ *  per-frame loop starts. A layer becoming visible for the first time mid-run
+ *  mounts a fresh Konva image node, whose own `useImage` now correctly waits
+ *  on `decode()` (Preview.tsx) before exposing the bitmap — but that decode
+ *  still has to happen sometime, and doing it here, once, before any frame is
+ *  captured, means it isn't racing that exact frame's capture (handoff §11.1).
+ *  Best-effort: a failed decode still resolves (its own node's decode/onload
+ *  fallback is the real error path), so one bad image can't hang the export. */
+async function preloadImages(urls: string[]): Promise<void> {
+  await Promise.all(
+    urls.map(
+      (u) =>
+        new Promise<void>((resolve) => {
+          const im = new window.Image();
+          im.src = u;
+          im.decode().then(
+            () => resolve(),
+            () => resolve()
+          );
+        })
+    )
+  );
+}
+
 export default function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [resolved, setResolved] = useState<Record<number, ResolvedLayer>>({});
@@ -296,6 +320,13 @@ export default function App() {
   // bundler dedup, so we draw THIS stage directly instead).
   const previewStageRef = useRef<Konva.Stage | null>(null);
   const [images, setImages] = useState<Record<string, string>>({});
+  // A capture loop (renderFrames/onExport) needs the CURRENT map at the moment
+  // it runs, not whatever it closed over when created — mirror into a ref like
+  // every other piece of frequently-changing state this file reads from a
+  // callback (projectRef, timeRef, ...). Closing over stale `images` directly
+  // was one of the handoff §11.1 investigation's leads.
+  const imagesRef = useRef(images);
+  imagesRef.current = images;
   const [fonts, setFonts] = useState<string[]>([]);
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -1010,6 +1041,7 @@ export default function App() {
       setExporting(true);
       const out: HTMLCanvasElement[] = [];
       try {
+        await preloadImages(Object.values(imagesRef.current));
         await paint();
         await paint();
         for (const t of times) {
@@ -2734,6 +2766,10 @@ export default function App() {
       setExporting(true);
       setExportMsg("Preparing…");
       try {
+        // Decode every image up front (handoff §11.1 — see preloadImages), so a
+        // layer that only becomes visible partway through isn't racing its own
+        // first decode against the frame that captures it.
+        await preloadImages(Object.values(imagesRef.current));
         // Let the preview re-render at full resolution (export scale) first.
         await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
         const canvas = document.querySelector(".preview-stage canvas") as HTMLCanvasElement | null;

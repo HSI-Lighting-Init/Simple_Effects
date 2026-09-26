@@ -199,7 +199,16 @@ function cappedTexture(img: HTMLImageElement, max = 1280): HTMLImageElement | HT
   return cv;
 }
 
-/** Load a data: URL / path into an HTMLImageElement (null until ready). */
+/** Load a data: URL / path into an HTMLImageElement (null until ready).
+ *  Waits on `decode()`, not the `load` event: `load` only means the browser
+ *  knows the image's dimensions, not that it's finished decoding pixels — for
+ *  a multi-MB photo that can still be in flight, and exposing `img` to Konva
+ *  before then risks a frame captured mid-decode (handoff §11.1 investigation:
+ *  content-swap corruption only ever reproduced with large real photos, never
+ *  small solid-color test images — consistent with a decode race, not a data
+ *  bug). `decode()` can reject in a few real engines even when `load` would
+ *  have fired (some GIF/animated cases); fall back to `load` rather than never
+ *  resolving. */
 function useImage(src?: string): HTMLImageElement | null {
   const [img, setImg] = useState<HTMLImageElement | null>(null);
   useEffect(() => {
@@ -207,10 +216,20 @@ function useImage(src?: string): HTMLImageElement | null {
       setImg(null);
       return;
     }
+    let cancelled = false;
     const im = new window.Image();
-    im.onload = () => setImg(im);
     im.src = src;
+    im.decode()
+      .then(() => {
+        if (!cancelled) setImg(im);
+      })
+      .catch(() => {
+        im.onload = () => {
+          if (!cancelled) setImg(im);
+        };
+      });
     return () => {
+      cancelled = true;
       im.onload = null;
     };
   }, [src]);
@@ -1396,12 +1415,19 @@ function useImageMap(urls: string[]): Map<string, HTMLImageElement> {
     };
     for (const u of uniq) {
       const im = new window.Image();
-      im.onload = () => {
-        next.set(u, im);
-        done();
-      };
-      im.onerror = done;
       im.src = u;
+      im.decode()
+        .then(() => {
+          next.set(u, im);
+          done();
+        })
+        .catch(() => {
+          im.onload = () => {
+            next.set(u, im);
+            done();
+          };
+          im.onerror = done;
+        });
     }
     return () => {
       alive = false;

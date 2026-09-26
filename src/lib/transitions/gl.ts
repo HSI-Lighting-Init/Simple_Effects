@@ -58,6 +58,14 @@ function init(): boolean {
       | WebGLRenderingContext
       | null;
     if (!gl) throw new Error("no webgl");
+    // A context lost after this init succeeded would otherwise leave `supported`
+    // stuck true while every gl call silently no-ops — see the matching handler
+    // in gpuFx.ts/shinyClouds.ts. Force re-init instead of drawing into it dead.
+    glCanvas.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      console.error("transitions/gl: WebGL context lost — will reinitialize on next use");
+      supported = null;
+    });
     const vs = compile(gl, gl.VERTEX_SHADER, VERT);
     const fs = compile(gl, gl.FRAGMENT_SHADER, FRAG);
     if (!vs || !fs) throw new Error("shader compile failed");

@@ -376,62 +376,41 @@ Two front doors, one shared tool registry and one shared execution context:
 
 ## 11. Known issues — read this before advising on rendering/export work
 
-### 11.1 Open, unresolved, high-severity: intermittent frame content-swap in exported video
+### 11.1 Closed (2026-09-26): was never a renderer bug — duplicate source images + two checker blind spots
 
-**Status: confirmed, reproducible, root cause not yet found.** Do not assume any
-CCT-branded video already delivered to the user is correct — at least one already-shipped
-export was re-checked and found to have this defect.
+**Status: closed.** What looked like an intermittent content-swap in exported video was a
+year-long false trail built on comparing rendered frames to *remembered* slide content
+instead of the actual source file the active layer points at. There is no export-pipeline
+defect; no fix was needed.
 
-**Symptom**: at certain timestamps in an exported video (or a `render_preview`/
-`contact_sheet` capture — same bug, same pipeline), the frame shows the correct slide's
-*grade/transition* but the *content* is visibly from a different slide entirely — content
-that has already finished playing minutes earlier, or hasn't started yet. Confirmed via
-direct `ffprobe`/`ffmpeg -ss ... -frames:v 1` extraction from the real output file, not
-just the verification tool — this is a genuine defect in the shipped file, not a
-verification-path artifact.
+**What it actually was**, per the mentor's cross-check (SSIM against the real source
+files) and independently reproduced here:
+- `G:/CONTENT/CCT/images` holds every picture **twice** — a numbered PNG (`1st.png` …
+  `6th.png`, `add1.png`, `add2.png`) plus a UUID-named JPG twin, all 8 confirmed by SSIM
+  ≥ 0.84 (most ≥ 0.98): `1st`↔`8a4b77b3`, `2nd`↔`47acfd78`, `3rd`↔`84bfaeb5`,
+  `4th`↔`ab32dce5`, `5th`↔`aec36e5c`, `6th`↔`b1945cb1`, `add1`↔`1b45bae5`,
+  `add2`↔`c4a69991`. Several CCT builds use both twins of the same picture in different
+  slots, so the "swap" was two spots correctly showing the *same* photo.
+- The frame checker (`audit_export`, §0.2's Phase-0.2 work) has two other blind spots that
+  produced the remaining suspects: a pure-black fade-in-from-black opening frame (any
+  photo will score "far" from black), and mid-wipe-transition frames where two slides are
+  genuinely, simultaneously visible side-by-side (comparing a split frame to either single
+  source alone always scores badly).
+- Re-checked `CCT Instagram Block.mp4`/`.sefx` (the un-versioned, presumably-delivered
+  build) and `CCT Instagram Block v2.mp4`/`.sefx` the same way `audit_export` flags
+  suspects, then classified every suspect against the *expected layer's source file and
+  its twin*: every suspect in both exports falls into one of the three categories above.
+  None is a genuine swap. See `docs/STATUS-phase0.2-checker.md` for the full frame-by-
+  frame evidence and `src-tauri/src/analyze/mod.rs`'s `recheck_historical_exports` test.
 
-**What's been ruled out** (each independently tested and confirmed NOT the cause):
-- Transition engine choice (reproduces identically with `crossDissolve` and with
-  `zoomIn`/`push`).
-- The carousel/before-after templates specifically (reproduces with a build made of
-  *only* plain Ken-Burns image slides + crossfades — no Shape3D, no decals, no wipe
-  effects anywhere in the project).
-- Accumulated app-session state (reproduces identically on a freshly-restarted app
-  process with a from-scratch project).
-- Scale/`apply_style` alone: a controlled repro — 16 plain-color slides, matching a real
-  build's slide count and total duration, with `apply_style("instagram-block")` applied
-  (grade + Ken Burns + hero accent + the same 5-engine transition cycle) — rendered
-  **perfectly correctly** across every single slide, checked frame-by-frame.
-
-**What correlates with the bug appearing**: real, large photo/illustration assets
-(hundreds of KB–several MB JPG/PNG files) at multi-clip scale. The only variable that
-flips the controlled repro from clean to buggy, across every test run, was swapping tiny
-solid-color test PNGs for real photos. This points at something in the **async image
-decode/loading path**, not the deterministic per-frame evaluator (which was read in full
-and is straightforward/correct — see §5 point 1) or the transition renderer (which never
-references other layers — see §7).
-
-**Where to look next**: `useImage()` and `useCroppedImage()` near the top of Preview.tsx
-(~lines 200–262), and `resolveImages()` in App.tsx (~line 471) — the latter loads newly-
-referenced image paths into a `Record<path, dataUrl>` state **sequentially** (`for...of`
-with `await` inside the loop body) and is called after every single project mutation
-(`commit()`). With many large real photos queued in quick succession before capture
-begins, there's a plausible window for a stale/incomplete image reference to be read by a
-Konva node before its real image has finished loading — but this was a hypothesis at the
-time investigation stopped, **not a confirmed root cause**. The actual mechanism (why a
-specific *other* layer's content specifically appears, rather than a blank/placeholder)
-was not pinned down. Recommended next step: add temporary instrumentation (e.g. log the
-`src` actually bound to each Konva Image node at capture time vs. the `layer.kind.src` it
-should be) around a known-bad timestamp on a known-bad checkpoint, rather than more
-black-box frame extraction — the black-box approach has been exhausted for what it can
-tell you without source-level instrumentation.
-
-**Practical implication for any feature work**: don't trust visual/contact-sheet
-spot-checks alone to sign off on an export involving several real-photo clips. A sparse
-spot-check (the approach used for earlier, now-suspect deliveries) can and did miss
-instances of this. Extracting frames at short, regular intervals across the *entire*
-duration of a real export and eyeballing every one is the only verification that's
-actually caught it so far.
+**Practical implication for any feature work**: delivered CCT videos are almost certainly
+fine — the "defect" was two duplicate source files, not a rendering error. Before
+reusing `G:/CONTENT/CCT/images`, drop one copy of each of the 8 pairs above; Phase 1 adds
+a duplicate-guard on media import (fingerprint-based) so this can't happen silently again.
+The five defensive fixes made while chasing this (decode-before-capture, `imagesRef`,
+`scratch()` self-clearing, WebGL context-loss handling) are being kept as general
+hardening — each is correct on its own — just not attributed to "the §11.1 fix", since
+there was no bug for them to fix.
 
 ### 11.2 Fixed this session (2026-09-25), see §6 for detail
 GPU shader alpha hardcoded to `1.0` in two output paths (`gpuOverlay.frag`,

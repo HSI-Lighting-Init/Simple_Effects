@@ -6,10 +6,53 @@ same edit can be replayed on a new set of media. The user's keyframe boundaries 
 frames, each with a role) are the supervision signal. Deterministic code does the low-level measurement; the
 AI/MCP layer turns those measurements into a reusable template.
 
-Based on `docs/MENTOR_HANDOFF.md`, the earlier mentor's 12-sprint plan, and the code (2026-09-26, branch
-`feature/timeline-trim-comp-duration`). **v2.** v1 of this doc narrowed the goal to "extract the concept"
-and deferred measured motion — wrong; this version puts inverse rendering at the core. §12 maps the earlier
-plan's sprints onto this one.
+Based on `docs/MENTOR_HANDOFF.md`, the earlier mentor's 12-sprint plan, the coding agent's review of v2,
+and the code (2026-09-26, branch `feature/timeline-trim-comp-duration`). §12 maps the earlier plan's sprints
+onto this one.
+
+**v3 — changes after the coding agent's review:**
+- Handoff §11.1 gets a definition of "confirmed fixed", and its checker (`extract_frames`, `audit_export`) moves from
+  Phase 1 into Phase 0.2, so it exists before the fix is attempted.
+- **Gate A:** a ~3-day tracker spike right after the ground-truth generator decides between the Rust
+  Lucas–Kanade tracker and the OpenCV fallback before Phase 2 is built on it.
+- Sign-off is staged (§11): Phase 0 now, Phase 1 + Gate A next, go/no-go at **Gate B** after Phase 2.
+- Per-run API cost is estimated (§10) and logged per run (Phase 0.3).
+- The in-app agent only sees its current mode's tools (§5).
+
+**v3.1** — answers to the coding agent's questions: a timebox and escalation ladder for 0.2, who does what,
+and the test-asset list (§0).
+
+**v3.2** — Phase 0.2 finding (2026-09-26): the two "content swap" frames in the v3 export are correct renders
+of duplicate images; see the status block at the top of Phase 0.2. Phase 1 gains a duplicate guard.
+
+v2 restored inverse rendering as the core after v1 had narrowed the goal to "extract the concept".
+
+---
+
+## 0. Roles and inputs
+
+- **The coding agent implements everything**, Phase 0 onward, in the PR order of §11. One writer: `lib.rs`,
+  `App.tsx` and `tools.ts` are touched by almost every phase, and two sessions editing them would collide.
+- **The mentor is advisory:** owns this roadmap (keeps the repo and Desktop copies identical), answers
+  questions, and reviews plans and diffs the user brings. It doesn't write feature code or commit.
+- **The user** approves stages and gates (§11), supplies the test assets, and is the only one who says
+  "commit".
+- **The loop:** at each gate, or when blocked, the coding agent writes a short status note in `docs/` —
+  what's done, the numbers, what's blocked. The user brings it to the mentor, and the roadmap is updated.
+  Where the code contradicts this roadmap, the code wins; say so in the note.
+- In this document **"Claude"** means the runtime model inside the app or an MCP client (proposing
+  boundaries, reading text), not the coding agent.
+
+**Test assets** — one folder outside the repo (size, licensing), e.g. `C:\Users\hsili\Desktop\SE-test-assets\`:
+
+| Folder | Contents | Needed at |
+|---|---|---|
+| `photos\` | 30–50 distinct HSI photos — no duplicate copies (products, installations, interiors), JPEG, ≥ 1080 px on the short side, with visible detail (alignment needs texture), plus 2–3 transparent PNG logos | Phase 1.2 |
+| `reels\` | 3 real reels, 10–30 s, vertical, downloaded as-is (platform compression is the point): (1) a photo slideshow with Ken Burns and captions; (2) a fast-cut promo with transitions and block captions; (3) an element moving over a background — a product cut-out, a logo or a picture-in-picture | Gate A |
+| `brand\` | logo PNG, brand fonts (installed), colours | Phase 6 |
+
+If the photos are late, build the generator on any ~20 detailed photos and swap the HSI set in before
+recording Phase 1's numbers. Gate A can't run without the real reels.
 
 ---
 
@@ -128,6 +171,12 @@ and per boundary.
 | Templates | `save_template`, `list_templates`, `open_template` | TS |
 | Dev only | `make_synthetic_reference` (behind a dev flag) | TS |
 
+**Tools per mode.** This plan adds about 26 tools (≈ 50 in total). Every definition is sent on every turn,
+and tool choice gets less reliable as similar tools pile up, so the in-app agent gets only its mode's set:
+`toolsFor("build" | "extract" | "apply")`, roughly 20–25 each, passed to `provider.chat` in
+`orchestrator.ts` instead of `TOOLS`. External MCP clients still see the whole registry — one registry,
+filtered views.
+
 Analysis artifacts live in `appLocalDataDir/refs/<hash(path, size, mtime)>/`: `analysis.json`,
 `annotations.json`, tracks, placeholders. JSON files, no database.
 
@@ -156,8 +205,37 @@ coding agent iterate on its own: from Claude Code over the MCP bridge, generate 
 committed. The standing rule is to commit only when the human says so; ask for it before Phase 1 so each
 phase lands as its own reviewable diff.
 
-**0.2 Fix handoff §11.1 (content swap in exports) — gates every measured result.** A renderer that sometimes
-draws the wrong slide corrupts both the synthetic ground truth and the reconstruction objective, and remakes
+**0.2 Fix handoff §11.1 (content swap in exports) — gates every measured result.**
+
+> **Status 2026-09-26 — almost certainly not a renderer bug.** The two hand-verified "bad" frames in
+> `CCT Instagram Block v3.mp4` are correct renders of **duplicate images**. The CCT image folder
+> (`G:/CONTENT/CCT/images`) holds every picture twice — a numbered PNG plus a UUID-named JPG twin, 8 pairs,
+> SSIM 0.73–0.9995 — and the v3 project uses both twins of two pictures:
+> - 16.49 s: layer `add1.png` is on screen, as the project specifies. It's the same living-room scene as the
+>   before/after block's "After" image `1b45bae5….jpg` (SSIM 0.73), and the frame matches `add1.png` best.
+> - 18.43 s: layer `47acfd78….jpg` is on screen, as specified. It's the same image as the carousel's
+>   `2nd.png` (SSIM 0.9986).
+>
+> That accounts for everything in `docs/STATUS-phase0.2-checker.md`: deterministic, unchanged by all five
+> fixes, survives deleting layers 6–8 (they were never the source), and the checker's near-ties (same
+> picture). It likely explains the whole §11.1 history too: only the real CCT photos "trigger" it; solid-colour
+> test slides never do.
+>
+> **Remaining 0.2 work** (replaces the ladder below):
+> 1. Re-check every other historical "bad" timestamp (v1/v2 exports, the delivered one) the same way: find the
+>    layer the project says is visible at that time, and compare the frame to *that layer's* source file and
+>    its twins. Only a frame that matches neither is a real swap.
+> 2. Recalibrate `audit_export` by **fault injection**: splice frames from elsewhere into a clean export at
+>    known timestamps (ffmpeg) and require the audit to flag exactly those. Make it duplicate-aware too —
+>    collapse near-identical sources into one identity before matching. v3 is not a known-bad export, so the
+>    10.3 % vs 5.5 % calibration measured the carousel window and the twins, not corruption.
+> 3. Commit the five defensive changes as hardening (each is correct on its own), not as "the §11.1 fix".
+>    Criterion 4 below (a regression test pinning the cause) doesn't apply if there is no cause.
+> 4. If step 1 finds no real swap: close §11.1, correct the handoff, and lift the gate on measured results.
+>
+> The original plan below is kept for the record.
+
+A renderer that sometimes draws the wrong slide corrupts both the synthetic ground truth and the reconstruction objective, and remakes
 are exactly its trigger (many large photos, many clips). Follow the handoff's instrumentation plan, and log
 these **unconfirmed leads** at a known-bad timestamp:
 - `scratch(name, w, h)` in `src/lib/transitions/xform.ts` is a module-global canvas pool keyed by **name
@@ -173,6 +251,45 @@ these **unconfirmed leads** at a known-bad timestamp:
   canvases/textures, export uploads full-resolution textures (`maxTex = Infinity`), and nothing in `src/`
   handles `webglcontextlost`. Log it during a failing export.
 
+*Instrument first* — build the checker before attempting the fix (moved here from Phase 1):
+- `extract_frames(path, timesMs, shortSide)` (Rust/ffmpeg, `-ss` before `-i`).
+- `audit_export { path }`: a frame every 250 ms, a 16×16 dHash each, compared with every image layer's
+  source; flag frames whose best match isn't a layer visible at that time; return timestamps + a sheet of
+  suspects (`// ponytail: dHash oracle, calibrate the threshold on the known-bad export`). It must flag the
+  known-bad checkpoint before it can be trusted to pass a fixed one.
+
+*Confirmed fixed* means all four:
+1. the known-bad checkpoint is kept as a reproducible failing case;
+2. the root cause is shown by evidence — logged at the bad frame, or by bisection (step 3 below) — not
+   inferred;
+3. that export passes `audit_export` five runs in a row (the bug is intermittent — one clean run proves
+   nothing), plus the handoff's full-duration visual check;
+4. a regression test pins the cause (e.g. the scratch pool's clear-before-draw invariant, or the decode
+   barrier).
+
+*Timebox and escalation* — no open-ended digging:
+1. **Checker (~1 day):** build `extract_frames` + `audit_export` and prove the audit flags the known-bad
+   export. If it can't, fix the checker before anything else.
+2. **Leads (≤ 2 days):** instrument the four leads. One is confirmed when its log shows the mechanism at a
+   bad frame: a scratch canvas holding another layer's pixels, `img.complete === false`, a
+   `webglcontextlost` event, or a stale `images` entry.
+3. **Fix by construction (≤ 1 day)** if no lead is confirmed. Apply all four defensive changes together:
+   `scratch()` clears the canvas itself and, during export, is keyed per layer (`${layerId}:${name}`); the
+   decode barrier before every capture; `images` read through a ref; `webglcontextlost` handled (re-init and
+   re-render the frame, or fail the export loudly — never emit stale pixels), with export textures capped at
+   2× the comp's long side (full detail up to 2× zoom) instead of `maxTex = Infinity`. Each is a correctness
+   improvement on its own, so all four stay. If the known-bad case then passes the audit 5×, **bisect**:
+   revert one change at a time (one export + one audit each) until the bug returns. That names the cause and
+   gives criterion 2 its evidence.
+4. **Hand back** if it still fails — all four hypotheses are then falsified. Stop and write a status note in
+   `docs/` with the audit output, the per-frame log of which image source each Konva node drew at the bad
+   frames (the handoff's own instrumentation), and the shortest export window that still reproduces the bug;
+   the user brings the mentor in. Ceiling: about 4 working days once the checker exists.
+
+While 0.2 is open, 0.3 and Phase 1 code can proceed, but nothing is signed off on numbers until 0.2 is
+confirmed fixed. 0.2 isn't in the schedule estimate. Do it regardless of this feature — the bug affects every
+export the app makes, including videos already delivered.
+
 **0.3 Agent plumbing for current models.**
 - `providers.ts` `MODELS`: default `claude-opus-5`, plus `claude-sonnet-5` and `claude-haiku-4-5`
   (replacing `claude-opus-4-1` / `claude-sonnet-4-5`). Keep Opus as the default for extraction (vision plus
@@ -186,9 +303,12 @@ these **unconfirmed leads** at a known-bad timestamp:
   array, DeepSeek's text note).
 - `orchestrator.ts`: every new read-only tool into `READONLY`; `maxCalls` per mode (extraction ~150).
 - `mcp_bridge.rs`: raise `recv_timeout(120 s)` — a real `export_video` takes longer.
+- Cost logging: add up each response's `usage` (input, cache write, cache read, output tokens) per run and
+  show the tokens and an estimated dollar total in the Scenario panel's log. Decisions about cheaper models or
+  lower effort come from these numbers, not from the estimates in §10.
 
 *Done when:* an in-app run on `claude-opus-5` completes without 400s, with `cache_read_input_tokens > 0` from
-turn 2; `npm test` + `cargo test` green.
+turn 2 and its cost shown in the panel; `npm test` + `cargo test` green.
 
 ## Phase 1 — Engine prerequisites, ground truth, apply skeleton (~4–5 days)
 
@@ -202,20 +322,19 @@ turn 2; `npm test` + `cargo test` green.
 - Generalize `apply_color` into `add_effect { layerId, kind, params }` over every `Effect::default_of` kind,
   validated — otherwise GPU effects are reachable only through a style pack.
 
-**1.2** `extract_frames` (Rust/ffmpeg, `-ss` before `-i`) and `audit_export`: a frame every 250 ms, a 16×16
-dHash each, compared with every image layer's source; flag frames whose best match isn't visible at that
-time. Needed now to vet synthetic references against §11.1 (`// ponytail: dHash oracle, calibrate the
-threshold on a known-bad export`).
+**1.2** `make_synthetic_reference` + `score_recovery` (§6). Every generated reference is vetted with
+`audit_export` (Phase 0.2) before it counts.
 
-**1.3** `make_synthetic_reference` + `score_recovery` (§6).
-
-**1.4 Template = project.**
+**1.3 Template = project.**
 - Split `applyTextRecipe` / `fitText` out of `applyStylePack` (stylePacks.ts ~468–552); no behaviour change,
   `test/style-packs.test.ts` unchanged; plates named after their title (`Style · block · 12`) so they can be
   found again.
 - `style_text` (TextRecipe + optional `animOut`, `x`/`y`), `set_text` (keeps style, re-fits its plates),
   `rename_layer`, `list_fonts { query? }`, `media_sheet` (shared `tileFrames` lifted from
   `renderContactSheet`, App.tsx ~1045).
+- Duplicate guard: `import_media` and `media_sheet` flag near-duplicate images (reuse the audit's
+  fingerprint), so neither an agent nor the synthetic generator picks two twins as "different" photos — the
+  lesson of 0.2.
 - `save_template` / `list_templates` / `open_template`: reuse the checkpoint path (`checkpointPath` /
   `saveCheckpoint` / `restoreProjectFrom`, App.tsx ~1077–1112) with a `templates/` folder; manifest (§9) via
   `saveTextFile`; listing via `@tauri-apps/plugin-fs` (already a dependency — check its scope).
@@ -232,6 +351,16 @@ Apply it to a different photo set.
 *Done when:* 20 audit-clean synthetic references; a truth template applied to new photos keeps every key,
 reveals no edges and passes `audit_export`; both suites green.
 
+### Gate A — tracker spike (~3 days, right after 1.2; can overlap 1.3)
+
+The biggest schedule risk is the hand-rolled tracker meeting real, re-encoded reels: compression, motion
+blur, text covering the photos. Test it before anything is built on it. Implement only the 2.4 aligner (and
+the 2.5 fitter if time allows) and run it on the 20 synthetic references plus the 3 real reels.
+- **Go:** 2.4's synthetic targets are met, and on the real reels at least 90 % of still shots align without
+  diverging (checked on side-by-side sheets of each frame vs the warped reference frame).
+- **No-go:** switch now to the fallback, a Python/OpenCV (ECC) tracker behind the same tool interface,
+  instead of discovering the problem in week 4.
+
 ## Phase 2 — Measurement core, Rust (~6–8 days)
 
 `src-tauri/src/analyze/` (new module; `lib.rs` is already 5.8k lines). Reuse `find_ffmpeg` /
@@ -246,8 +375,8 @@ reveals no edges and passes `audit_export`; both suites green.
 - **2.4 Full-frame motion.** Reference = the widest frame (smallest scale, so every other frame is a zoom-in).
   Per frame, a similarity transform from it by pyramidal inverse-compositional Lucas–Kanade on grayscale,
   initialized from the previous frame, Huber-weighted; skip transition windows. That transform *is* the
-  layer's transform track, up to anchor/centre bookkeeping. `// ponytail: hand-rolled LK (~250 lines);
-  Python/OpenCV fallback if targets are missed`.
+  layer's transform track, up to anchor/centre bookkeeping. This is Gate A's aligner, hardened.
+  `// ponytail: hand-rolled LK (~250 lines); Python/OpenCV fallback if Gate A says no-go`.
 - **2.5 Keyframe fit** (shared by background and elements). Shared key times across channels (how editors
   key); DP over ≤ 4 segments from curvature-peak candidates plus annotated frames as preferred times; cost =
   SSE + λ·keys, λ tuned on ground truth. Per segment and channel, choose the easing from `ease()` by least
@@ -268,6 +397,8 @@ reveals no edges and passes `audit_export`; both suites green.
 *Done when* (20 synthetic references, no annotations): cuts ±1 frame ≥ 98 %; still/footage ≥ 95 %;
 background scale ≤ 1 %, position ≤ 2 px at 1080 p, rotation ≤ 0.3°, key times ±2 frames, easing correct
 ≥ 80 %; fades ±2 frames; a 30 s reel analyzed in < 30 s.
+
+**Gate B:** go/no-go on Phases 3–7, decided on these numbers plus the 3 real reels (§11).
 
 ## Phase 3 — Supervision and element tracking (~6–8 days)
 
@@ -398,26 +529,52 @@ interface TemplateManifest {
 
 Timing and keyframes live only in the `.sefx`.
 
-## 10. Risks and guardrails
+## 10. Risks, cost and guardrails
 
-- **§11.1** corrupts ground truth and the objective until fixed; audit every synthetic reference.
+- **Handoff §11.1** corrupts ground truth and the objective until confirmed fixed (0.2); audit every synthetic
+  reference.
 - **Downloaded reels are re-encoded** (often 720 p, heavy compression) → tolerances; analysis runs at 256 px.
+- **Tracker robustness** on real footage → Gate A.
 - **Engine vocabulary** (easing shapes, tints, layouts, kinetic type) → nearest fit + gap; `gaps` is the
   engine backlog.
 - **Compute:** a 30 s reel → analysis < 30 s, ≤ 10 s per transition boundary, < 10 s per element track; every
   call < 60 s.
-- **Cost:** images resent every turn → prompt caching (0.3); sheets ≤ 2576 px.
+- **Tool count:** ≈ 50 tools → per-mode sets for the in-app agent (§5).
 - **Privacy:** frames go to the model provider (BYO key); the bridge stays localhost-only.
 - **Copying:** templates carry parameters, not assets. The export guard blocks reference pixels, reference
   audio is never imported, and copy is always rewritten.
 
-## 11. PR sequence and size
+**Cost per run.** Rough estimates on `claude-opus-5` ($5 / $25 per million input / output tokens; cache reads
+≈ 0.1× and cache writes ≈ 1.25× the input price), to be replaced by Phase 0.3's logged numbers:
 
-1. 0.3 plumbing · 2. Phase 1 · 3. Phase 2 · 4. Phase 3 · 5. Phase 4 · 6. Phase 5 · 7. Phase 6 · 8. Phase 7.
-§11.1 blocks the ground-truth numbers from PR 3 on. Each PR: `npm test` + `cargo test` green; commit only
-on the human's say-so.
+| Run | With prompt caching | Without |
+|---|---|---|
+| Template from a reference — once per reference (~80 turns, context growing to ~100k tokens) | ~$3–8 | ~5× more |
+| Remake from a template (~30–40 turns) | ~$1–2 | ~5× more |
+| Automatic pass (analysis, transitions, rebuild) and the synthetic dev loop through Phase 4 | $0 — no model calls | — |
 
-About **7 weeks of coding-agent time**. Every piece is bounded and scored against exact ground truth.
+Levers, in order: prompt caching (0.3); per-mode tool sets (§5); fewer and smaller images (tiled sheets
+everywhere except where Claude must return coordinates); lower effort on apply runs. Moving apply runs to
+`claude-sonnet-5` ($2 / $10) is the user's call, made on the logged numbers.
+
+## 11. Sign-off, PR sequence and schedule
+
+Sign off in stages; each stage leaves something usable if the work stops there.
+
+| Stage | Approve | What you have if you stop here |
+|---|---|---|
+| Phase 0 | now, regardless of this feature | exports you can trust (handoff §11.1 affects every export today, including delivered videos), current models, cost logging |
+| Phase 1 + Gate A | next | save any project as a template and fill it with new media automatically; test videos with known answers; a measured verdict on the tracker |
+| Phase 2 → **Gate B** | after Gate A | photo-slideshow reels (likely most of HSI's) inverted automatically, plus accuracy numbers to decide the rest on |
+| Phases 3–7 | after Gate B | supervised multi-element inversion, fitted transitions, text, semantic synthesis, the drop-a-video UX |
+
+PRs: 1. Phase 0.3 plumbing + cost logging · 2. Phase 0.2 checker (`extract_frames`, `audit_export`), then
+the fix · 3. Phase 1 · 4. Gate A spike · 5. Phase 2 (Gate B) · 6. Phase 3 · 7. Phase 4 · 8. Phase 5 ·
+9. Phase 6 · 10. Phase 7. Each PR: `npm test` + `cargo test` green; commit only on the human's say-so.
+
+**Schedule:** roughly **7 weeks of coding-agent time for Phases 1–7 — an order of magnitude, not a
+commitment.** Phase 0.2 comes on top and its length is unknown. Computer-vision fitting tends to run long
+once real compression and occlusion show up; Gates A and B exist so an overrun shows up in days, not weeks.
 
 ## 12. The earlier 12-sprint plan, mapped
 

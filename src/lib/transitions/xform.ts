@@ -8,15 +8,24 @@ import { clamp01 } from "./easing";
 
 const pool = new Map<string, HTMLCanvasElement>();
 
-/** A reusable offscreen canvas sized to (w,h). Cleared by the caller. */
+/** A reusable offscreen canvas sized to (w,h), always handed back blank.
+ *  Resizing a canvas clears it as a side effect, but only on an actual size
+ *  *change* — a same-size reuse (the common case once warmed up) previously
+ *  skipped that, relying on every caller to clear it manually before drawing.
+ *  Most do; auditing every one of a dozen-plus call sites across every
+ *  transition engine for a miss (handoff §11.1's investigation) isn't a bet
+ *  worth taking when an explicit clear here costs nothing a correct caller
+ *  wasn't already going to overwrite anyway. */
 export function scratch(name: string, w: number, h: number): HTMLCanvasElement {
   let cv = pool.get(name);
   if (!cv) {
     cv = document.createElement("canvas");
     pool.set(name, cv);
   }
+  const resized = cv.width !== w || cv.height !== h;
   if (cv.width !== w) cv.width = w;
   if (cv.height !== h) cv.height = h;
+  if (!resized) cv.getContext("2d")?.clearRect(0, 0, w, h);
   return cv;
 }
 
