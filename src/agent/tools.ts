@@ -7,8 +7,13 @@
 // transition, speed, text, basic colour, music. No LUT / chroma / stabilize /
 // denoise / duck — those capabilities don't exist in the engine yet.
 import type { Project } from "../bindings/Project";
+import type { TransformEdit } from "../bindings/TransformEdit";
 import { REGISTRY } from "../lib/transitions/registry";
+import { STYLE_PACKS, stylePackById, applyStylePack } from "../lib/stylePacks";
 import {
+  setCompSize,
+  setCompDuration,
+  setCompFps,
   setLayerRange,
   splitLayer,
   deleteLayer,
@@ -19,6 +24,9 @@ import {
   addTextLayer,
   setAudioVolume,
   setAudioFade,
+  editKeyframes,
+  createBeforeAfter,
+  createCarouselVideo,
 } from "../lib/api";
 
 /** One selected source asset the agent may place. */
@@ -38,9 +46,29 @@ export interface AgentCtx {
   media: MediaAsset[];
   /** Add a selected asset to the timeline; resolves to the new layer id. */
   addMedia(index: number): Promise<number>;
-  /** Composite one frame at `tMs`; resolves to a PNG data URL. */
-  renderPreview(tMs: number): Promise<string>;
+  /** Render one frame at `tMs` exactly as it exports, `shortSide` px on the short
+   *  edge; resolves to an image data URL. */
+  renderPreview(tMs: number, shortSide?: number): Promise<string>;
+  /** Render several frames tiled into one labeled image (data URL). */
+  contactSheet(times: number[], shortSide?: number): Promise<string>;
+  /** Render the whole comp to a real MP4/WebM file on disk (the actual encode,
+   *  not a preview) and mux its audio. Resolves to the saved path. */
+  exportVideo(outPath: string, opts?: { format?: "mp4" | "webm"; level?: number; fps?: number }): Promise<string>;
+  /** Bring files into the media bin (so `media` / add_media_layer can use them). */
+  importMedia(paths: string[]): Promise<void>;
+  /** Save a named restore point of the whole project; resolves to its path. */
+  checkpoint(name: string): Promise<string>;
+  /** Roll back to a named checkpoint; false when it doesn't exist. */
+  restore(name: string): Promise<boolean>;
+  undo(): Promise<boolean>;
+  redo(): Promise<boolean>;
   log(text: string): void;
+}
+
+/** Split an image data URL into its mime type and base64 payload. */
+export function splitDataUrl(url: string): { mime: string; data: string } {
+  const m = /^data:([^;,]+);base64,/.exec(url);
+  return { mime: m ? m[1] : "image/png", data: m ? url.slice(m[0].length) : url };
 }
 
 export type ToolResult = { text?: string; image?: string; isError?: boolean };
@@ -85,6 +113,8 @@ function timelineSummary(p: Project) {
       endMs: l.endMs,
       effects: l.effects.map((e) => e.kind),
       transitionIn: l.transitionIn?.engine ?? null,
+      transitionInDurMs: l.transitionIn?.durMs ?? null,
+      transitionInDirection: l.transitionIn?.direction ?? null,
       transitionOut: l.transitionOut?.engine ?? null,
     })),
   };
@@ -116,6 +146,28 @@ export const TOOLS: ToolDef[] = [
     description: "List the transition engines you may use between/at clips (id + label + category). Use an id verbatim in set_transition.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async () => ok(JSON.stringify(REGISTRY.map((m) => ({ id: m.id, label: m.label, category: m.category })))),
+  },
+  {
+    name: "set_composition",
+    description: "Set the video's overall duration (ms), resolution and fps. DO THIS FIRST: set durationMs to the target length, and width/height to match the assets — vertical clips (e.g. 1080×1920, 9:16) need a vertical composition. Clips cannot extend past the composition duration, so this defines the canvas everything is built on.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        durationMs: { type: "integer", description: "total video length in ms" },
+        width: { type: "integer" },
+        height: { type: "integer" },
+        fps: { type: "number" },
+      },
+      additionalProperties: false,
+    },
+    handler: async (a, ctx) => {
+      let p = ctx.project();
+      if (a.width !== undefined && a.height !== undefined) p = await setCompSize(int(a.width), int(a.height));
+      if (a.durationMs !== undefined) p = await setCompDuration(int(a.durationMs));
+      if (a.fps !== undefined) p = await setCompFps(num(a.fps, 30));
+      await ctx.commit(p);
+      return ok(JSON.stringify({ durationMs: p.durationMs, resolution: `${p.width}x${p.height}`, fps: p.fps }));
+    },
   },
   {
     name: "add_media_layer",
@@ -242,6 +294,35 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "set_keyframe",
+    description: "Set a keyframe on a layer's transform at an exact time — position (x/y), scale (scaleX/scaleY), rotation, or opacity. Only the fields you pass change. Call it at 2+ different times on the same layer to animate a custom move — e.g. a punch-in-then-back-out zoom (normal → zoomed at the midpoint → normal again), instead of apply_style's simple straight-line Ken Burns drift. Get the layer's current scale/position first (fit-to-frame scale = min(compWidth/imageWidth, compHeight/imageHeight)) so your keyframes start from where it already sits, not a jump.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        layerId: { type: "integer" },
+        tMs: { type: "integer" },
+        x: { type: "number" },
+        y: { type: "number" },
+        scaleX: { type: "number" },
+        scaleY: { type: "number" },
+        rotation: { type: "number", description: "degrees" },
+        opacity: { type: "number", description: "0..1" },
+      },
+      required: ["layerId", "tMs"],
+      additionalProperties: false,
+    },
+    handler: async (a, ctx) => {
+      const id = int(a.layerId);
+      if (!findLayer(ctx.project(), id)) return notFound(id);
+      const edit: TransformEdit = {};
+      for (const k of ["x", "y", "scaleX", "scaleY", "rotation", "opacity"] as const)
+        if (typeof a[k] === "number" && isFinite(a[k] as number)) edit[k] = a[k] as number;
+      if (!Object.keys(edit).length) return err("provide at least one of x/y/scaleX/scaleY/rotation/opacity");
+      await ctx.commit(await editKeyframes(id, int(a.tMs), edit, false));
+      return ok("ok");
+    },
+  },
+  {
     name: "set_speed",
     description: "Set an audio/video clip's playback speed (0.1..8, 1 = normal). Pitch is preserved.",
     inputSchema: {
@@ -331,20 +412,186 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "render_preview",
-    description: "Composite and return the frame at tMs as an image so you can visually check the edit. Use it to verify pacing/framing before finishing. Cheap to call a few times; don't spam it.",
+    description: "Render the frame at tMs exactly as it will export, at real resolution (short side 360 / 720 / 1080, default 720). Use it to check one specific moment — a title, a transition, the end card. For an overview use contact_sheet.",
     inputSchema: {
       type: "object",
-      properties: { tMs: { type: "integer" } },
+      properties: {
+        tMs: { type: "integer" },
+        resolution: { type: "integer", enum: [360, 720, 1080] },
+      },
       required: ["tMs"],
       additionalProperties: false,
     },
     handler: async (a, ctx) => {
       try {
-        const url = await ctx.renderPreview(int(a.tMs));
-        return { image: url };
+        return { image: await ctx.renderPreview(int(a.tMs), int(a.resolution, 720)) };
       } catch (e) {
         return err(`render failed: ${e instanceof Error ? e.message : String(e)}`);
       }
+    },
+  },
+  {
+    name: "contact_sheet",
+    description: "Render several frames across the video into ONE labeled image grid to check pacing, transitions, grade consistency and titles at a glance. Default: 8 evenly spaced frames. Much cheaper than many render_preview calls.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        times: { type: "array", items: { type: "integer" }, description: "exact frame times in ms (max 16)" },
+        count: { type: "integer", description: "evenly spaced frames when times is omitted (2..16, default 8)" },
+        resolution: { type: "integer", enum: [240, 360] },
+      },
+      additionalProperties: false,
+    },
+    handler: async (a, ctx) => {
+      const dur = ctx.project().durationMs;
+      let times = Array.isArray(a.times) ? a.times.filter((x): x is number => typeof x === "number") : [];
+      if (!times.length) {
+        const n = Math.max(2, Math.min(16, int(a.count, 8)));
+        times = Array.from({ length: n }, (_, i) => Math.round((dur * (i + 0.5)) / n));
+      }
+      times = times.slice(0, 16).map((t) => Math.max(0, Math.min(dur, t)));
+      try {
+        return { image: await ctx.contactSheet(times, int(a.resolution, 240)) };
+      } catch (e) {
+        return err(`contact sheet failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  },
+  {
+    name: "export_video",
+    description: "Render the WHOLE comp to a real MP4/WebM file on disk, with its audio muxed in — the actual deliverable, not a preview. This is a real encode (can take minutes for a full comp) — always check the look with contact_sheet/render_preview FIRST, this is the last step. Requires ffmpeg for MP4 (WebM needs nothing extra).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "absolute output file path, e.g. C:\\Users\\me\\Desktop\\out.mp4" },
+        format: { type: "string", enum: ["mp4", "webm"], description: "default: inferred from path, else mp4" },
+        quality: { type: "integer", enum: [1, 2, 3, 4, 5], description: "1 near-original/largest .. 5 highest compression/smallest (default 2)" },
+        fps: { type: "number", description: "defaults to the comp's fps" },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+    handler: async (a, ctx) => {
+      const path = str(a.path);
+      if (!path) return err("path is required — an absolute output file path");
+      const format = a.format === "webm" || a.format === "mp4" ? a.format : /\.webm$/i.test(path) ? "webm" : "mp4";
+      const level = Math.max(1, Math.min(5, int(a.quality, 2)));
+      const fps = typeof a.fps === "number" && isFinite(a.fps) && a.fps > 0 ? a.fps : undefined;
+      try {
+        const saved = await ctx.exportVideo(path, { format, level, fps });
+        return ok(`exported to ${saved}`);
+      } catch (e) {
+        return err(`export failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  },
+  {
+    name: "create_before_after",
+    description: "Template: a before/after reveal. `before` fills the frame, then a divider bar sweeps across (orientation 'horizontal' ↔ or 'vertical' ↕) over totalMs, pushing it aside as `after` is revealed. Good for a literal before/after comparison — not for two unrelated images. Layers land at t=0; call set_layer_time on the returned layerIds (same span, i.e. same endMs-startMs) to move the whole thing elsewhere — every internal keyframe (the sweep, etc.) travels with it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        before: { type: "string", description: "absolute path, shown first" },
+        after: { type: "string", description: "absolute path, revealed by the sweep" },
+        orientation: { type: "string", enum: ["horizontal", "vertical"] },
+        totalMs: { type: "integer", description: "total length, e.g. 4000 (min 1500)" },
+      },
+      required: ["before", "after", "totalMs"],
+      additionalProperties: false,
+    },
+    handler: async (a, ctx) => {
+      const before = str(a.before), after = str(a.after);
+      if (!before || !after) return err("before and after must both be absolute file paths");
+      const priorIds = new Set(ctx.project().layers.map((l) => l.id));
+      const p = await createBeforeAfter(before, after, a.orientation === "vertical" ? "vertical" : "horizontal", int(a.totalMs, 4000));
+      await ctx.commit(p);
+      const layerIds = p.layers.map((l) => l.id).filter((id) => !priorIds.has(id));
+      return ok(JSON.stringify({ layerIds }));
+    },
+  },
+  {
+    name: "create_carousel_video",
+    description: "Template: spin `images` (each shown once, in order) around a 3D cylinder carousel over totalMs, with an optional caption per image that fades in/out while it faces the camera. Needs at least 2 images. Layers land at t=0; call set_layer_time on the returned layerIds (same span) to move the whole thing elsewhere.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        images: { type: "array", items: { type: "string" }, minItems: 2, description: "absolute paths" },
+        captions: { type: "array", items: { type: "string" }, description: "one per image, in the same order (optional)" },
+        totalMs: { type: "integer", description: "total length across every image" },
+      },
+      required: ["images", "totalMs"],
+      additionalProperties: false,
+    },
+    handler: async (a, ctx) => {
+      const images = Array.isArray(a.images) ? a.images.filter((x): x is string => typeof x === "string" && x.length > 0) : [];
+      if (images.length < 2) return err("images must have at least 2 absolute file paths");
+      const captions = Array.isArray(a.captions) ? a.captions.filter((x): x is string => typeof x === "string") : [];
+      const priorIds = new Set(ctx.project().layers.map((l) => l.id));
+      const p = await createCarouselVideo(images, captions, int(a.totalMs, images.length * 2000));
+      await ctx.commit(p);
+      const layerIds = p.layers.map((l) => l.id).filter((id) => !priorIds.has(id));
+      return ok(JSON.stringify({ layerIds }));
+    },
+  },
+  {
+    name: "list_styles",
+    description: "List the named style packs — complete looks (Instagram Block, News Studio, Traveller's Choice, Luxury Gold, …) with a description of how each looks and when to use it, plus its shot pace. Pick the pack whose description best fits the scenario, cut the timeline at that pace, then call apply_style.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: async () =>
+      ok(JSON.stringify(STYLE_PACKS.map((p) => ({ id: p.id, name: p.name, category: p.category, description: p.description, shotMs: p.shotMs })))),
+  },
+  {
+    name: "apply_style",
+    description: "Apply a style pack to the WHOLE timeline in one call: a transition on every cut, a color grade (plus hero-shot accents), Ken Burns motion on every clip, whole-video overlays (grain, vignette, shimmer…), and every text layer restyled (font, size, color, stroke/glow/shadow, animation, color block or lower-third bar). Call it AFTER placing clips and titles; it replaces hand-picked transitions/effects. Re-applying swaps the look. A checkpoint named 'before-style' is saved first.",
+    inputSchema: {
+      type: "object",
+      properties: { style: { type: "string", enum: STYLE_PACKS.map((p) => p.id) } },
+      required: ["style"],
+      additionalProperties: false,
+    },
+    handler: async (a, ctx) => {
+      const pack = stylePackById(str(a.style));
+      if (!pack) return err(`unknown style '${str(a.style)}' — call list_styles for valid ids`);
+      await ctx.checkpoint("before-style");
+      return ok(JSON.stringify(await applyStylePack(pack, ctx)));
+    },
+  },
+  {
+    name: "import_media",
+    description: "Import media files (absolute paths: images, videos, audio) into the app's media bin so add_media_layer can place them. Returns the refreshed media list with indices.",
+    inputSchema: {
+      type: "object",
+      properties: { paths: { type: "array", items: { type: "string" }, minItems: 1 } },
+      required: ["paths"],
+      additionalProperties: false,
+    },
+    handler: async (a, ctx) => {
+      const paths = Array.isArray(a.paths) ? a.paths.filter((x): x is string => typeof x === "string" && x.length > 0) : [];
+      if (!paths.length) return err("paths must be a non-empty array of absolute file paths");
+      await ctx.importMedia(paths);
+      return ok(JSON.stringify(ctx.media.map((m, i) => ({ index: i, kind: m.kind, name: m.path.split(/[\\/]/).pop() }))));
+    },
+  },
+  {
+    name: "history",
+    description: "Safety net. checkpoint: save a named restore point of the whole project. restore: roll the project back to a named checkpoint. undo / redo: step the engine's edit history by one change. Checkpoint before risky or experimental edits.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["checkpoint", "restore", "undo", "redo"] },
+        name: { type: "string", description: "checkpoint name for checkpoint / restore (default 'default')" },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    handler: async (a, ctx) => {
+      const action = str(a.action);
+      const name = str(a.name, "default").replace(/[^\w.-]+/g, "_") || "default";
+      if (action === "checkpoint") return ok(JSON.stringify({ checkpoint: name, path: await ctx.checkpoint(name) }));
+      if (action === "restore") return (await ctx.restore(name)) ? ok(`restored checkpoint '${name}'`) : err(`no checkpoint named '${name}' — create one with action 'checkpoint' first`);
+      if (action === "undo") return (await ctx.undo()) ? ok("undone") : err("nothing to undo");
+      if (action === "redo") return (await ctx.redo()) ? ok("redone") : err("nothing to redo");
+      return err(`unknown action '${action}' — use checkpoint, restore, undo or redo`);
     },
   },
 ];

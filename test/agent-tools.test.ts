@@ -35,6 +35,12 @@ const ctx = (p = project()): AgentCtx => ({
   commit: async () => {},
   addMedia: async () => 99,
   renderPreview: async () => "",
+  contactSheet: async () => "",
+  importMedia: async () => {},
+  checkpoint: async (name) => `C:/cp/${name}.sefx`,
+  restore: async (name) => name === "known",
+  undo: async () => false,
+  redo: async () => false,
   log: () => {},
 });
 
@@ -63,6 +69,16 @@ describe("agent tool boundary", () => {
 
   it("rejects speed on a non-clip layer", async () => {
     expect((await call("set_speed", { layerId: 1, speed: 2 })).isError).toBe(true);
+  });
+
+  it("style + safety tools validate before touching anything", async () => {
+    expect(JSON.parse((await call("list_styles", {})).text!).length).toBe(12);
+    expect((await call("apply_style", { style: "not-a-style" })).isError).toBe(true);
+    expect((await call("import_media", { paths: [] })).isError).toBe(true);
+    expect((await call("history", { action: "restore", name: "missing" })).isError).toBe(true);
+    expect((await call("history", { action: "restore", name: "known" })).isError).toBeFalsy();
+    expect((await call("history", { action: "undo" })).isError).toBe(true); // nothing to undo
+    expect(JSON.parse((await call("history", { action: "checkpoint", name: "a b/c" })).text!).checkpoint).toBe("a_b_c");
   });
 
   it("mcp manifest matches the registry (single source of truth)", () => {

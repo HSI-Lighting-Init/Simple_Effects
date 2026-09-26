@@ -161,8 +161,8 @@ export function renderGpuFx(src: Texture | null, w: number, h: number, p: GpuFxP
 }
 
 /** Effects that emit a compositable overlay (usable on adjustment layers). The
- *  displacement/darkening effects (Heat Haze 4, Vignette 6) need the underlying
- *  pixels and are per-image only. */
+ *  displacement/darkening/grain effects (Heat Haze 4, Film Grain 5, Vignette 6)
+ *  need the underlying pixels and are per-image only. */
 export function gpuFxIsOverlay(effect: number): boolean {
-  return effect !== 4 && effect !== 6 && effect !== 10;
+  return effect !== 4 && effect !== 5 && effect !== 6 && effect !== 10;
 }

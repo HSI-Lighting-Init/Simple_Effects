@@ -32,4 +32,5 @@ tauri-plugin-dialog = "2.7.1"
 tauri-plugin-fs = "2.5.1"
 base64 = "0.22.1"
 fontdb = "0.23.0"
+tiny_http = "0.12"
 

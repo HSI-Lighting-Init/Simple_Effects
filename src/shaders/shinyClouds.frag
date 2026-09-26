@@ -160,7 +160,8 @@ void main() {
     }
 
     // --- 6. Composite over the original --------------------------------------
-    vec3 original = texture(u_inputImage, v_texCoord).rgb;
+    vec4 srcTex = texture(u_inputImage, v_texCoord);
+    vec3 original = srcTex.rgb;
     vec3 result;
     if (u_blendMode == 0) {
         // Add — `intensity` scales how much light is poured on.
@@ -179,5 +180,5 @@ void main() {
     // Final layer opacity: cross-fade the whole effect back toward the original.
     vec3 outRgb = mix(original, result, u_opacity);
 
-    fragColor = vec4(clamp(outRgb, 0.0, 1.0), 1.0);      // output fully opaque
+    fragColor = vec4(clamp(outRgb, 0.0, 1.0), srcTex.a); // preserve the source's own alpha
 }

@@ -5,6 +5,7 @@
 //! transforms per playhead time with `evaluate_at`.
 
 mod eval;
+mod mcp_bridge;
 mod model;
 mod surface;
 mod text;
@@ -874,6 +875,26 @@ fn set_audio_fade(
     Ok(project.clone())
 }
 
+/// Start the localhost MCP bridge (for Claude Desktop / VS Code). `manifest` is
+/// the tools/list JSON the frontend generated. Idempotent.
+#[tauri::command]
+fn mcp_bridge_start(app: tauri::AppHandle, port: u16, manifest: String) -> Result<(), String> {
+    mcp_bridge::start(app, port, manifest)
+}
+
+/// The frontend's answer to one bridged tool call (MCP content-block JSON).
+#[tauri::command]
+fn mcp_bridge_reply(req_id: u64, result: String) {
+    mcp_bridge::reply(req_id, result);
+}
+
+/// True when launched with `--mcp-bridge` — an explicit opt-in so automation that
+/// relaunches the app (e.g. after an update) can bring the bridge straight back.
+#[tauri::command]
+fn mcp_bridge_requested() -> bool {
+    std::env::args().any(|a| a == "--mcp-bridge")
+}
+
 /// Scale an image layer to *contain* within the composition (preserving aspect
 /// ratio) and centre it — the same fit applied when an image is first added.
 /// Replaces the scale/position tracks with constants (drops any keyframes on
@@ -1385,6 +1406,10 @@ fn max_layer_id(layers: &[Layer]) -> u32 {
 fn save_project_file(state: State<AppState>, path: String) -> Result<(), String> {
     let project = state.project.lock().unwrap();
     let json = serde_json::to_string_pretty(&*project).map_err(|e| format!("serialize: {e}"))?;
+    // Autosaves / checkpoints write into app-data folders that may not exist yet.
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     std::fs::write(&path, json).map_err(|e| format!("write {path}: {e}"))
 }
 
@@ -5610,6 +5635,9 @@ pub fn run() {
             set_clip_reverse,
             set_audio_volume,
             set_audio_fade,
+            mcp_bridge_start,
+            mcp_bridge_reply,
+            mcp_bridge_requested,
             set_layer_hidden,
             set_letter_override,
             set_letter_color,

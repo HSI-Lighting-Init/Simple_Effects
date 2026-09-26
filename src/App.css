@@ -821,6 +821,23 @@ body {
   overflow-y: hidden;
 }
 
+/* Scenario (AI) panel: give every field the app's dark input styling. */
+.scenario-panel input,
+.scenario-panel select,
+.scenario-panel textarea {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.scenario-panel input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+}
+
 /* Label row with an inline keyframe indicator/clear button. */
 .field-label-row {
   display: flex;

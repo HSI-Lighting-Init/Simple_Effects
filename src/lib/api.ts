@@ -866,6 +866,9 @@ export const setClipReverse = (layerId: number, reverse: boolean) =>
 export const setAudioVolume = (layerId: number, volume: number) =>
   invoke<Project>("set_audio_volume", { layerId, volume });
 
+/** True when the app was launched with `--mcp-bridge` (auto-start the bridge). */
+export const mcpBridgeRequested = () => invoke<boolean>("mcp_bridge_requested");
+
 /** Set an audio layer's start / end fade durations (ms). */
 export const setAudioFade = (layerId: number, fadeInMs: number, fadeOutMs: number) =>
   invoke<Project>("set_audio_fade", { layerId, fadeInMs, fadeOutMs });

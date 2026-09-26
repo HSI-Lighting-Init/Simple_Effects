@@ -28,6 +28,10 @@ import EffectEditor from "./components/EffectEditor";
 import ExportDialog from "./components/ExportDialog";
 import ScenarioPanel from "./components/ScenarioPanel";
 import type { AgentCtx, MediaAsset } from "./agent/tools";
+import { startMcpBridge } from "./agent/bridge";
+import { appLocalDataDir, desktopDir, join } from "@tauri-apps/api/path";
+import StylePacksDialog from "./components/StylePacksDialog";
+import { applyStylePack, stylePackById, type StyleResult } from "./lib/stylePacks";
 import TemplateDialog, { type TemplateSpec } from "./components/TemplateDialog";
 import VideoTemplateDialog, { VIDEO_STYLES } from "./components/VideoTemplateDialog";
 import MixedTemplateDialog, { MIXED_TEMPLATES } from "./components/MixedTemplateDialog";
@@ -105,6 +109,9 @@ import {
   reorderLayers,
   saveProjectFile,
   openProjectFile,
+  filterExistingFiles,
+  navDepth,
+  mcpBridgeRequested,
   newProject,
   takeLaunchFile,
   attachToShape,
@@ -913,6 +920,7 @@ export default function App() {
     if (additions.length) {
       const next = [...cur, ...additions];
       const proj = await apiSetMedia(next);
+      projectRef.current = proj; // callers (import_media) read the bin straight back
       setProject(proj);
       setMedia(next);
     }
@@ -984,29 +992,273 @@ export default function App() {
     return { path, kind, durationMs: 0, width: 0, height: 0 };
   }, []);
 
-  // Assemble the live context the agent's tools run against. Every mutation
+  // --- Agent / bridge plumbing ------------------------------------------------
+
+  // Real-resolution frames through the EXPORT renderer (full comp size, editor
+  // overlays hidden) rather than the on-screen panel — what the agent inspects is
+  // what exports. Selection is restored afterwards.
+  const renderFrames = useCallback(
+    async (times: number[], shortSide: number): Promise<HTMLCanvasElement[]> => {
+      const p = projectRef.current;
+      if (!p) return [];
+      const ratio = Math.min(1, Math.max(0.05, shortSide / Math.min(p.width, p.height)));
+      const paint = () => new Promise((r) => requestAnimationFrame(() => r(null)));
+      const keepSel = selectedIdRef.current;
+      stop();
+      setSelectedId(null); // no transformer box in the capture
+      exportingRef.current = true;
+      setExporting(true);
+      const out: HTMLCanvasElement[] = [];
+      try {
+        await paint();
+        await paint();
+        for (const t of times) {
+          setTime(t);
+          await applyTime(t);
+          await paint();
+          await paint();
+          const stage = previewStageRef.current;
+          if (!stage) break;
+          stage.draw();
+          out.push(stage.toCanvas({ pixelRatio: ratio }));
+        }
+      } finally {
+        exportingRef.current = false;
+        setExporting(false);
+        setSelectedId(keepSel);
+      }
+      return out;
+    },
+    [stop, applyTime]
+  );
+
+  const renderPreviewAt = useCallback(
+    async (tMs: number, shortSide = 720): Promise<string> => {
+      const [c] = await renderFrames([tMs], shortSide);
+      if (!c) throw new Error("preview stage not ready");
+      return c.toDataURL("image/png");
+    },
+    [renderFrames]
+  );
+
+  // Several frames on one labeled grid — one image to judge pacing + consistency.
+  const renderContactSheet = useCallback(
+    async (times: number[], shortSide = 240): Promise<string> => {
+      const frames = await renderFrames(times, shortSide);
+      if (!frames.length) throw new Error("preview stage not ready");
+      const cols = Math.min(4, frames.length);
+      const rows = Math.ceil(frames.length / cols);
+      const fw = frames[0].width;
+      const fh = frames[0].height;
+      const label = 22;
+      const gap = 6;
+      const sheet = document.createElement("canvas");
+      sheet.width = cols * fw + (cols + 1) * gap;
+      sheet.height = rows * (fh + label) + (rows + 1) * gap;
+      const g = sheet.getContext("2d")!;
+      g.fillStyle = "#111";
+      g.fillRect(0, 0, sheet.width, sheet.height);
+      g.font = "bold 14px sans-serif";
+      g.fillStyle = "#fff";
+      frames.forEach((f, i) => {
+        const x = gap + (i % cols) * (fw + gap);
+        const y = gap + Math.floor(i / cols) * (fh + label + gap);
+        g.fillText(`${(times[i] / 1000).toFixed(2)}s`, x + 2, y + 16);
+        g.drawImage(f, x, y + label);
+      });
+      return sheet.toDataURL("image/jpeg", 0.85);
+    },
+    [renderFrames]
+  );
+
+  // Checkpoints live in the app's data folder, named by purpose ("before-agent",
+  // "before-style", …). Restoring swaps the project back without re-binding the
+  // open document to the checkpoint file.
+  const checkpointPath = useCallback(
+    async (name: string) => join(await appLocalDataDir(), "checkpoints", `${name.replace(/[^\w.-]+/g, "_")}.sefx`),
+    []
+  );
+  const saveCheckpoint = useCallback(
+    async (name: string): Promise<string> => {
+      const path = await checkpointPath(name);
+      await ensureRootScope(); // save the whole tree, not a group's inner scope
+      await saveProjectFile(path);
+      return path;
+    },
+    [checkpointPath]
+  );
+  const restoreProjectFrom = useCallback(
+    async (path: string): Promise<boolean> => {
+      const [exists] = await filterExistingFiles([path]);
+      if (!exists) return false;
+      stop();
+      const p = await openProjectFile(path);
+      projectRef.current = p;
+      setProject(p);
+      durationRef.current = p.durationMs;
+      setSelectedId(null);
+      setDecomposeId(null);
+      await resolveImages(p);
+      await loadProjectMedia(p);
+      await applyTime(timeRef.current);
+      setDirty(true);
+      return true;
+    },
+    [stop, resolveImages, loadProjectMedia, applyTime]
+  );
+  const restoreCheckpoint = useCallback(
+    async (name: string) => restoreProjectFrom(await checkpointPath(name)),
+    [restoreProjectFrom, checkpointPath]
+  );
+
+  // One context for both the in-app agent (the panel's fixed asset list, plus
+  // anything it imports) and the MCP bridge (the live media bin). Every mutation
   // commits the returned project so the timeline updates as the agent works.
   const buildAgentCtx = useCallback(
-    (media: MediaAsset[]): AgentCtx => ({
-      media,
-      project: () => projectRef.current!,
-      commit: async (p) => {
+    (fixed?: MediaAsset[]): AgentCtx => {
+      const imported: MediaAsset[] = [];
+      const live = (): MediaAsset[] =>
+        (projectRef.current?.media ?? []).map((path) => ({ path, kind: (mediaKind(path) ?? "image") as MediaAsset["kind"], durationMs: 0, width: 0, height: 0 }));
+      const list = () => (fixed ? [...fixed, ...imported] : live());
+      const commit = async (p: Project) => {
+        projectRef.current = p; // tools read it straight back — don't wait for React
         setProject(p);
         durationRef.current = p.durationMs;
         await resolveImages(p);
         await applyTime(timeRef.current);
-      },
-      addMedia: async (i) => (await onAddMediaToTimeline(media[i].path)) ?? -1,
-      renderPreview: async (tMs) => {
-        setTime(tMs);
-        await applyTime(tMs);
-        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-        return previewStageRef.current?.toDataURL({ pixelRatio: 0.5 }) ?? "";
-      },
-      log: () => {},
-    }),
-    [resolveImages, applyTime, onAddMediaToTimeline]
+      };
+      return {
+        get media() {
+          return list();
+        },
+        project: () => projectRef.current!,
+        commit,
+        addMedia: async (i) => {
+          const m = list()[i];
+          return m ? ((await onAddMediaToTimeline(m.path)) ?? -1) : -1;
+        },
+        renderPreview: (tMs, shortSide) => renderPreviewAt(tMs, shortSide),
+        contactSheet: (times, shortSide) => renderContactSheet(times, shortSide),
+        exportVideo: async (outPath, opts) => {
+          const format = opts?.format ?? "mp4";
+          const level = opts?.level ?? 2;
+          const fps = opts?.fps ?? projectRef.current?.fps ?? 30;
+          const saved = await onExportRef.current(format, level, fps, false, bitrateForLevel(level), "quality", outPath, true);
+          if (!saved) throw new Error("export did not produce a file");
+          return saved;
+        },
+        importMedia: async (paths) => {
+          await addMediaPaths(paths);
+          if (fixed)
+            for (const path of paths)
+              if (mediaKind(path) && !list().some((m) => m.path === path)) imported.push(await probeAsset(path));
+        },
+        checkpoint: (name) => saveCheckpoint(name),
+        restore: (name) => restoreCheckpoint(name),
+        undo: async () => {
+          const p = await undo();
+          if (!p) return false;
+          await commit(p);
+          return true;
+        },
+        redo: async () => {
+          const p = await redo();
+          if (!p) return false;
+          await commit(p);
+          return true;
+        },
+        log: () => {},
+      };
+    },
+    [resolveImages, applyTime, onAddMediaToTimeline, renderPreviewAt, renderContactSheet, addMediaPaths, probeAsset, saveCheckpoint, restoreCheckpoint]
   );
+
+  // Localhost MCP bridge for Claude Desktop / VS Code. Once enabled it auto-starts
+  // on every launch (so an app update doesn't cut an external agent off).
+  const [bridgeOn, setBridgeOn] = useState(false);
+  const [bridgeAuto, setBridgeAuto] = useState(() => localStorage.getItem("sefx.mcpBridge") === "1");
+  const onEnableBridge = useCallback(async () => {
+    try {
+      await startMcpBridge(buildAgentCtx());
+      setBridgeOn(true);
+      localStorage.setItem("sefx.mcpBridge", "1");
+      setBridgeAuto(true);
+    } catch (e) {
+      alert("MCP bridge failed to start: " + (e instanceof Error ? e.message : String(e)));
+    }
+  }, [buildAgentCtx]);
+  useEffect(() => {
+    void (async () => {
+      const flagged = await mcpBridgeRequested().catch(() => false);
+      if (flagged || localStorage.getItem("sefx.mcpBridge") === "1") await onEnableBridge();
+    })();
+    // Launch-only: auto-start once with the first render's context.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Autosave: every 30s while there are unsaved changes, write the whole project
+  // to the app's data folder so a crash or an app update never loses work; the
+  // next launch offers to restore it. Normal saves clear the pending flag.
+  useEffect(() => {
+    if (localStorage.getItem("sefx.autosavePending") !== "1") return;
+    void (async () => {
+      const path = await join(await appLocalDataDir(), "autosave.sefx");
+      const [exists] = await filterExistingFiles([path]);
+      if (exists && window.confirm("Simple Effects auto-saved unsaved work from your last session. Restore it?"))
+        await restoreProjectFrom(path);
+    })();
+    // Launch-only check; must run before the dirty effect below clears the flag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (!dirty) localStorage.setItem("sefx.autosavePending", "0");
+  }, [dirty]);
+  useEffect(() => {
+    const id = window.setInterval(async () => {
+      if (!dirtyRef.current || exportingRef.current) return;
+      try {
+        if ((await navDepth()) > 0) return; // inside a group — a save now would be partial
+        await saveProjectFile(await join(await appLocalDataDir(), "autosave.sefx"));
+        localStorage.setItem("sefx.autosavePending", "1");
+      } catch {
+        /* best effort */
+      }
+    }, 30000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // Style packs: checkpoint, apply, and a one-click revert to the checkpoint.
+  const [showStyles, setShowStyles] = useState(false);
+  const onApplyStylePack = useCallback(
+    async (id: string): Promise<StyleResult> => {
+      const pack = stylePackById(id);
+      if (!pack) throw new Error(`unknown style ${id}`);
+      const ctx = buildAgentCtx();
+      await ctx.checkpoint("before-style");
+      const r = await applyStylePack(pack, ctx);
+      recordAction("apply_style", { style: id });
+      return r;
+    },
+    [buildAgentCtx, recordAction]
+  );
+  const onRestoreCheckpointFile = useCallback(async () => {
+    const dir = await join(await appLocalDataDir(), "checkpoints");
+    const sel = await open({ multiple: false, filters: SEFX_FILTER, defaultPath: dir });
+    if (typeof sel === "string") await restoreProjectFrom(sel);
+  }, [restoreProjectFrom]);
+
+  // Persist the agent's work so it can't be lost: write the live project to a
+  // timestamped .sefx on the Desktop, bind it, and return the path.
+  const onAgentSaveToDesktop = useCallback(async (): Promise<string> => {
+    const dir = await desktopDir();
+    const path = await join(dir, `Simple Effects AI ${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.sefx`);
+    await ensureRootScope();
+    await saveProjectFile(path);
+    filePathRef.current = path;
+    setFileName(baseName(path));
+    setDirty(false);
+    return path;
+  }, []);
 
   const onRemoveMedia = useCallback(async (path: string) => {
     const next = (projectRef.current?.media ?? []).filter((p) => p !== path);
@@ -2447,6 +2699,8 @@ export default function App() {
       burnFps: boolean,
       bitrate: number,
       rateMode: "quality" | "bitrate",
+      outPath?: string,
+      silent?: boolean,
     ) => {
       if (exportingRef.current) return;
       // The bitrate the frame encoder targets: the user's value in bitrate mode,
@@ -2464,10 +2718,12 @@ export default function App() {
         setProject(p);
       }
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-      const path = await save({
-        defaultPath: `render-${stamp}.${format}`,
-        filters: [{ name: `${format.toUpperCase()} video`, extensions: [format] }],
-      });
+      const path =
+        outPath ??
+        (await save({
+          defaultPath: `render-${stamp}.${format}`,
+          filters: [{ name: `${format.toUpperCase()} video`, extensions: [format] }],
+        }));
       if (!path) return;
 
       stop();
@@ -2749,8 +3005,10 @@ export default function App() {
           }
         }
         recordAction("export_video", { path, format, level, deterministic: isDeterministicSupported() });
-        alert(`Saved video:\n${path}`);
+        if (!silent) alert(`Saved video:\n${path}`);
+        return path;
       } catch (e) {
+        if (silent) throw e;
         alert(`Export failed: ${e}`);
       } finally {
         exportingRef.current = false;
@@ -2764,6 +3022,11 @@ export default function App() {
     },
     [stop, applyTime, recordAction]
   );
+  // buildAgentCtx (defined earlier, for the MCP bridge) needs to call onExport
+  // for the export_video tool; mirror it into a ref so that closure always sees
+  // the latest onExport without reordering ~2000 lines of hook declarations.
+  const onExportRef = useRef(onExport);
+  onExportRef.current = onExport;
 
   // Show/hide a layer from the timeline's layer list.
   const onToggleHidden = useCallback(
@@ -3513,6 +3776,7 @@ export default function App() {
         { label: "Open…", onClick: () => void doOpenProject(), shortcut: "Ctrl+O" },
         { label: "Save", onClick: () => void doSave(), shortcut: "Ctrl+S" },
         { label: "Save As…", onClick: () => void doSaveAs(), shortcut: "Ctrl+Shift+S" },
+        { label: "Restore Checkpoint…", onClick: () => void onRestoreCheckpointFile() },
         { separator: true },
         { label: "Import Image…", onClick: onOpenImage },
         { separator: true },
@@ -3628,11 +3892,29 @@ export default function App() {
         { label: "Before / After…", onClick: () => setShowBeforeAfter(true) },
         { separator: true },
         { label: "🤖 AI: Scenario → Video…", onClick: () => setShowScenario(true) },
+        {
+          label: bridgeOn ? "🔌 MCP bridge ON (127.0.0.1:8787)" : "🔌 AI: Enable MCP bridge (Claude Desktop / VS Code)…",
+          onClick: () => void onEnableBridge(),
+          disabled: bridgeOn,
+        },
+        ...(bridgeAuto
+          ? [
+              {
+                label: "🔌 Stop auto-starting the MCP bridge",
+                onClick: () => {
+                  localStorage.setItem("sefx.mcpBridge", "0");
+                  setBridgeAuto(false);
+                },
+              },
+            ]
+          : []),
       ],
     },
     {
       title: "Effect",
       items: [
+        { label: "🎨 Style Packs…", onClick: () => setShowStyles(true) },
+        { separator: true },
         {
           label: "Open Effect Editor…",
           onClick: () => isMediaSelected && selectedId != null && setFxEditorId(selectedId),
@@ -4206,11 +4488,20 @@ export default function App() {
         />
       )}
 
+      {showStyles && (
+        <StylePacksDialog
+          onApply={onApplyStylePack}
+          onRevert={() => restoreCheckpoint("before-style")}
+          onClose={() => setShowStyles(false)}
+        />
+      )}
+
       {showScenario && (
         <ScenarioPanel
           buildCtx={buildAgentCtx}
           probe={probeAsset}
           mediaPaths={project.media}
+          onSaveToDesktop={onAgentSaveToDesktop}
           onDone={() => setShowExportDialog(true)}
           onClose={() => setShowScenario(false)}
         />

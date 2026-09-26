@@ -21,6 +21,15 @@ function recordingCtx() {
       return 1;
     },
     renderPreview: async () => "data:image/png;base64,AAAA",
+    contactSheet: async () => "data:image/jpeg;base64,AAAA",
+    importMedia: async () => {},
+    checkpoint: async (name) => {
+      calls.push(`checkpoint:${name}`);
+      return `C:/cp/${name}.sefx`;
+    },
+    restore: async () => true,
+    undo: async () => true,
+    redo: async () => true,
     log: () => {},
   };
   return { ctx, calls };
@@ -73,15 +82,17 @@ describe("agent loop", () => {
     mockClaude(PLAN_THEN_ACT);
     const { ctx, calls } = recordingCtx();
     const { summary } = await runAgent(ctx, opts());
+    expect(calls[0]).toBe("checkpoint:before-agent"); // restore point BEFORE any edit
     expect(calls).toContain("addMedia:0"); // the mutating tool actually ran
     expect(summary).toBe("Built a 5s clip.");
   });
 
-  it("dry run plans without mutating", async () => {
+  it("dry run plans without mutating (and needs no checkpoint)", async () => {
     mockClaude(PLAN_THEN_ACT);
     const { ctx, calls } = recordingCtx();
     await runAgent(ctx, opts({ dryRun: true }));
     expect(calls).not.toContain("addMedia:0"); // mutation skipped
+    expect(calls).not.toContain("checkpoint:before-agent");
   });
 
   it("parses DeepSeek (OpenAI-shaped) tool calls too", async () => {

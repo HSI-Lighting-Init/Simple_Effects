@@ -2,7 +2,7 @@
 // turn history; each adapter serialises it to its own API shape and parses the
 // reply back. Two real implementations (Claude, DeepSeek) so the interface earns
 // its keep. BYO key, direct browser calls (CSP is open).
-import type { ToolDef, ToolResult } from "./tools";
+import { splitDataUrl, type ToolDef, type ToolResult } from "./tools";
 
 export interface ToolCall {
   id: string;
@@ -47,11 +47,11 @@ class AnthropicProvider implements AgentProvider {
       }
       return {
         role: "user",
-        content: t.results.map(({ id, result }) =>
-          result.image
-            ? { type: "tool_result", tool_use_id: id, content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: result.image.replace(/^data:image\/\w+;base64,/, "") } }] }
-            : { type: "tool_result", tool_use_id: id, content: result.text ?? "ok", is_error: result.isError }
-        ),
+        content: t.results.map(({ id, result }) => {
+          if (!result.image) return { type: "tool_result", tool_use_id: id, content: result.text ?? "ok", is_error: result.isError };
+          const { mime, data } = splitDataUrl(result.image);
+          return { type: "tool_result", tool_use_id: id, content: [{ type: "image", source: { type: "base64", media_type: mime, data } }] };
+        }),
       };
     });
     const res = await fetch("https://api.anthropic.com/v1/messages", {

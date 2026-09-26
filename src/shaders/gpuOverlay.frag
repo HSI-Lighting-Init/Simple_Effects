@@ -106,6 +106,11 @@ vec3 composite(vec3 base, vec3 ov) {
 void main() {
     vec2 uv = v_texCoord;
     float t = u_time;
+    // The source pixel's own alpha (e.g. a logo/overlay PNG's transparent
+    // background) — preserved below so a per-image effect never flattens a
+    // transparent layer opaque. Unused in adjustment mode (u_inputImage is a
+    // throwaway opaque pixel there; that path computes its own alpha).
+    float srcAlpha = texture(u_inputImage, uv).a;
 
     // Effects fall into two families: OVERLAY effects fill (col, mask) and are
     // composited/emitted below; DIRECT effects (heat haze, vignette, grain) need
@@ -187,6 +192,7 @@ void main() {
     // ===== 5. Film Grain / Dust — DIRECT ===================================
     //  extra=grainSize(1-10), softness=monochrome(0-1), speed=re-randomise.
     else if (u_effect == 5) {
+        if (u_adjustment == 1) { fragColor = vec4(0.0); return; } // needs the image
         vec2 gp = floor(uv * u_resolution / max(u_extra, 1.0));
         float tf = floor(t * u_speed * 60.0);
         float g = hash(gp + tf * 1.7);
@@ -280,7 +286,7 @@ void main() {
     }
 
     // --- Output ------------------------------------------------------------
-    if (isDirect) { fragColor = vec4(clamp(direct, 0.0, 1.0), 1.0); return; }
+    if (isDirect) { fragColor = vec4(clamp(direct, 0.0, 1.0), srcAlpha); return; }
 
     // Adjustment layer: emit the pattern as straight-alpha; host blends it over
     // the comp below with the canvas blend mode.
@@ -295,5 +301,5 @@ void main() {
     vec3 ov = col * mask * u_intensity;
     vec3 result = composite(original, ov);
     vec3 outc = mix(original, result, u_opacity);
-    fragColor = vec4(clamp(outc, 0.0, 1.0), 1.0);
+    fragColor = vec4(clamp(outc, 0.0, 1.0), srcAlpha);
 }

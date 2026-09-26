@@ -4,8 +4,12 @@
 import { toolByName, TOOLS, type AgentCtx, type ToolResult } from "./tools";
 import { EDITOR_SYSTEM_PROMPT } from "./systemPrompt";
 import { makeProvider, type AgentTurn, type ProviderId } from "./providers";
+import { stylePackById } from "../lib/stylePacks";
 
-const READONLY = new Set(["get_timeline", "list_media", "list_effects", "list_transitions", "validate_timeline", "render_preview"]);
+const READONLY = new Set([
+  "get_timeline", "list_media", "list_effects", "list_transitions", "list_styles",
+  "validate_timeline", "render_preview", "contact_sheet",
+]);
 
 export interface RunOpts {
   provider: ProviderId;
@@ -33,28 +37,46 @@ function describe(name: string, args: Record<string, unknown>, r: ToolResult): s
     case "apply_color": return `Applied ${args.kind} to layer ${args.layerId}`;
     case "set_audio": return `Adjusted audio on layer ${args.layerId}`;
     case "render_preview": return `Rendered preview @ ${args.tMs}ms`;
+    case "contact_sheet": return `Rendered a contact sheet`;
     case "validate_timeline": return `Checked timeline`;
+    case "apply_style": return `Applied style '${args.style}' — ${r.text}`;
+    case "import_media": return `Imported ${Array.isArray(args.paths) ? args.paths.length : 0} file(s)`;
+    case "history": return `History: ${args.action}${args.name ? ` '${args.name}'` : ""}`;
     default: return name; // discovery calls stay quiet-ish
   }
 }
 
-/** Run the scenario→edit loop. Resolves with the model's closing summary. */
-export async function runAgent(ctx: AgentCtx, opts: RunOpts): Promise<{ summary: string }> {
+/** Run the scenario→edit loop. Resolves with the closing summary + how many
+ *  actual edits landed (0 = the model only talked). */
+export async function runAgent(ctx: AgentCtx, opts: RunOpts): Promise<{ summary: string; edits: number }> {
   const maxCalls = opts.maxCalls ?? 60;
   const provider = makeProvider(opts.provider, opts.apiKey, opts.model);
   const mediaList = ctx.media.map((m, i) => `#${i} ${m.kind} ${m.path.split(/[\\/]/).pop()} (${Math.round(m.durationMs)}ms)`).join("\n");
+  const pack = stylePackById(opts.style);
+  const styleLine = pack
+    ? `Style pack: ${pack.name} (id "${pack.id}") — ${pack.description} Cut at about ${pack.shotMs}ms per shot, then call apply_style with "${pack.id}".`
+    : `Style: auto — call list_styles, pick the pack whose description best fits the scenario, cut at its pace, then call apply_style with its id.`;
   const history: AgentTurn[] = [
     {
       role: "user",
       text:
-        `Scenario:\n${opts.scenario}\n\nTarget duration: ~${opts.targetSec}s. Style: ${opts.style || "clean"}.\n\n` +
+        `Scenario:\n${opts.scenario}\n\nTarget duration: ~${opts.targetSec}s.\n${styleLine}\n\n` +
         `Selected assets:\n${mediaList || "(none)"}\n\n` +
         (opts.dryRun ? "DRY RUN: plan only, do not change anything.\n" : "") +
         `Plan the shots first, then build the timeline with tools, verify, and finish.`,
     },
   ];
 
+  // Safety first: a restore point before the agent touches anything, so a bad
+  // run is one `history restore before-agent` (or File → Restore checkpoint) away.
+  if (!opts.dryRun) {
+    const path = await ctx.checkpoint("before-agent");
+    opts.onLog(`Checkpoint saved (${path.split(/[\\/]/).pop()}) — the run can be rolled back.`);
+  }
+
   let calls = 0;
+  let edits = 0; // actual mutations that landed
+  let nudged = false;
   let summary = "";
   while (calls < maxCalls) {
     if (opts.signal?.aborted) throw new Error("cancelled");
@@ -62,7 +84,17 @@ export async function runAgent(ctx: AgentCtx, opts: RunOpts): Promise<{ summary:
     history.push({ role: "assistant", text: reply.text, toolCalls: reply.toolCalls });
     if (reply.text) summary = reply.text;
 
-    if (reply.toolCalls.length === 0) break; // model is done / summarised
+    if (reply.toolCalls.length === 0) {
+      // Planned in prose but hasn't touched the timeline (common with weaker
+      // tool-callers). Nudge it once to actually execute before giving up.
+      if (!opts.dryRun && edits === 0 && !nudged) {
+        nudged = true;
+        opts.onLog("Model planned but didn't edit — asking it to execute…");
+        history.push({ role: "user", text: "You haven't made any edits yet. Execute your plan NOW by calling the editing tools (add_media_layer, set_layer_time, add_text, …). Don't just describe it." });
+        continue;
+      }
+      break; // done / summarised
+    }
 
     const results: { id: string; result: ToolResult }[] = [];
     for (const call of reply.toolCalls) {
@@ -79,11 +111,12 @@ export async function runAgent(ctx: AgentCtx, opts: RunOpts): Promise<{ summary:
           result = { text: `tool error: ${e instanceof Error ? e.message : String(e)}`, isError: true };
         }
       }
+      if (!READONLY.has(call.name) && !result.isError && !opts.dryRun) edits++;
       opts.onLog(describe(call.name, call.input ?? {}, result));
       results.push({ id: call.id, result });
     }
     history.push({ role: "tool", results });
   }
   if (calls >= maxCalls) opts.onLog(`Reached the ${maxCalls}-call limit — stopping with a partial result.`);
-  return { summary: summary || "Done." };
+  return { summary: summary || "Done.", edits };
 }

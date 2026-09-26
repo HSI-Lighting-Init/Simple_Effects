@@ -84,7 +84,16 @@ in the app after the agent finishes.
 
 ## Status
 
-The proxy, protocol, and config here are ready. The **app-side localhost bridge**
-(the Rust listener that forwards `/mcp/*` to the frontend tool registry) is the
-one remaining wire — tracked as the next build. Until it ships, the in-app
-"Scenario → Video" panel is the working path.
+Wired end to end: the app hosts the localhost bridge (Rust listener →
+`mcp://call` event → frontend tool registry), this proxy speaks it, and the
+config above connects Claude Desktop / VS Code. Steps to use:
+
+1. Open Simple Effects, import your media (they become the asset bin the tools
+   see via `list_media`).
+2. **Templates → 🔌 AI: Enable MCP bridge** (starts `127.0.0.1:8787`).
+3. `cd mcp && npm install`, point your MCP client at `simple-effects-mcp.mjs`
+   (config above), restart it.
+4. Ask the agent to edit — the tool calls run on your live timeline.
+
+Only the port `8787` is used; there's no auth (localhost only). Leave the app
+open while the external agent works.
