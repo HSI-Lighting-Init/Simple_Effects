@@ -147,6 +147,30 @@ fn new_project(state: State<AppState>) -> Project {
     current.clone()
 }
 
+/// List image files directly inside `dir` (no recursion), sorted. For
+/// `make_synthetic_reference` (roadmap Phase 1.2): picking a random photo set
+/// needs no capability grant beyond what every other file-path command already
+/// has — a raw `std::fs::read_dir` is simpler than wiring up the `fs` plugin's
+/// JS-side scope for one listing call.
+#[tauri::command]
+fn list_dir_images(dir: String) -> Result<Vec<String>, String> {
+    const EXTS: [&str; 6] = ["jpg", "jpeg", "png", "webp", "bmp", "gif"];
+    let mut out: Vec<String> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("read dir {dir}: {e}"))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            p.extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| EXTS.contains(&x.to_lowercase().as_str()))
+        })
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
 /// Undo the last mutation; returns the restored project (or `None` if nothing to
 /// undo). Rebuilds the shaping cache so text layers stay consistent.
 #[tauri::command]
@@ -931,19 +955,28 @@ fn scale_layer_to_fit(state: State<AppState>, layer_id: u32) -> Result<Project, 
 /// *after* the layer's start, first drop a keyframe at the start holding the old
 /// value — so a single edit at a later frame produces an animation from the
 /// layer's beginning, not just a static jump.
-fn upsert_key(track: &mut Track, t_ms: u32, value: Option<f32>, seed_start: bool, start_ms: u32) {
+///
+/// `easing` shapes any keyframe this call *creates* (the seed key, and a new
+/// key at `t_ms`); `None` defaults to `Easing::EaseInOut`, the prior hardcoded
+/// behaviour. Updating an *existing* key at `t_ms` only touches its easing when
+/// `easing` is explicitly `Some` — a value-only nudge (the common case) leaves
+/// whatever shape was already chosen for that segment alone.
+fn upsert_key(track: &mut Track, t_ms: u32, value: Option<f32>, seed_start: bool, start_ms: u32, easing: Option<Easing>) {
     let Some(value) = value else { return };
     if track.keys.is_empty() && seed_start && start_ms < t_ms {
         track.keys.push(Keyframe {
             time_ms: start_ms,
             value: track.default,
-            easing: Easing::EaseInOut,
+            easing: easing.unwrap_or(Easing::EaseInOut),
         });
     }
     if let Some(k) = track.keys.iter_mut().find(|k| k.time_ms == t_ms) {
         k.value = value;
+        if let Some(e) = easing {
+            k.easing = e;
+        }
     } else {
-        track.keys.push(Keyframe { time_ms: t_ms, value, easing: Easing::EaseInOut });
+        track.keys.push(Keyframe { time_ms: t_ms, value, easing: easing.unwrap_or(Easing::EaseInOut) });
         track.keys.sort_by(|a, b| a.time_ms.cmp(&b.time_ms));
     }
 }
@@ -968,12 +1001,12 @@ fn edit_keyframes(
         .ok_or("layer not found")?;
     let start = layer.start_ms;
     let tf = &mut layer.transform;
-    upsert_key(&mut tf.x, t_ms, edit.x, seed_start, start);
-    upsert_key(&mut tf.y, t_ms, edit.y, seed_start, start);
-    upsert_key(&mut tf.scale_x, t_ms, edit.scale_x, seed_start, start);
-    upsert_key(&mut tf.scale_y, t_ms, edit.scale_y, seed_start, start);
-    upsert_key(&mut tf.rotation, t_ms, edit.rotation, seed_start, start);
-    upsert_key(&mut tf.opacity, t_ms, edit.opacity, seed_start, start);
+    upsert_key(&mut tf.x, t_ms, edit.x, seed_start, start, edit.easing);
+    upsert_key(&mut tf.y, t_ms, edit.y, seed_start, start, edit.easing);
+    upsert_key(&mut tf.scale_x, t_ms, edit.scale_x, seed_start, start, edit.easing);
+    upsert_key(&mut tf.scale_y, t_ms, edit.scale_y, seed_start, start, edit.easing);
+    upsert_key(&mut tf.rotation, t_ms, edit.rotation, seed_start, start, edit.easing);
+    upsert_key(&mut tf.opacity, t_ms, edit.opacity, seed_start, start, edit.easing);
     Ok(project.clone())
 }
 
@@ -1009,7 +1042,7 @@ fn set_transform_channel_keyed(
     };
     if keyed {
         let v = eval::sample_track(track, t_ms);
-        upsert_key(track, t_ms, Some(v), true, start);
+        upsert_key(track, t_ms, Some(v), true, start, None);
     } else {
         track.default = eval::sample_track(track, t_ms);
         track.keys.clear();
@@ -1551,10 +1584,10 @@ fn set_letter_override(
                 parts.resize_with(count, LetterOverride::default);
             }
             if let Some(slot) = parts.get_mut(index) {
-                upsert_key(&mut slot.dx, t_ms, Some(dx), seed_start, start);
-                upsert_key(&mut slot.dy, t_ms, Some(dy), seed_start, start);
-                upsert_key(&mut slot.rotation, t_ms, Some(rotation), seed_start, start);
-                upsert_key(&mut slot.scale, t_ms, Some(scale), seed_start, start);
+                upsert_key(&mut slot.dx, t_ms, Some(dx), seed_start, start, None);
+                upsert_key(&mut slot.dy, t_ms, Some(dy), seed_start, start, None);
+                upsert_key(&mut slot.rotation, t_ms, Some(rotation), seed_start, start, None);
+                upsert_key(&mut slot.scale, t_ms, Some(scale), seed_start, start, None);
             }
         }
         _ => return Err("not a text layer".into()),
@@ -1650,7 +1683,7 @@ fn set_decompose_key(
     let start = layer.start_ms;
     match &mut layer.kind {
         LayerKind::Text { decompose, .. } => {
-            upsert_key(decompose, t_ms, Some(value), seed_start, start)
+            upsert_key(decompose, t_ms, Some(value), seed_start, start, None)
         }
         _ => return Err("not a text layer".into()),
     }
@@ -2502,8 +2535,20 @@ fn set_layer_anchor(
 /// Swap an image layer's source for `path`, keeping its whole effect stack,
 /// transitions, timing, position, rotation and opacity intact — only the media
 /// changes. The transform scale is rescaled so the new image occupies the same
-/// on-screen box as the old one; a cover-cropped layer's crop is recomputed to
-/// the same aspect so it keeps filling its slot. Undoable.
+/// on-screen box as the old one — exactly, at every existing keyframe, since
+/// the rescale is one uniform multiplier applied to every keyframe's value
+/// (`mul_track`): if `new_box(t) = old_source * r * scale(t)` and `r` is chosen
+/// so `new_source * r == old_source`, then `new_box(t) == old_box(t)` for every
+/// `t`, not just the one instant `r` was computed from — an already edge-safe
+/// animation stays edge-safe, with no extra per-keyframe check needed.
+///
+/// `fit`: "contain" (default) letterboxes the new media inside the old box,
+/// same as before. "cover" cover-crops it to the old box's aspect instead —
+/// image targets only; a `crop` region doesn't exist on `LayerKind::Video` yet,
+/// so a video target always letterboxes regardless of `fit`. A layer that was
+/// already crop-fitted keeps that behaviour (recrops to the same aspect)
+/// either way, matching the pre-`fit` code path exactly.
+/// Undoable.
 #[tauri::command]
 fn replace_layer_media(
     state: State<AppState>,
@@ -2513,7 +2558,9 @@ fn replace_layer_media(
     width: u32,
     height: u32,
     duration_ms: u32,
+    fit: Option<String>,
 ) -> Result<Project, String> {
+    let cover = fit.as_deref() == Some("cover");
     let new_is_image = kind != "video";
     // For images the backend reads the true dimensions; for video the frontend
     // supplies them (the image crate can't decode a video).
@@ -2544,6 +2591,7 @@ fn replace_layer_media(
         nw: u32,
         nh: u32,
         dur: u32,
+        cover: bool,
     ) -> Option<bool> {
         for l in layers.iter_mut() {
             if l.id == id {
@@ -2562,10 +2610,17 @@ fn replace_layer_media(
                     _ => return Some(false), // only image/video layers can be replaced
                 };
                 let old_base = base_name(&old_src);
-                // A cover-crop carries over only when replacing an image with an
-                // image; otherwise the new media fills the old footprint uncropped.
+                // A pre-existing crop always carries over (cover-cropped stays
+                // cover-cropped, whatever `fit` says — it was already an
+                // intentional exact-fit slot). Otherwise, `cover` opts an
+                // uncropped image slot into a fresh cover-crop against the old
+                // slot's own aspect; video has no crop field to fit into.
                 let new_crop = if new_is_image {
-                    old_crop_aspect.map(|(aw, ah)| cover_crop(nw as f32, nh as f32, aw, ah).0)
+                    match old_crop_aspect {
+                        Some((aw, ah)) => Some(cover_crop(nw as f32, nh as f32, aw, ah).0),
+                        None if cover => Some(cover_crop(nw as f32, nh as f32, old_w, old_h).0),
+                        None => None,
+                    }
                 } else {
                     None
                 };
@@ -2602,7 +2657,7 @@ fn replace_layer_media(
                 return Some(true);
             }
             if let LayerKind::Group { children } = &mut l.kind {
-                if let Some(r) = replace_in(children, id, path, new_is_image, nw, nh, dur) {
+                if let Some(r) = replace_in(children, id, path, new_is_image, nw, nh, dur, cover) {
                     return Some(r);
                 }
             }
@@ -2612,7 +2667,7 @@ fn replace_layer_media(
 
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    match replace_in(&mut project.layers, layer_id, &path, new_is_image, nw, nh, duration_ms) {
+    match replace_in(&mut project.layers, layer_id, &path, new_is_image, nw, nh, duration_ms, cover) {
         Some(true) => Ok(project.clone()),
         Some(false) => Err("only image or video layers can be replaced".into()),
         None => Err("layer not found".into()),
@@ -3833,8 +3888,8 @@ fn set_grid_vertices(
         let c = up.index % vcols;
         let base_x = c as f32 * *cell_w - grid_w / 2.0;
         let base_y = r as f32 * *cell_h - grid_h / 2.0;
-        upsert_key(&mut gv.dx, t_ms, Some(up.x - base_x), seed_start, start);
-        upsert_key(&mut gv.dy, t_ms, Some(up.y - base_y), seed_start, start);
+        upsert_key(&mut gv.dx, t_ms, Some(up.x - base_x), seed_start, start, None);
+        upsert_key(&mut gv.dy, t_ms, Some(up.y - base_y), seed_start, start, None);
     }
     Ok(project.clone())
 }
@@ -3926,7 +3981,7 @@ fn set_cell_zoom(
         return Err("not a frame grid".into());
     };
     let c = cells.get_mut(cell as usize).ok_or("cell out of range")?;
-    upsert_key(&mut c.zoom, t_ms, Some(zoom.max(0.01)), seed_start, start);
+    upsert_key(&mut c.zoom, t_ms, Some(zoom.max(0.01)), seed_start, start, None);
     Ok(project.clone())
 }
 
@@ -3951,8 +4006,8 @@ fn set_cell_pan(
         return Err("not a frame grid".into());
     };
     let c = cells.get_mut(cell as usize).ok_or("cell out of range")?;
-    upsert_key(&mut c.pan_x, t_ms, Some(x), seed_start, start);
-    upsert_key(&mut c.pan_y, t_ms, Some(y), seed_start, start);
+    upsert_key(&mut c.pan_x, t_ms, Some(x), seed_start, start, None);
+    upsert_key(&mut c.pan_y, t_ms, Some(y), seed_start, start, None);
     Ok(project.clone())
 }
 
@@ -4176,7 +4231,7 @@ fn set_shape_rotation_key(
                 "z" => rotation_z,
                 _ => return Err("axis must be x, y or z".into()),
             };
-            upsert_key(track, t_ms, Some(value), seed_start, start);
+            upsert_key(track, t_ms, Some(value), seed_start, start, None);
         }
         _ => return Err("not a shape layer".into()),
     }
@@ -4260,8 +4315,8 @@ fn drop_image_on_shape(
     let decal = layer.attach.get_or_insert_with(|| Decal::new(shape_id, face, default_scale));
     decal.shape_id = shape_id;
     decal.face = face;
-    upsert_key(&mut decal.u, t_ms, Some(u), true, start);
-    upsert_key(&mut decal.v, t_ms, Some(v), true, start);
+    upsert_key(&mut decal.u, t_ms, Some(u), true, start, None);
+    upsert_key(&mut decal.v, t_ms, Some(v), true, start, None);
     Some(project.clone())
 }
 
@@ -4294,7 +4349,7 @@ fn key_decal(
         "rotation" => &mut decal.rotation,
         _ => return Err("prop must be u, v, scale or rotation".into()),
     };
-    upsert_key(track, t_ms, Some(value), seed_start, start);
+    upsert_key(track, t_ms, Some(value), seed_start, start, None);
     Ok(project.clone())
 }
 
@@ -4396,7 +4451,7 @@ fn key_effect(
     let start = layer.start_ms;
     let effect = layer.effects.get_mut(index).ok_or("effect index out of range")?;
     let track = effect_track_mut(effect, &param).ok_or("effect has no such parameter")?;
-    upsert_key(track, t_ms, Some(value), seed_start, start);
+    upsert_key(track, t_ms, Some(value), seed_start, start, None);
     Ok(project.clone())
 }
 
@@ -4422,6 +4477,44 @@ fn set_wipe_static(
             *inv = invert;
         }
         _ => return Err("not a wipe effect".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Set a torn-edge effect's static fields (all of them — the effect has no
+/// Track fields). Undoable.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn set_tornedge_static(
+    state: State<AppState>,
+    layer_id: u32,
+    index: usize,
+    side: u8,
+    depth: f32,
+    seed: u32,
+    tooth_count: u32,
+    paper_width: f32,
+    paper_color: Rgba,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match layer.effects.get_mut(index) {
+        Some(Effect::TornEdge {
+            side: s, depth: d, seed: sd, tooth_count: tc, paper_width: pw, paper_color: pc,
+        }) => {
+            *s = side;
+            *d = depth;
+            *sd = seed;
+            *tc = tooth_count;
+            *pw = paper_width;
+            *pc = paper_color;
+        }
+        _ => return Err("not a torn-edge effect".into()),
     }
     Ok(project.clone())
 }
@@ -4541,7 +4634,7 @@ fn key_cell_effect(
     let fx = cell_effects_mut(layer, cell)?;
     let effect = fx.get_mut(index).ok_or("effect index out of range")?;
     let track = effect_track_mut(effect, &param).ok_or("effect has no such parameter")?;
-    upsert_key(track, t_ms, Some(value), seed_start, start);
+    upsert_key(track, t_ms, Some(value), seed_start, start, None);
     Ok(project.clone())
 }
 
@@ -4862,7 +4955,7 @@ fn key_linked_effect(
     let fx = linked_effects_mut(layer, group_id)?;
     let effect = fx.get_mut(index).ok_or("effect index out of range")?;
     let track = effect_track_mut(effect, &param).ok_or("effect has no such parameter")?;
-    upsert_key(track, t_ms, Some(value), seed_start, start);
+    upsert_key(track, t_ms, Some(value), seed_start, start, None);
     Ok(project.clone())
 }
 
@@ -5300,6 +5393,47 @@ fn audit_export(
     analyze::audit_export(&project, &path, verbose.unwrap_or(false))
 }
 
+/// Gate A spike: align a shot's frames against a reference frame — see
+/// `analyze::align_shot`'s doc for exactly what's returned and how to compose
+/// it into this engine's own transform values.
+#[tauri::command]
+fn align_reference(
+    path: String,
+    start_ms: u32,
+    end_ms: u32,
+    ref_ms: Option<u32>,
+    sample_every_ms: Option<u32>,
+) -> Result<Vec<analyze::AlignSample>, String> {
+    analyze::align_shot(&path, start_ms, end_ms, ref_ms.unwrap_or(start_ms), sample_every_ms.unwrap_or(250), 256)
+}
+
+/// Phase 2.2: find shot/cut boundaries in a video — the first step of
+/// actually inverse-rendering an existing edit (vs. Gate A's per-shot
+/// aligner, which needs the boundaries already known).
+#[tauri::command]
+fn detect_cuts(path: String) -> Result<Vec<analyze::shots::Cut>, String> {
+    analyze::shots::detect_cuts(&path, 8.0, 128, &analyze::shots::CutParams::default())
+}
+
+/// The inverse-render entry point: cuts + per-shot motion/look/text-region
+/// measurement in one call. See `analyze::analyze_reference`'s doc for
+/// exactly what this does and doesn't cover.
+#[tauri::command]
+fn analyze_reference(path: String) -> Result<analyze::TemplateAnalysis, String> {
+    analyze::analyze_reference(&path)
+}
+
+/// General-purpose "grab real frames from an arbitrary video file as
+/// base64 PNGs" for the frontend — the transition-matching harness needs
+/// real reference-video pixels to render engine candidates against, which
+/// none of the existing commands expose (audit_export/align_reference use
+/// analyze::extract_frames internally but don't hand the bytes back raw).
+#[tauri::command]
+fn extract_video_frames(path: String, times_ms: Vec<u32>, short_side: u32) -> Result<Vec<(u32, String)>, String> {
+    let frames = analyze::extract_frames(&path, &times_ms, short_side)?;
+    Ok(frames.into_iter().map(|(t, bytes)| (t, format!("data:image/png;base64,{}", STANDARD.encode(&bytes)))).collect())
+}
+
 /// Visit every keyframeable Track on a layer (transform + kind-specific + decal
 /// placement + effect params), so delete/clear can act on all of them at once.
 /// Shift a layer's whole timing by `delta` ms — its play range and every
@@ -5424,6 +5558,8 @@ fn walk_effect_tracks(e: &mut Effect, f: &mut dyn FnMut(&mut Track)) {
             f(position);
             f(softness);
         }
+        // Fully static — no Track fields to walk.
+        Effect::TornEdge { .. } => {}
         Effect::ShinyClouds {
             intensity, scale, speed, complexity, contrast, brightness, opacity, ..
         } => {
@@ -5633,6 +5769,7 @@ pub fn run() {
             set_project,
             set_media,
             new_project,
+            list_dir_images,
             take_launch_file,
             evaluate_at,
             add_image_layer,
@@ -5722,6 +5859,7 @@ pub fn run() {
             remove_effect,
             key_effect,
             set_wipe_static,
+            set_tornedge_static,
             set_shine_static,
             set_gpufx_static,
             save_binary_file,
@@ -5743,6 +5881,10 @@ pub fn run() {
             install_ffmpeg,
             export_video,
             audit_export,
+            align_reference,
+            detect_cuts,
+            analyze_reference,
+            extract_video_frames,
             add_text_layer,
             add_adjustment_layer,
             set_text_content,

@@ -8,8 +8,13 @@
 // denoise / duck — those capabilities don't exist in the engine yet.
 import type { Project } from "../bindings/Project";
 import type { TransformEdit } from "../bindings/TransformEdit";
+import type { EffectParam } from "../lib/api";
 import { REGISTRY } from "../lib/transitions/registry";
 import { STYLE_PACKS, stylePackById, applyStylePack } from "../lib/stylePacks";
+import { GPU_FX } from "../lib/effects";
+import { makeSyntheticReference } from "../lib/synthetic";
+import { rebuildFromAnalysis, type TemplateAnalysis as RebuildTemplateAnalysis } from "../lib/rebuildFromAnalysis";
+import { matchTransition } from "../lib/transitionMatch";
 import {
   setCompSize,
   setCompDuration,
@@ -28,6 +33,9 @@ import {
   createBeforeAfter,
   createCarouselVideo,
   auditExport,
+  alignReference,
+  detectCuts,
+  analyzeReference,
 } from "../lib/api";
 
 /** One selected source asset the agent may place. */
@@ -90,7 +98,7 @@ const err = (text: string): ToolResult => ({ text, isError: true });
 const findLayer = (p: Project, id: number) => p.layers.find((l) => l.id === id);
 const notFound = (id: number) => err(`layer ${id} not found — call get_timeline to list current layer ids`);
 
-// Basic colour effects the agent is allowed to use, with the param each drives.
+// Basic colour effects (kept for list_effects' human-readable notes / ranges).
 const COLOR: Record<string, { param: "amount" | "radius" | "degrees"; lo: number; hi: number; note: string }> = {
   brightness: { param: "amount", lo: 0, hi: 3, note: "1 = unchanged, <1 darker, >1 brighter" },
   contrast: { param: "amount", lo: 0, hi: 3, note: "1 = unchanged" },
@@ -99,6 +107,41 @@ const COLOR: Record<string, { param: "amount" | "radius" | "degrees"; lo: number
   blur: { param: "radius", lo: 0, hi: 100, note: "blur radius in px" },
   grayscale: { param: "amount", lo: 0, hi: 1, note: "0..1 amount" },
   invert: { param: "amount", lo: 0, hi: 1, note: "0..1 amount" },
+};
+
+// GPU-overlay kind name -> gpuOverlay.frag effect index (mirrors Effect::default_of).
+const GPU_KIND_INDEX: Record<string, number> = {
+  caustics: 1, lensflare: 2, sparkle: 3, heathaze: 4, filmgrain: 5,
+  vignette: 6, shimmer: 7, aurora: 8, fog: 9, flap: 10,
+};
+
+// Every kind add_effect accepts, with the params it can be keyed at (name ->
+// range/note) — mirrors Rust's `effect_track_mut` exactly, reusing the same
+// ranges the Inspector's sliders use (GPU_FX) so nothing drifts out of sync.
+// Params NOT listed here (wipe's angle/invert, shinyclouds'/gpu-overlay's tint,
+// tint2, blend, pos) are plain fields only `default_of` sets — no API animates
+// them yet, so add_effect can't either; that's a pre-existing engine gap, not
+// something this tool works around.
+const EFFECT_PARAMS: Record<string, Record<string, { lo: number; hi: number; note?: string }>> = {
+  ...Object.fromEntries(Object.entries(COLOR).map(([kind, c]) => [kind, { [c.param]: { lo: c.lo, hi: c.hi, note: c.note } }])),
+  wipe: {
+    position: { lo: 0, hi: 1, note: "0..1 sweep progress" },
+    softness: { lo: 0, hi: 1, note: "0..1 edge feather" },
+  },
+  // Fully static (side/depth/seed/toothCount/paperWidth/paperColor) — no Track
+  // fields to key, same gap as wipe's angle/invert. Listed with no params so
+  // add_effect still accepts the kind (with its default_of starting values).
+  tornedge: {},
+  shinyclouds: {
+    intensity: { lo: 0, hi: 2 }, scale: { lo: 0.5, hi: 5 }, speed: { lo: 0, hi: 3 },
+    complexity: { lo: 1, hi: 8 }, contrast: { lo: 1, hi: 4 }, brightness: { lo: -0.5, hi: 0.5 }, opacity: { lo: 0, hi: 1 },
+  },
+  ...Object.fromEntries(
+    Object.entries(GPU_KIND_INDEX).map(([kind, idx]) => [
+      kind,
+      Object.fromEntries(GPU_FX[idx].sliders.map((s) => [s.key, { lo: s.min, hi: s.max, note: s.label }])),
+    ])
+  ),
 };
 
 function timelineSummary(p: Project) {
@@ -137,10 +180,15 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "list_effects",
-    description: "List the colour/blur effects you may apply (name + parameter range). Only these exist — never invent effect names or values.",
+    description: "List every effect kind add_effect accepts (colour/blur filters, plus the shinyclouds and GPU-overlay looks), each with its keyable parameter names and ranges. Only these exist — never invent a kind or param name.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async () =>
-      ok(JSON.stringify(Object.entries(COLOR).map(([kind, c]) => ({ kind, param: c.param, min: c.lo, max: c.hi, note: c.note })))),
+      ok(JSON.stringify(
+        Object.entries(EFFECT_PARAMS).map(([kind, params]) => ({
+          kind,
+          params: Object.entries(params).map(([param, r]) => ({ param, min: r.lo, max: r.hi, note: r.note })),
+        }))
+      )),
   },
   {
     name: "list_transitions",
@@ -296,7 +344,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "set_keyframe",
-    description: "Set a keyframe on a layer's transform at an exact time — position (x/y), scale (scaleX/scaleY), rotation, or opacity. Only the fields you pass change. Call it at 2+ different times on the same layer to animate a custom move — e.g. a punch-in-then-back-out zoom (normal → zoomed at the midpoint → normal again), instead of apply_style's simple straight-line Ken Burns drift. Get the layer's current scale/position first (fit-to-frame scale = min(compWidth/imageWidth, compHeight/imageHeight)) so your keyframes start from where it already sits, not a jump.",
+    description: "Set a keyframe on a layer's transform at an exact time — position (x/y), scale (scaleX/scaleY), rotation, or opacity. Only the fields you pass change. Call it at 2+ different times on the same layer to animate a custom move — e.g. a punch-in-then-back-out zoom (normal → zoomed at the midpoint → normal again), instead of apply_style's simple straight-line Ken Burns drift. Get the layer's current scale/position first (fit-to-frame scale = min(compWidth/imageWidth, compHeight/imageHeight)) so your keyframes start from where it already sits, not a jump. `easing` shapes the segment(s) this call creates (default easeInOut); it only takes effect on a NEW keyframe or the seed key — nudging an already-keyframed time's value without passing easing leaves that segment's shape alone.",
     inputSchema: {
       type: "object",
       properties: {
@@ -308,6 +356,7 @@ export const TOOLS: ToolDef[] = [
         scaleY: { type: "number" },
         rotation: { type: "number", description: "degrees" },
         opacity: { type: "number", description: "0..1" },
+        easing: { type: "string", enum: ["linear", "easeIn", "easeOut", "easeInOut", "hold"], description: "default easeInOut; hold = step (snaps to this value, no tween)" },
       },
       required: ["layerId", "tMs"],
       additionalProperties: false,
@@ -319,6 +368,7 @@ export const TOOLS: ToolDef[] = [
       for (const k of ["x", "y", "scaleX", "scaleY", "rotation", "opacity"] as const)
         if (typeof a[k] === "number" && isFinite(a[k] as number)) edit[k] = a[k] as number;
       if (!Object.keys(edit).length) return err("provide at least one of x/y/scaleX/scaleY/rotation/opacity");
+      if (typeof a.easing === "string") edit.easing = a.easing as TransformEdit["easing"];
       await ctx.commit(await editKeyframes(id, int(a.tMs), edit, false));
       return ok("ok");
     },
@@ -342,31 +392,38 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: "apply_color",
-    description: "Apply one basic colour/blur effect to a layer at a constant amount. kind + amount range come from list_effects.",
+    name: "add_effect",
+    description: "Add one effect to a layer's stack — a basic colour/blur filter, or a GPU overlay (shinyclouds, or one of the 10 named gpu-overlay looks: caustics, lensflare, sparkle, heathaze, filmgrain, vignette, shimmer, aurora, fog, flap) — reachable directly here, not just through apply_style. kind + valid params/ranges come from list_effects; never invent either. params sets each named parameter's starting value (all optional — omit to use the kind's defaults); values outside list_effects' range are clamped.",
     inputSchema: {
       type: "object",
       properties: {
         layerId: { type: "integer" },
-        kind: { type: "string", enum: Object.keys(COLOR) },
-        amount: { type: "number" },
+        kind: { type: "string", enum: Object.keys(EFFECT_PARAMS) },
+        params: { type: "object", additionalProperties: { type: "number" }, description: "paramName -> value, e.g. {\"amount\": 1.4} for brightness, or {\"intensity\": 0.8, \"opacity\": 0.6} for a GPU overlay" },
       },
-      required: ["layerId", "kind", "amount"],
+      required: ["layerId", "kind"],
       additionalProperties: false,
     },
     handler: async (a, ctx) => {
       const id = int(a.layerId);
       if (!findLayer(ctx.project(), id)) return notFound(id);
       const kind = str(a.kind);
-      const c = COLOR[kind];
-      if (!c) return err(`unknown effect '${kind}' — call list_effects`);
-      const value = Math.max(c.lo, Math.min(c.hi, num(a.amount)));
+      const validParams = EFFECT_PARAMS[kind];
+      if (!validParams) return err(`unknown effect '${kind}' — call list_effects`);
+      const raw = a.params && typeof a.params === "object" ? (a.params as Record<string, unknown>) : {};
+      const applied: Record<string, number> = {};
+      for (const [param, v] of Object.entries(raw)) {
+        const range = validParams[param];
+        if (!range) return err(`effect '${kind}' has no parameter '${param}' — call list_effects for its valid params`);
+        if (typeof v !== "number" || !isFinite(v)) return err(`'${param}' must be a number`);
+        applied[param] = Math.max(range.lo, Math.min(range.hi, v));
+      }
       let p = await addEffect(id, kind);
       const layer = findLayer(p, id);
       const index = layer ? layer.effects.length - 1 : 0;
-      p = await keyEffect(id, index, c.param, 0, value, false);
+      for (const [param, value] of Object.entries(applied)) p = await keyEffect(id, index, param as EffectParam, 0, value, false);
       await ctx.commit(p);
-      return ok(JSON.stringify({ applied: kind, value }));
+      return ok(JSON.stringify({ added: kind, index, applied }));
     },
   },
   {
@@ -488,7 +545,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "audit_export",
-    description: "Check an already-exported video against the CURRENT project's image layers: every 250ms, does the frame actually look like whichever image layer(s) should be visible there (a luminance + colour fingerprint match)? Flags frames whose closest match is a different layer or nothing expected — the signature of the known intermittent content-swap export bug (handoff §11.1). Only image-kind layers are checked (video/text/shapes have no single static source to fingerprint). Run this after every export while that bug is open; it must flag a known-bad export before its result can be trusted on a fix. verbose also returns every frame's numbers (not just flagged ones), for calibrating the match threshold against a known-bad export.",
+    description: "Check an already-exported video against the CURRENT project's image layers: every 250ms, does the frame actually look like whichever image layer(s) should be visible there (a luminance + colour fingerprint match)? Flags frames whose closest match is a different layer or nothing expected. Note (handoff §11.1, closed 2026-09-26): a flag is not proof of a bug — near-duplicate source images (same picture saved twice), a fade-from-black opening frame, and a mid-wipe-transition split frame all legitimately flag too; check the returned image sheet before assuming a real content swap. Only image-kind layers are checked (video/text/shapes have no single static source to fingerprint). verbose also returns every frame's numbers (not just flagged ones), useful for calibration.",
     inputSchema: {
       type: "object",
       properties: {
@@ -504,7 +561,7 @@ export const TOOLS: ToolDef[] = [
       try {
         const report = await auditExport(path, a.verbose === true);
         const { sheet, ...rest } = report;
-        return ok(JSON.stringify({ ...rest, sheetAvailable: !!sheet }));
+        return { text: JSON.stringify(rest), image: sheet ?? undefined };
       } catch (e) {
         return err(`audit failed: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -619,6 +676,208 @@ export const TOOLS: ToolDef[] = [
       return err(`unknown action '${action}' — use checkpoint, restore, undo or redo`);
     },
   },
+  // Dev only (roadmap §6/§5's "Dev only" tool family) — meant for Claude Code
+  // over the MCP bridge, not the in-app Scenario→Video agent (nothing in its
+  // system prompt ever tells it to call this). Gated on the same opt-in flag
+  // that turns the bridge on (sefx.mcpBridge) rather than Vite's build-time DEV
+  // flag: that flag is baked in at build time and would be false in every
+  // installed build, including the one this gets tested against — whoever's
+  // turned the bridge on is exactly the "dev" this is for.
+  ...(typeof localStorage !== "undefined" && localStorage.getItem("sefx.mcpBridge") === "1"
+    ? [
+        {
+          name: "make_synthetic_reference",
+          description: "DEV ONLY. Build a random project through the engine's own API (background shots: Ken Burns motion, transitions, fades, a grade, occasional vignette/grain — no floating elements or text yet), export it, and write the project itself as <name>.truth.json beside <name>.mp4 — a reference whose exact answer is known, for scoring Gate A's aligner (or anything downstream) against. Runs audit_export on the export before returning; a non-zero suspect count means don't count this reference until investigated. REPLACES the current project (checkpoints it first as 'before-synthetic-ref' and restores it after, success or failure) — never call this on a project you want to keep.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              photosDir: { type: "string", description: "folder of real photos to draw shots from — needs texture, not flat colour" },
+              seed: { type: "integer", description: "deterministic — same seed + same photosDir reproduces the same reference" },
+              outDir: { type: "string", description: "folder to write <name>.mp4 + <name>.truth.json into" },
+              shots: { type: "integer", description: "default 6" },
+              name: { type: "string", description: "base filename, no extension; default synthetic-<seed>" },
+              width: { type: "integer", description: "default 1080" },
+              height: { type: "integer", description: "default 1920" },
+              fps: { type: "number", description: "default 30" },
+            },
+            required: ["photosDir", "outDir", "seed"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>, ctx: AgentCtx) => {
+            const photosDir = str(a.photosDir);
+            const outDir = str(a.outDir);
+            if (!photosDir || !outDir) return err("photosDir and outDir are required");
+            await ctx.checkpoint("before-synthetic-ref");
+            try {
+              const result = await makeSyntheticReference(
+                {
+                  photosDir,
+                  outDir,
+                  seed: int(a.seed),
+                  shots: typeof a.shots === "number" ? int(a.shots) : undefined,
+                  name: typeof a.name === "string" ? a.name : undefined,
+                  width: typeof a.width === "number" ? int(a.width) : undefined,
+                  height: typeof a.height === "number" ? int(a.height) : undefined,
+                  fps: typeof a.fps === "number" ? num(a.fps) : undefined,
+                },
+                ctx
+              );
+              const audit = await auditExport(result.videoPath, false).catch((e) => ({ error: e instanceof Error ? e.message : String(e) }));
+              return ok(JSON.stringify({
+                videoPath: result.videoPath,
+                truthPath: result.truthPath,
+                shots: result.shots,
+                audit: "suspects" in audit ? { totalFrames: audit.totalFrames, suspects: audit.suspects.length } : audit,
+              }));
+            } catch (e) {
+              return err(`make_synthetic_reference failed: ${e instanceof Error ? e.message : String(e)}`);
+            } finally {
+              await ctx.restore("before-synthetic-ref");
+            }
+          },
+        },
+        {
+          name: "align_reference",
+          description: "DEV ONLY (Gate A spike). Align every sampled frame in [startMs,endMs] of an exported video against the frame at refMs (default startMs), via pyramidal inverse-compositional Lucas-Kanade — the actual inverse-rendering step. Returns, per sampled time, the similarity transform RELATIVE TO the reference frame in analysis-pixel units (256px short side): scale (1.0 = same as reference), rotationDeg, tx/ty, and solved (false = couldn't converge there — too little texture/overlap; carried over from its nearest neighbour, don't trust it). Does not touch the project — reads a video file directly.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "absolute path to the exported video" },
+              startMs: { type: "integer" },
+              endMs: { type: "integer" },
+              refMs: { type: "integer", description: "default startMs" },
+              sampleEveryMs: { type: "integer", description: "default 250" },
+            },
+            required: ["path", "startMs", "endMs"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>) => {
+            const path = str(a.path);
+            if (!path) return err("path is required");
+            try {
+              const samples = await alignReference(
+                path,
+                int(a.startMs),
+                int(a.endMs),
+                typeof a.refMs === "number" ? int(a.refMs) : undefined,
+                typeof a.sampleEveryMs === "number" ? int(a.sampleEveryMs) : undefined
+              );
+              return ok(JSON.stringify(samples));
+            } catch (e) {
+              return err(`align_reference failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
+        },
+        {
+          name: "detect_cuts",
+          description: "DEV ONLY (inverse rendering). Find shot/cut boundaries in a video via frame-difference peaks — kind 'hard' (instant jump) or 'soft' (a wider elevated window — a crossfade/wipe/etc), with a rough span in ms. This is the first step of inverse-rendering an existing edit: run this first to get shot boundaries, then align_reference per shot for its motion. Calibrated on synthetic ground truth, not guaranteed on arbitrary real footage — cross-check a few boundaries by eye (extract_frames-equivalent / render_preview) before trusting it blindly.",
+          inputSchema: {
+            type: "object",
+            properties: { path: { type: "string", description: "absolute path to the video" } },
+            required: ["path"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>) => {
+            const path = str(a.path);
+            if (!path) return err("path is required");
+            try {
+              return ok(JSON.stringify(await detectCuts(path)));
+            } catch (e) {
+              return err(`detect_cuts failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
+        },
+        {
+          name: "analyze_reference",
+          description: "DEV ONLY (inverse rendering). The actual measurement step: cuts (detect_cuts), and per resulting shot — look/grade (brightness/contrast/saturate/vignetteStrength, both as effect-ready multipliers), fadeInMs/fadeOutMs, candidate text/graphic overlay regions (textRegions: where + roughly when, NOT what — no OCR), and, when the shot has enough duration/texture, recovered relative camera motion (motion + isStill — isStill is a cheap proxy: did most sampled frames converge, not a real still-vs-footage classifier). Does NOT match transitions (call match_transition per boundary) or read text content (read the frames yourself) or rebuild anything (call rebuild_from_analysis once you've assembled a full analysis object). Call this first.",
+          inputSchema: {
+            type: "object",
+            properties: { path: { type: "string", description: "absolute path to the reference video" } },
+            required: ["path"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>) => {
+            const path = str(a.path);
+            if (!path) return err("path is required");
+            try {
+              return ok(JSON.stringify(await analyzeReference(path)));
+            } catch (e) {
+              return err(`analyze_reference failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
+        },
+        {
+          name: "match_transition",
+          description: "DEV ONLY (inverse rendering). Given one real transition boundary in a reference video (a cut from analyze_reference, or detect_cuts), find which of the ~25 registry transition engines it most resembles: renders every candidate at a few progress points across the window using real beforeMs/afterMs reference frames as clip A/B, compares each against the REAL observed frames at those same points (SSIM-based, 0..1), and returns the top matches ranked best-first. beforeMs should be a clean frame well before the cut starts blending, afterMs a clean frame well after it settles; windowStartMs/windowEndMs bound the actual blend. A returned score near 1.0 is a confident match; scores clustered and mediocre (well under ~0.7) mean nothing matched well — a plain cut or an untracked custom look is more honest than forcing a weak match.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "absolute path to the reference video" },
+              beforeMs: { type: "integer" },
+              afterMs: { type: "integer" },
+              windowStartMs: { type: "integer" },
+              windowEndMs: { type: "integer" },
+              sampleCount: { type: "integer", description: "default 4" },
+              topN: { type: "integer", description: "default 3" },
+            },
+            required: ["path", "beforeMs", "afterMs", "windowStartMs", "windowEndMs"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>) => {
+            const path = str(a.path);
+            if (!path) return err("path is required");
+            try {
+              const ranked = await matchTransition(path, {
+                beforeMs: int(a.beforeMs),
+                afterMs: int(a.afterMs),
+                windowStartMs: int(a.windowStartMs),
+                windowEndMs: int(a.windowEndMs),
+                sampleCount: typeof a.sampleCount === "number" ? int(a.sampleCount) : undefined,
+                topN: typeof a.topN === "number" ? int(a.topN) : undefined,
+              });
+              return ok(JSON.stringify(ranked));
+            } catch (e) {
+              return err(`match_transition failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
+        },
+        {
+          name: "rebuild_from_analysis",
+          description: "DEV ONLY (inverse rendering). The actual replay step: given a full analysis object (durationMs/width/height/fps, shots[] with startMs/endMs/isStill/motion/look, transitions[] with atMs/engine/durMs — from match_transition, textBeats[] with startMs/endMs/content — content you supply, no OCR happens here) and a list of new media paths (one per shot in order; cycles if there are fewer images than shots), builds a BRAND NEW project replaying the measured structure with the new media and exports it. REPLACES the current project — checkpoints it first as 'before-rebuild-from-analysis' and restores it after, success or failure. This is where analyze_reference's raw output, your own match_transition calls, and your own read of the reference's on-screen text all get assembled together — this tool doesn't do that assembly, you do, then hand it the finished object.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              analysis: { type: "object", description: "a TemplateAnalysis object: {durationMs,width,height,fps,shots[],transitions[],textBeats[]} — see the tool description" },
+              newMedia: { type: "array", items: { type: "string" }, minItems: 1, description: "absolute image paths, one per shot (cycles if shorter)" },
+              outPath: { type: "string", description: "absolute path to write the rebuilt .mp4 to" },
+            },
+            required: ["analysis", "newMedia", "outPath"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>, ctx: AgentCtx) => {
+            const newMedia = Array.isArray(a.newMedia) ? a.newMedia.filter((x): x is string => typeof x === "string" && x.length > 0) : [];
+            const outPath = str(a.outPath);
+            if (!a.analysis || typeof a.analysis !== "object") return err("analysis (object) is required");
+            if (!newMedia.length) return err("newMedia must be a non-empty array of absolute image paths");
+            if (!outPath) return err("outPath is required");
+            await ctx.checkpoint("before-rebuild-from-analysis");
+            try {
+              const result = await rebuildFromAnalysis(a.analysis as RebuildTemplateAnalysis, newMedia, ctx, outPath);
+              const audit = await auditExport(result.videoPath, false).catch((e) => ({ error: e instanceof Error ? e.message : String(e) }));
+              return ok(JSON.stringify({
+                videoPath: result.videoPath,
+                shots: (a.analysis as RebuildTemplateAnalysis).shots.length,
+                audit: "suspects" in audit ? { totalFrames: audit.totalFrames, suspects: audit.suspects.length } : audit,
+              }));
+            } catch (e) {
+              return err(`rebuild_from_analysis failed: ${e instanceof Error ? e.message : String(e)}`);
+            } finally {
+              await ctx.restore("before-rebuild-from-analysis");
+            }
+          },
+        },
+      ]
+    : []),
 ];
 
 export const toolByName = new Map(TOOLS.map((t) => [t.name, t]));

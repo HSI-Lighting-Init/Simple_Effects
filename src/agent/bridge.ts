@@ -7,11 +7,19 @@ import { invoke } from "@tauri-apps/api/core";
 import { toolByName, splitDataUrl, type AgentCtx, type ToolResult } from "./tools";
 import { mcpToolsList } from "./mcpManifest";
 
-// ToolResult -> MCP content blocks the proxy passes straight through.
+// ToolResult -> MCP content blocks the proxy passes straight through. Text and
+// an image can both be present (e.g. audit_export's report + suspect sheet) —
+// MCP tool results support multiple content blocks, so send both rather than
+// dropping whichever one loses.
 function toMcp(r: ToolResult) {
-  if (!r.image) return { content: [{ type: "text", text: r.text ?? "ok" }], isError: !!r.isError };
-  const { mime, data } = splitDataUrl(r.image);
-  return { content: [{ type: "image", data, mimeType: mime }], isError: !!r.isError };
+  const content: unknown[] = [];
+  if (r.text) content.push({ type: "text", text: r.text });
+  if (r.image) {
+    const { mime, data } = splitDataUrl(r.image);
+    content.push({ type: "image", data, mimeType: mime });
+  }
+  if (content.length === 0) content.push({ type: "text", text: "ok" });
+  return { content, isError: !!r.isError };
 }
 
 let listening = false;

@@ -71,6 +71,7 @@ export default function EffectEditor({
   onRemoveEffect,
   onKeyEffect,
   onSetWipeStatic,
+  onSetTornEdgeStatic,
   onSetShineStatic,
   onSetGpuFxStatic,
   onClose,
@@ -89,6 +90,16 @@ export default function EffectEditor({
     seedStart: boolean
   ) => void;
   onSetWipeStatic: (layerId: number, index: number, angle: number, invert: boolean) => void;
+  onSetTornEdgeStatic: (
+    layerId: number,
+    index: number,
+    side: number,
+    depth: number,
+    seed: number,
+    toothCount: number,
+    paperWidth: number,
+    paperColor: Rgba
+  ) => void;
   onSetShineStatic: (layerId: number, index: number, tint: Rgba, blend: number) => void;
   onSetGpuFxStatic: (
     layerId: number,
@@ -123,6 +134,7 @@ export default function EffectEditor({
               onRemoveEffect={onRemoveEffect}
               onKeyEffect={onKeyEffect}
               onSetWipeStatic={onSetWipeStatic}
+              onSetTornEdgeStatic={onSetTornEdgeStatic}
               onSetShineStatic={onSetShineStatic}
               onSetGpuFxStatic={onSetGpuFxStatic}
             />

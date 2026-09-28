@@ -21,6 +21,7 @@ import type { FontFace } from "../bindings/FontFace";
 import { fontStyles } from "../lib/api";
 import { sampleTrack, constTrack, upsertKey, isKeyed, sampleColor, isColorKeyed, upsertColorKey } from "../lib/track";
 import { labelColor, paramColor } from "../lib/paramColors";
+import { GPU_FX } from "../lib/effects";
 import type { ColorKey } from "../bindings/ColorKey";
 import type { Shape2DStyle } from "../bindings/Shape2DStyle";
 import type { VectorShape } from "../bindings/VectorShape";
@@ -1466,6 +1467,7 @@ const EFFECT_TYPES: { kind: string; label: string }[] = [
   { kind: "hue", label: "Hue shift" },
   { kind: "invert", label: "Invert" },
   { kind: "wipe", label: "Wipe / fade" },
+  { kind: "tornedge", label: "Torn paper edge" },
   { kind: "shinyclouds", label: "Shiny clouds (GPU)" },
   { kind: "caustics", label: "Caustics (GPU)" },
   { kind: "lensflare", label: "Lens flare (GPU)" },
@@ -1479,82 +1481,8 @@ const EFFECT_TYPES: { kind: string; label: string }[] = [
   { kind: "flap", label: "Flap / 3D flip (GPU)" },
 ];
 
-// Per-GPU-effect UI schema: how the seven generic slots + colours + position map
-// to named, labelled sliders for each `effect` index (keyed to gpuOverlay.frag).
-type GpuKey = "intensity" | "scale" | "speed" | "detail" | "softness" | "extra" | "opacity";
-type GpuSlider = { key: GpuKey; label: string; min: number; max: number; step: number };
-type GpuSchema = { name: string; sliders: GpuSlider[]; colors: 0 | 1 | 2; pos: boolean };
-const GPU_FX: Record<number, GpuSchema> = {
-  1: { name: "Caustics", colors: 1, pos: false, sliders: [
-    { key: "intensity", label: "Intensity", min: 0, max: 2, step: 0.01 },
-    { key: "scale", label: "Scale", min: 0.5, max: 5, step: 0.01 },
-    { key: "speed", label: "Speed", min: 0, max: 2, step: 0.01 },
-    { key: "detail", label: "Sharpness", min: 1, max: 10, step: 0.1 },
-    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
-  ] },
-  2: { name: "Lens flare", colors: 1, pos: true, sliders: [
-    { key: "intensity", label: "Intensity", min: 0, max: 2, step: 0.01 },
-    { key: "extra", label: "Size", min: 0.1, max: 1, step: 0.01 },
-    { key: "speed", label: "Drift speed", min: 0, max: 2, step: 0.01 },
-    { key: "softness", label: "Streak", min: 0, max: 1, step: 0.01 },
-    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
-  ] },
-  3: { name: "Sparkle", colors: 1, pos: false, sliders: [
-    { key: "intensity", label: "Intensity", min: 0, max: 2, step: 0.01 },
-    { key: "detail", label: "Density", min: 5, max: 120, step: 1 },
-    { key: "extra", label: "Size", min: 0.02, max: 0.4, step: 0.005 },
-    { key: "speed", label: "Twinkle speed", min: 0, max: 5, step: 0.01 },
-    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
-  ] },
-  4: { name: "Heat haze", colors: 0, pos: false, sliders: [
-    { key: "extra", label: "Strength", min: 0, max: 0.1, step: 0.001 },
-    { key: "scale", label: "Scale", min: 1, max: 20, step: 0.1 },
-    { key: "speed", label: "Speed", min: 0, max: 3, step: 0.01 },
-    { key: "detail", label: "Detail", min: 1, max: 5, step: 1 },
-    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
-  ] },
-  5: { name: "Film grain", colors: 1, pos: false, sliders: [
-    { key: "intensity", label: "Intensity", min: 0, max: 0.5, step: 0.005 },
-    { key: "extra", label: "Grain size", min: 1, max: 10, step: 0.1 },
-    { key: "speed", label: "Speed", min: 0, max: 1, step: 0.01 },
-    { key: "softness", label: "Monochrome", min: 0, max: 1, step: 0.01 },
-    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
-  ] },
-  6: { name: "Vignette", colors: 1, pos: false, sliders: [
-    { key: "intensity", label: "Intensity", min: 0, max: 1, step: 0.01 },
-    { key: "softness", label: "Radius", min: 0.5, max: 1.5, step: 0.01 },
-    { key: "extra", label: "Edge softness", min: 0.05, max: 1, step: 0.01 },
-    { key: "detail", label: "Pulse", min: 0, max: 0.3, step: 0.005 },
-    { key: "speed", label: "Pulse speed", min: 0, max: 2, step: 0.01 },
-  ] },
-  7: { name: "Shimmer", colors: 2, pos: false, sliders: [
-    { key: "intensity", label: "Intensity", min: 0, max: 2, step: 0.01 },
-    { key: "speed", label: "Speed", min: 0, max: 2, step: 0.01 },
-    { key: "detail", label: "Frequency", min: 1, max: 10, step: 0.1 },
-    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
-  ] },
-  8: { name: "Aurora", colors: 2, pos: false, sliders: [
-    { key: "intensity", label: "Intensity", min: 0, max: 2, step: 0.01 },
-    { key: "scale", label: "Scale", min: 0.5, max: 5, step: 0.01 },
-    { key: "speed", label: "Speed", min: 0, max: 2, step: 0.01 },
-    { key: "extra", label: "Width", min: 0.05, max: 1, step: 0.01 },
-    { key: "detail", label: "Complexity", min: 1, max: 5, step: 1 },
-    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
-  ] },
-  9: { name: "Fog / smoke", colors: 1, pos: false, sliders: [
-    { key: "intensity", label: "Intensity", min: 0, max: 2, step: 0.01 },
-    { key: "scale", label: "Scale", min: 0.5, max: 5, step: 0.01 },
-    { key: "speed", label: "Speed", min: 0, max: 2, step: 0.01 },
-    { key: "softness", label: "Density", min: 0, max: 1, step: 0.01 },
-    { key: "detail", label: "Complexity", min: 2, max: 6, step: 1 },
-    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
-  ] },
-  10: { name: "Flap / 3D flip", colors: 0, pos: false, sliders: [
-    { key: "detail", label: "Angle°", min: -360, max: 360, step: 1 },
-    { key: "extra", label: "Perspective", min: 0, max: 1, step: 0.01 },
-    { key: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01 },
-  ] },
-};
+// Per-GPU-effect UI schema (name/sliders/colours/position per `effect` index) —
+// shared with the agent's add_effect tool, see src/lib/effects.ts.
 
 type EffectParam =
   | "amount"
@@ -1579,6 +1507,16 @@ type KeyEffect = (
   seedStart: boolean
 ) => void;
 type SetWipeStatic = (layerId: number, index: number, angle: number, invert: boolean) => void;
+type SetTornEdgeStatic = (
+  layerId: number,
+  index: number,
+  side: number,
+  depth: number,
+  seed: number,
+  toothCount: number,
+  paperWidth: number,
+  paperColor: Rgba
+) => void;
 type SetShineStatic = (layerId: number, index: number, tint: Rgba, blend: number) => void;
 type SetGpuFxStatic = (
   layerId: number,
@@ -1960,6 +1898,7 @@ function EffectRow({
   onRemove,
   onKey,
   onSetWipeStatic,
+  onSetTornEdgeStatic,
   onSetShineStatic,
   onSetGpuFxStatic,
 }: {
@@ -1971,6 +1910,7 @@ function EffectRow({
   onRemove: (layerId: number, index: number) => void;
   onKey: KeyEffect;
   onSetWipeStatic: SetWipeStatic;
+  onSetTornEdgeStatic?: SetTornEdgeStatic;
   onSetShineStatic?: SetShineStatic;
   onSetGpuFxStatic?: SetGpuFxStatic;
 }) {
@@ -2024,6 +1964,61 @@ function EffectRow({
         </>
       );
       break;
+    case "tornedge": {
+      const setT = (
+        patch: Partial<{
+          side: number;
+          depth: number;
+          seed: number;
+          toothCount: number;
+          paperWidth: number;
+          paperColor: Rgba;
+        }>
+      ) =>
+        onSetTornEdgeStatic?.(
+          layerId,
+          index,
+          patch.side ?? eff.side,
+          patch.depth ?? eff.depth,
+          patch.seed ?? eff.seed,
+          patch.toothCount ?? eff.toothCount,
+          patch.paperWidth ?? eff.paperWidth,
+          patch.paperColor ?? eff.paperColor
+        );
+      body = (
+        <>
+          <label className="insp-field">
+            Torn side
+            <select value={eff.side} onChange={(e) => setT({ side: Number(e.target.value) })}>
+              <option value={0}>Right</option>
+              <option value={1}>Left</option>
+              <option value={2}>Top</option>
+              <option value={3}>Bottom</option>
+            </select>
+          </label>
+          {effSlider("Depth", eff.depth, 0, 1, 0.01, (v) => setT({ depth: v }))}
+          {effSlider("Seed", eff.seed, 1, 999, 1, (v) => setT({ seed: v }))}
+          {effSlider("Tooth count", eff.toothCount, 3, 40, 1, (v) => setT({ toothCount: v }))}
+          {effSlider("Paper width (px)", eff.paperWidth, 0, 60, 1, (v) => setT({ paperWidth: v }))}
+          <label className="insp-field">
+            Paper colour
+            <input
+              type="color"
+              value={rgbaToHex(eff.paperColor)}
+              onChange={(e) => {
+                const c = hexToRgba(e.target.value);
+                setT({ paperColor: { r: c.r, g: c.g, b: c.b, a: 255 } });
+              }}
+            />
+          </label>
+          <p className="insp-hint">
+            Static — the torn silhouette holds fixed for the whole shot; only the layer's
+            own transform (position/scale) animates.
+          </p>
+        </>
+      );
+      break;
+    }
     case "shinyclouds":
       body = (
         <>
@@ -2193,6 +2188,7 @@ export function EffectsSection({
   onRemoveEffect,
   onKeyEffect,
   onSetWipeStatic,
+  onSetTornEdgeStatic,
   onSetShineStatic,
   onSetGpuFxStatic,
 }: {
@@ -2202,6 +2198,7 @@ export function EffectsSection({
   onRemoveEffect: (layerId: number, index: number) => void;
   onKeyEffect: KeyEffect;
   onSetWipeStatic: SetWipeStatic;
+  onSetTornEdgeStatic?: SetTornEdgeStatic;
   onSetShineStatic?: SetShineStatic;
   onSetGpuFxStatic?: SetGpuFxStatic;
 }) {
@@ -2243,6 +2240,7 @@ export function EffectsSection({
           onRemove={onRemoveEffect}
           onKey={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
+          onSetTornEdgeStatic={onSetTornEdgeStatic}
           onSetShineStatic={onSetShineStatic}
           onSetGpuFxStatic={onSetGpuFxStatic}
         />
@@ -2457,6 +2455,7 @@ interface Props {
   onRemoveEffect: (layerId: number, index: number) => void;
   onKeyEffect: KeyEffect;
   onSetWipeStatic: SetWipeStatic;
+  onSetTornEdgeStatic: SetTornEdgeStatic;
   onSetShineStatic: SetShineStatic;
   onSetGpuFxStatic: SetGpuFxStatic;
   onShapeParams: (layerId: number, p: ShapeParams) => void;
@@ -3230,6 +3229,7 @@ export default function Inspector({
   onRemoveEffect,
   onKeyEffect,
   onSetWipeStatic,
+  onSetTornEdgeStatic,
   onSetShineStatic,
   onSetGpuFxStatic,
   onShapeParams,
@@ -3441,6 +3441,7 @@ export default function Inspector({
           onRemoveEffect={onRemoveEffect}
           onKeyEffect={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
+          onSetTornEdgeStatic={onSetTornEdgeStatic}
           onSetShineStatic={onSetShineStatic}
           onSetGpuFxStatic={onSetGpuFxStatic}
         />
@@ -3462,6 +3463,7 @@ export default function Inspector({
             onRemoveEffect={onRemoveEffect}
             onKeyEffect={onKeyEffect}
             onSetWipeStatic={onSetWipeStatic}
+            onSetTornEdgeStatic={onSetTornEdgeStatic}
             onSetShineStatic={onSetShineStatic}
             onSetGpuFxStatic={onSetGpuFxStatic}
           />

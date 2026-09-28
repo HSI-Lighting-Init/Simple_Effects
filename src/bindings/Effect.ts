@@ -8,4 +8,30 @@ import type { Track } from "./Track";
  * right" / reveal). The numeric parameters are keyframeable Tracks so an effect
  * can animate (e.g. a wipe sweeping across).
  */
-export type Effect = { "kind": "grayscale", amount: Track, } | { "kind": "brightness", amount: Track, } | { "kind": "contrast", amount: Track, } | { "kind": "saturate", amount: Track, } | { "kind": "blur", radius: Track, } | { "kind": "hue", degrees: Track, } | { "kind": "invert", amount: Track, } | { "kind": "wipe", angle: number, position: Track, softness: Track, invert: boolean, } | { "kind": "shinyclouds", intensity: Track, scale: Track, speed: Track, complexity: Track, contrast: Track, brightness: Track, opacity: Track, tint: Rgba, blend: number, } | { "kind": "gpuoverlay", effect: number, intensity: Track, scale: Track, speed: Track, detail: Track, softness: Track, extra: Track, opacity: Track, tint: Rgba, tint2: Rgba, posX: number, posY: number, blend: number, };
+export type Effect = { "kind": "grayscale", amount: Track, } | { "kind": "brightness", amount: Track, } | { "kind": "contrast", amount: Track, } | { "kind": "saturate", amount: Track, } | { "kind": "blur", radius: Track, } | { "kind": "hue", degrees: Track, } | { "kind": "invert", amount: Track, } | { "kind": "wipe", angle: number, position: Track, softness: Track, invert: boolean, } | { "kind": "tornedge", 
+/**
+ * Which edge is torn: 0=right, 1=left, 2=top, 3=bottom.
+ */
+side: number, 
+/**
+ * 0..1, how far the jagged teeth reach into the layer (fraction of
+ * width for left/right, height for top/bottom).
+ */
+depth: number, 
+/**
+ * Seeds the deterministic jagged-edge shape.
+ */
+seed: number, 
+/**
+ * Roughly how many jagged "teeth" along the torn edge.
+ */
+toothCount: number, 
+/**
+ * px; width of a visible paper-coloured edge strip along the tear.
+ * 0 = clean clip with no visible strip.
+ */
+paperWidth: number, 
+/**
+ * The edge strip's colour, e.g. a slightly off-white.
+ */
+paperColor: Rgba, } | { "kind": "shinyclouds", intensity: Track, scale: Track, speed: Track, complexity: Track, contrast: Track, brightness: Track, opacity: Track, tint: Rgba, blend: number, } | { "kind": "gpuoverlay", effect: number, intensity: Track, scale: Track, speed: Track, detail: Track, softness: Track, extra: Track, opacity: Track, tint: Rgba, tint2: Rgba, posX: number, posY: number, blend: number, };

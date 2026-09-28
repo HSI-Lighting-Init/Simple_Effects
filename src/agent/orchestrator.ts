@@ -3,7 +3,7 @@
 // feeds results back, until the model stops calling tools.
 import { toolByName, TOOLS, type AgentCtx, type ToolResult } from "./tools";
 import { EDITOR_SYSTEM_PROMPT } from "./systemPrompt";
-import { makeProvider, type AgentTurn, type ProviderId } from "./providers";
+import { makeProvider, estimateCostUsd, type AgentTurn, type ProviderId, type Usage } from "./providers";
 import { stylePackById } from "../lib/stylePacks";
 
 const READONLY = new Set([
@@ -34,7 +34,7 @@ function describe(name: string, args: Record<string, unknown>, r: ToolResult): s
     case "delete_layer": return `Deleted layer ${args.layerId}`;
     case "set_transition": return `${args.slot} transition '${args.engine}' on layer ${args.layerId}`;
     case "set_speed": return `Layer ${args.layerId} speed ×${args.speed}`;
-    case "apply_color": return `Applied ${args.kind} to layer ${args.layerId}`;
+    case "add_effect": return `Added ${args.kind} to layer ${args.layerId}`;
     case "set_audio": return `Adjusted audio on layer ${args.layerId}`;
     case "render_preview": return `Rendered preview @ ${args.tMs}ms`;
     case "contact_sheet": return `Rendered a contact sheet`;
@@ -78,11 +78,24 @@ export async function runAgent(ctx: AgentCtx, opts: RunOpts): Promise<{ summary:
   let edits = 0; // actual mutations that landed
   let nudged = false;
   let summary = "";
+  const totalUsage: Usage = { inputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, outputTokens: 0 };
   while (calls < maxCalls) {
     if (opts.signal?.aborted) throw new Error("cancelled");
     const reply = await provider.chat(EDITOR_SYSTEM_PROMPT, history, TOOLS, opts.signal);
-    history.push({ role: "assistant", text: reply.text, toolCalls: reply.toolCalls });
+    history.push({ role: "assistant", text: reply.text, toolCalls: reply.toolCalls, raw: reply.raw });
     if (reply.text) summary = reply.text;
+    if (reply.usage) {
+      totalUsage.inputTokens += reply.usage.inputTokens;
+      totalUsage.cacheWriteTokens += reply.usage.cacheWriteTokens;
+      totalUsage.cacheReadTokens += reply.usage.cacheReadTokens;
+      totalUsage.outputTokens += reply.usage.outputTokens;
+      const cost = estimateCostUsd(opts.provider, opts.model, totalUsage);
+      opts.onLog(
+        `📊 ${totalUsage.inputTokens.toLocaleString()} in / ${totalUsage.outputTokens.toLocaleString()} out` +
+          (totalUsage.cacheReadTokens ? ` / ${totalUsage.cacheReadTokens.toLocaleString()} cache-read` : "") +
+          (cost != null ? ` — ~$${cost.toFixed(4)} so far` : ""),
+      );
+    }
 
     if (reply.toolCalls.length === 0) {
       // Planned in prose but hasn't touched the timeline (common with weaker

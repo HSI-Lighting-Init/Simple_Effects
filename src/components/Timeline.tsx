@@ -95,7 +95,9 @@ function pushEffectTracks(effects: Effect[], out: KeyTimeSet) {
     else if (e.kind === "gpuoverlay")
       for (const tr of [e.intensity, e.scale, e.speed, e.detail, e.softness, e.extra, e.opacity])
         out.add(tr, "effect");
-    else out.add(e.amount, "effect");
+    else if (e.kind === "tornedge") {
+      // Fully static — no Track fields to mark.
+    } else out.add(e.amount, "effect");
   }
 }
 

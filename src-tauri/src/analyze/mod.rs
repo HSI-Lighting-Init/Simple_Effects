@@ -13,6 +13,14 @@
 use std::io::Read;
 use std::process::Stdio;
 
+pub(crate) mod align;
+pub(crate) mod layout;
+pub(crate) mod look;
+pub(crate) mod regions;
+pub(crate) mod shots;
+
+use align::SimParams;
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
 use ts_rs::TS;
@@ -146,6 +154,288 @@ pub(crate) fn extract_frames(
         }
     }
     Ok(out)
+}
+
+/// One recovered similarity-transform sample from `align_shot`, comp-agnostic
+/// (analysis-resolution scale/rotation/translation — see `align_shot`'s doc
+/// for how to compose these onto the reference frame's own absolute
+/// transform).
+#[derive(Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct AlignSample {
+    pub t_ms: u32,
+    pub scale: f32,
+    pub rotation_deg: f32,
+    pub tx: f32,
+    pub ty: f32,
+    /// True for the reference frame itself (always identity by construction)
+    /// and for any timestamp the aligner couldn't solve (too little texture,
+    /// too little valid overlap) — the sample is then carried over from its
+    /// nearest solved neighbour rather than omitted, so callers always get
+    /// one sample per requested timestamp; check this before trusting a row.
+    pub solved: bool,
+}
+
+/// Gate A's harness: sample a shot at `sample_every_ms`, align every sample
+/// against the frame at `ref_ms` via pyramidal IC-LK (`align::align_pyramidal`),
+/// each initialized from its nearest already-solved neighbour (walking
+/// outward from the reference) rather than identity — matching 2.4's "per
+/// frame ... initialized from the previous frame". Frames are decoded at
+/// `short_side` px (256, per 2.1) and converted to grayscale.
+///
+/// The returned scale/rotation/tx/ty describe each frame's transform
+/// RELATIVE TO the reference frame, in analysis-pixel units. To get this
+/// engine's absolute `transform.scale/x/y/rotation` at time t: pick the
+/// reference frame's own absolute values (known ground truth when testing
+/// against a synthetic reference; from `fit_scale`-style source-image math
+/// once there's no ground truth to anchor on), then
+/// `scale(t) = ref_scale * sample.scale`,
+/// `rotation(t) = ref_rotation + sample.rotationDeg`,
+/// `x(t) = ref_x + k * sample.tx`, `y(t) = ref_y + k * sample.ty`, where `k =
+/// comp_width / analysis_width` (translation is in analysis pixels; scale and
+/// rotation aren't resolution-dependent). This composition step is exactly
+/// the "up to anchor/centre bookkeeping" the roadmap flags for 2.4 — kept
+/// here as a doc, not code, until something other than a synthetic-reference
+/// test needs to anchor without ground truth.
+pub(crate) fn align_shot(path: &str, start_ms: u32, end_ms: u32, ref_ms: u32, sample_every_ms: u32, short_side: u32) -> Result<Vec<AlignSample>, String> {
+    let step = sample_every_ms.max(1);
+    let mut times: Vec<u32> = (start_ms..=end_ms).step_by(step as usize).collect();
+    if !times.contains(&ref_ms) {
+        times.push(ref_ms);
+        times.sort_unstable();
+    }
+    let frames = extract_frames(path, &times, short_side)?;
+    if frames.len() < 2 {
+        return Err(format!("only {} of {} requested frames decoded — check the timestamps are inside the video", frames.len(), times.len()));
+    }
+    let decoded: Vec<(u32, image::GrayImage)> = frames
+        .into_iter()
+        .filter_map(|(t, bytes)| image::load_from_memory(&bytes).ok().map(|im| (t, im.to_luma8())))
+        .collect();
+    let ref_idx = decoded
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, (t, _))| t.abs_diff(ref_ms))
+        .map(|(i, _)| i)
+        .ok_or("no frames decoded")?;
+    let reference = &decoded[ref_idx].1;
+
+    let mut out = vec![AlignSample { t_ms: 0, scale: 0.0, rotation_deg: 0.0, tx: 0.0, ty: 0.0, solved: false }; decoded.len()];
+    out[ref_idx] = AlignSample { t_ms: decoded[ref_idx].0, scale: 1.0, rotation_deg: 0.0, tx: 0.0, ty: 0.0, solved: true };
+
+    let mut walk = |range: Box<dyn Iterator<Item = usize>>| {
+        let mut prev = SimParams::IDENTITY;
+        for i in range {
+            let (t, frame) = &decoded[i];
+            let solved = align::align_pyramidal(reference, frame, prev, 4);
+            let p = solved.unwrap_or(prev);
+            out[i] = AlignSample { t_ms: *t, scale: p.scale(), rotation_deg: p.rotation_rad().to_degrees(), tx: p.tx, ty: p.ty, solved: solved.is_some() };
+            prev = p; // carry the last estimate forward even on failure — still closer than identity
+        }
+    };
+    walk(Box::new((0..ref_idx).rev()));
+    walk(Box::new((ref_idx + 1)..decoded.len()));
+
+    Ok(out)
+}
+
+/// Parse ffmpeg's own `-i <path>` stderr banner ("Duration: 00:00:28.02, ...")
+/// for the video's total length — avoids depending on ffprobe being installed
+/// alongside ffmpeg (find_ffmpeg only locates the latter).
+fn probe_duration_ms(path: &str, ffmpeg: &std::path::Path) -> Option<u32> {
+    let output = quiet_command(ffmpeg).args(["-i", path]).output().ok()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let after = stderr.split("Duration: ").nth(1)?;
+    let ts = after.split(',').next()?.trim();
+    let mut parts = ts.split(':');
+    let h: f64 = parts.next()?.parse().ok()?;
+    let m: f64 = parts.next()?.parse().ok()?;
+    let s: f64 = parts.next()?.parse().ok()?;
+    Some(((h * 3600.0 + m * 60.0 + s) * 1000.0).round() as u32)
+}
+
+/// Parse the frame rate off the same `-i <path>` stderr banner's video
+/// stream line (ffmpeg prints e.g. "29.97 fps" there). Falls back to 30 —
+/// good enough for a rebuild's export settings, not claimed as exact.
+fn probe_fps(path: &str, ffmpeg: &std::path::Path) -> f32 {
+    let Ok(output) = quiet_command(ffmpeg).args(["-i", path]).output() else { return 30.0 };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stderr.lines() {
+        if !line.contains("Video:") {
+            continue;
+        }
+        if let Some(fps_str) = line.split(" fps").next().and_then(|s| s.rsplit(", ").next()) {
+            if let Ok(fps) = fps_str.trim().parse::<f32>() {
+                if fps > 0.0 && fps < 240.0 {
+                    return fps;
+                }
+            }
+        }
+    }
+    30.0
+}
+
+/// Grayscale frames for `regions::detect_text_regions`, decoded directly
+/// (own small ffmpeg pass — deliberately not sharing `align_shot`'s 256px
+/// colour decode or `look::analyze_look`'s 64px colour decode; each of the
+/// three per-shot passes wants a different size/format and this keeps them
+/// independent rather than threading a shared cache through all of them).
+/// `// ponytail: three separate ffmpeg decodes per shot (look, regions,
+/// motion) plus detect_cuts' own pass over the whole video — a shared
+/// decode-once cache would cut redundant work if this gets slow on long
+/// references; not worth the complexity until it's measured as a problem.`
+fn detect_regions_for_shot(path: &str, start_ms: u32, end_ms: u32) -> Result<Vec<regions::TextRegion>, String> {
+    let ffmpeg = find_ffmpeg().ok_or("ffmpeg not found — install it to analyze text regions")?;
+    const SAMPLES: u32 = 12;
+    const SIZE: u32 = 48;
+    const COLS: u32 = 6;
+    const ROWS: u32 = 8;
+    let span = end_ms.saturating_sub(start_ms);
+    if span == 0 {
+        return Ok(Vec::new());
+    }
+    let scale = format!("scale={SIZE}:{SIZE}");
+    let mut frames = Vec::with_capacity(SAMPLES as usize);
+    for i in 0..SAMPLES {
+        let t = start_ms + span * i / (SAMPLES - 1);
+        let ts = format!("{:.3}", t as f64 / 1000.0);
+        let output = quiet_command(&ffmpeg)
+            .args(["-ss", &ts, "-i", path, "-frames:v", "1", "-vf", &scale, "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|e| format!("ffmpeg: {e}"))?;
+        let expected = (SIZE * SIZE) as usize;
+        if output.status.success() && output.stdout.len() == expected {
+            frames.push((t - start_ms, output.stdout));
+        }
+    }
+    Ok(regions::detect_text_regions(&frames, SIZE, SIZE, COLS, ROWS))
+}
+
+/// One measured shot: its span, look/grade, best-effort text-region guesses,
+/// and — when the shot has enough texture/duration to attempt it — its
+/// recovered motion. `is_still` is a cheap proxy, not 2.3's real
+/// still-vs-footage classifier: the aligner (`align_shot`) either converges
+/// consistently on real camera-only motion (a photo under Ken Burns) or
+/// fails/diverges often on footage and motion graphics (no single similarity
+/// transform explains multiple independently-moving things) — so "did most
+/// sampled frames solve" is a reasonable, cheap stand-in. Documented as a
+/// simplification, not the full classifier the roadmap eventually wants.
+#[derive(Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ShotAnalysis {
+    pub index: usize,
+    pub start_ms: u32,
+    pub end_ms: u32,
+    pub is_still: bool,
+    /// `t_ms` on each sample is relative to this shot's own start_ms (see
+    /// `rebuildFromAnalysis.ts`'s `ShotAnalysis.motion` — same convention).
+    /// Empty when the shot was too short to sample or motion wasn't
+    /// attempted/didn't converge.
+    pub motion: Vec<AlignSample>,
+    pub look: look::ShotLook,
+    pub text_regions: Vec<regions::TextRegion>,
+    /// Whether this shot shows one full-frame image (`Single`, `regions`
+    /// empty — the common case) or several at once (`Grid`/`MultiMotion`,
+    /// `regions.len() > 1`) — see `layout::detect_shot_layout`. Never
+    /// blocks the rest of the shot's measurement: a detection error here
+    /// just falls back to `Single`.
+    pub layout: layout::ShotLayout,
+}
+
+#[derive(Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct TemplateAnalysis {
+    pub duration_ms: u32,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f32,
+    pub cuts: Vec<shots::Cut>,
+    pub shots: Vec<ShotAnalysis>,
+}
+
+/// Minimum shot length worth attempting motion recovery on — anything
+/// shorter doesn't have enough samples (at 250ms spacing) for the aligner's
+/// previous-frame-initialized walk to mean anything.
+const MIN_MOTION_SHOT_MS: u32 = 500;
+/// Fraction of sampled frames that must converge (`AlignSample.solved`) for
+/// a shot to be called "still" — see `ShotAnalysis::is_still`'s doc.
+const STILL_SOLVED_FRACTION: f32 = 0.8;
+
+/// The actual "inverse-render a real edit's structure" entry point: cuts
+/// (`shots::detect_cuts`) become shot boundaries, and each resulting shot is
+/// measured for look/grade (`look::analyze_look`), candidate text/graphic
+/// overlay regions (`detect_regions_for_shot`), and — when long enough —
+/// motion (`align_shot`). Transition-FAMILY matching (which of the 25 engines
+/// a cut resembles) isn't included here: it needs a browser Canvas to render
+/// candidates, so it lives on the TS side (`match_transition` tool) as a
+/// separate per-boundary call. Text CONTENT isn't read here either (no OCR) —
+/// `text_regions` says where/when, not what; a human or Claude reading the
+/// frames fills in the copy, same as the roadmap's own architecture assigns
+/// that specifically to the AI layer, not a CV pass.
+pub(crate) fn analyze_reference(path: &str) -> Result<TemplateAnalysis, String> {
+    let ffmpeg = find_ffmpeg().ok_or("ffmpeg not found — install it to analyze a reference")?;
+    let duration_ms = probe_duration_ms(path, &ffmpeg).ok_or("could not determine the video's duration")?;
+    let fps = probe_fps(path, &ffmpeg);
+
+    let first_frame = extract_frames(path, &[0], 4096)?;
+    let (width, height) = first_frame
+        .first()
+        .and_then(|(_, bytes)| image::load_from_memory(bytes).ok())
+        .map(|im| (im.width(), im.height()))
+        .unwrap_or((0, 0));
+
+    let cuts = shots::detect_cuts(path, 8.0, 128, &shots::CutParams::default())?;
+
+    let mut boundaries: Vec<u32> = cuts.iter().map(|c| c.t_ms).collect();
+    boundaries.push(0);
+    boundaries.push(duration_ms);
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut shots_out = Vec::new();
+    for (i, w) in boundaries.windows(2).enumerate() {
+        let (start_ms, end_ms) = (w[0], w[1]);
+        if end_ms <= start_ms {
+            continue;
+        }
+        let look = look::analyze_look(path, start_ms, end_ms).unwrap_or(look::ShotLook {
+            brightness: 1.0,
+            contrast: 1.0,
+            saturate: 1.0,
+            vignette_strength: 0.0,
+            fade_in_ms: 0,
+            fade_out_ms: 0,
+        });
+        let text_regions = detect_regions_for_shot(path, start_ms, end_ms).unwrap_or_default();
+        let (is_still, motion) = if end_ms - start_ms >= MIN_MOTION_SHOT_MS {
+            match align_shot(path, start_ms, end_ms, start_ms, 250, 256) {
+                Ok(samples) if !samples.is_empty() => {
+                    let solved = samples.iter().filter(|s| s.solved).count() as f32 / samples.len() as f32;
+                    let relative: Vec<AlignSample> = samples
+                        .into_iter()
+                        .map(|mut s| {
+                            s.t_ms = s.t_ms.saturating_sub(start_ms);
+                            s
+                        })
+                        .collect();
+                    (solved >= STILL_SOLVED_FRACTION, relative)
+                }
+                _ => (false, Vec::new()),
+            }
+        } else {
+            (false, Vec::new())
+        };
+        let shot_layout = layout::detect_shot_layout(path, start_ms, end_ms, 256)
+            .unwrap_or(layout::ShotLayout { kind: layout::LayoutKind::Single, regions: Vec::new() });
+        shots_out.push(ShotAnalysis { index: i, start_ms, end_ms, is_still, motion, look, text_regions, layout: shot_layout });
+    }
+
+    Ok(TemplateAnalysis { duration_ms, width, height, fps, cuts, shots: shots_out })
 }
 
 /// One streamed ffmpeg pass: every frame of `path` at 4 fps (250ms apart, per

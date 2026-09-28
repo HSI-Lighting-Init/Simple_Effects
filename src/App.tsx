@@ -142,6 +142,7 @@ import {
   setShapeParams,
   setShapeRotationKey,
   setWipeStatic,
+  setTornEdgeStatic,
   setShineStatic,
   setGpuFxStatic,
   evaluateAt,
@@ -2078,6 +2079,25 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("wipe_static", { layerId, index, angle, invert });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onSetTornEdgeStatic = useCallback(
+    async (
+      layerId: number,
+      index: number,
+      side: number,
+      depth: number,
+      seed: number,
+      toothCount: number,
+      paperWidth: number,
+      paperColor: Rgba
+    ) => {
+      const p = await setTornEdgeStatic(layerId, index, side, depth, seed, toothCount, paperWidth, paperColor);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("tornedge_static", { layerId, index, side, depth, seed, toothCount, paperWidth });
     },
     [applyTime, recordAction]
   );
@@ -4200,6 +4220,7 @@ export default function App() {
           onRemoveEffect={onRemoveEffect}
           onKeyEffect={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
+          onSetTornEdgeStatic={onSetTornEdgeStatic}
           onSetShineStatic={onSetShineStatic}
           onSetGpuFxStatic={onSetGpuFxStatic}
           onShapeParams={onShapeParams}
@@ -4597,6 +4618,7 @@ export default function App() {
           onRemoveEffect={onRemoveEffect}
           onKeyEffect={onKeyEffect}
           onSetWipeStatic={onSetWipeStatic}
+          onSetTornEdgeStatic={onSetTornEdgeStatic}
           onSetShineStatic={onSetShineStatic}
           onSetGpuFxStatic={onSetGpuFxStatic}
           onClose={() => setFxEditorId(null)}

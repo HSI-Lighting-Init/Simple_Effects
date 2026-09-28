@@ -1,14 +1,28 @@
 # Roadmap — inverse rendering + semantic template synthesis
 
-**Goal.** Drop an existing video into the app and recover the editable *design intent* behind it —
-layers, motion, timing, effects, style and placeholders — expressed in this engine's own parameters, so the
-same edit can be replayed on a new set of media. The user's keyframe boundaries (regions marked on key
-frames, each with a role) are the supervision signal. Deterministic code does the low-level measurement; the
-AI/MCP layer turns those measurements into a reusable template.
+**Goal.** Drop an existing video into the app — a footage-and-overlay reel or an Envato-style
+motion-graphics opener — and recover the editable *design intent* behind it (layers, motion, timing, effects,
+style and placeholders) in this engine's own parameters, so the same edit replays on a new set of media and
+matches the original within a measured tolerance (§11). Element boundaries are the supervision signal: Claude
+names what's on screen, SAM 3.1 finds and tracks every instance, and the user's own boundaries are optional
+corrections. Deterministic code does the measuring; the AI/MCP layer turns measurements into a reusable
+template.
 
 Based on `docs/MENTOR_HANDOFF.md`, the earlier mentor's 12-sprint plan, the coding agent's review of v2,
 and the code (2026-09-26, branch `feature/timeline-trim-comp-duration`). §12 maps the earlier plan's sprints
 onto this one.
+
+**v4 (2026-09-28) — Envato-style motion graphics, with no manual marking:**
+- Primary targets are now footage-and-overlay reels (like the HSI WhatsApp reel) and Envato-style
+  motion-graphics openers. Photo slideshows stay supported.
+- **Automatic decomposition with SAM 3.1** (Phase 3, rewritten): Claude writes a concept list, SAM 3.1
+  segments and tracks every instance on the GPU, the renderer checks the result, and the user only reviews
+  flagged shots. **Gate S** tests SAM 3.1 before anything is built on it.
+- **Phase E, engine vocabulary for motion graphics** (new): custom and overshoot easing, motion blur, layer
+  mattes, shadows and borders, effects and blend modes on every layer, 3D tilt, kinetic type, camera moves —
+  each shipped with its own estimator and synthetic ground truth. These leave Phase 8.
+- Cut detection becomes adaptive (2.2), checked against PySceneDetect during development.
+- "Identical" gets a measurable definition, and the schedule is about 3 months from here (§11).
 
 **v3 — changes after the coding agent's review:**
 - Handoff §11.1 gets a definition of "confirmed fixed", and its checker (`extract_frames`, `audit_export`) moves from
@@ -50,9 +64,13 @@ v2 restored inverse rendering as the core after v1 had narrowed the goal to "ext
 | `photos\` | 30–50 distinct HSI photos — no duplicate copies (products, installations, interiors), JPEG, ≥ 1080 px on the short side, with visible detail (alignment needs texture), plus 2–3 transparent PNG logos | Phase 1.2 |
 | `reels\` | 3 real reels, 10–30 s, vertical, downloaded as-is (platform compression is the point): (1) a photo slideshow with Ken Burns and captions; (2) a fast-cut promo with transitions and block captions; (3) an element moving over a background — a product cut-out, a logo or a picture-in-picture | Gate A |
 | `brand\` | logo PNG, brand fonts (installed), colours | Phase 6 |
+| `envato\` | 3–5 Envato-style motion-graphics previews (openers, promos), downloaded as-is | Gate S, Phase 3, Phase E |
 
 If the photos are late, build the generator on any ~20 detailed photos and swap the HSI set in before
 recording Phase 1's numbers. Gate A can't run without the real reels.
+
+**Hardware:** SAM 3.1 extraction runs on the NVIDIA workstation (RTX 5070, 12 GB). Templates are portable,
+so applying one works on any machine.
 
 ---
 
@@ -61,10 +79,11 @@ recording Phase 1's numbers. Gate A can't run without the real reels.
 ```
 drop video.mp4
  1 ingest       Rust/ffmpeg  cuts · still vs footage · full-frame motion · fades · look · vignette · grain
- 2 supervise    Claude proposes element boundaries + roles on key frames; the user corrects and adds
-                (keep_motion · replace_text · replace_logo · keep_style · ignore)
- 3 track & fit  Rust         each element tracked through the user's boundaries → transform per frame
-                             → keyframes + easing; background re-fitted with elements masked out
+ 2 decompose    Claude names what's on screen ("photo card", "headline", "logo"…); SAM 3.1 segments and
+                tracks every instance; roles assigned (keep_motion · replace_text · replace_logo ·
+                keep_style · ignore); the user only reviews shots that step 6 flags
+ 3 track & fit  Rust         each element's mask track → transform per frame → keyframes + easing,
+                             matte, shadow, blur; background re-fitted with elements masked out
  4 synthesize   TS           transitions, fonts, text animation: render candidates with the app's own engines
  5 build        Rust         rebuild_from_analysis → a Simple Effects project: one layer per element,
                              placeholders, keyframes, effects, transitions; roles → slots
@@ -89,7 +108,10 @@ That gives three things a separate schema can't:
 
 A parallel Python scene graph would need a second renderer and a translation step, and would drift.
 
-## 3. Supervision: the user's keyframe boundaries
+## 3. Supervision: element boundaries
+
+**v4:** boundaries now come automatically — Claude's concept list plus SAM 3.1's masks (Phase 3). A user's
+boundary is an optional correction and works the same way.
 
 An **annotation** marks one element on one frame:
 
@@ -101,7 +123,7 @@ interface Annotation {
   shape: { kind: "box" | "polygon"; points: [number, number][] };   // reference-frame pixels
   role: "keep_motion" | "replace_text" | "replace_logo" | "keep_style" | "ignore";
   label?: string;      // "product photo", "headline", "brand bar"
-  by: "user" | "ai";   // AI proposals stay dashed until the user accepts them
+  by: "user" | "ai" | "sam";   // automatic ones are accepted by fidelity (3.7); flagged ones show dashed
 }
 ```
 
@@ -115,28 +137,28 @@ interface Annotation {
 | (unmarked) | the shot's background — a media slot | fitted with every marked element masked out |
 
 How the boundaries supervise:
-- **Tracking anchors.** Each element is tracked from its annotated frames by a rigid template tracker
-  (similarity; the polygon is the mask). With two or more boundaries the track must pass through each one,
-  which resets drift; where tracking confidence drops (heavy appearance change), the motion falls back to
-  interpolating between the user's poses. More boundaries → more exact.
+- **Tracking anchors.** SAM 3.1 gives each element a mask on every frame, and the aligner solves the
+  element's transform inside it. A boundary on a given frame (SAM's or the user's) pins the track there, which
+  resets drift; where tracking confidence drops (heavy appearance change), the motion falls back to
+  interpolating between known poses.
 - **Key-time priors.** Frames the user chose to annotate are preferred keyframe times in the fit.
-- **Layers.** Boundaries separate elements from the background, so rigid elements need no unsupervised
-  decomposition.
+- **Layers.** Boundaries separate elements from the background and from each other, including where they
+  overlap.
 - **Placeholders.** An element's placeholder is the temporal median of its aligned region (drops grain and
   passing overlays); the background's is the median with elements inpainted.
 - **Error masks.** `ignore` regions and not-yet-recreated elements are excluded from reconstruction error.
 
-Claude proposes the first set (`video_frames` on key frames → `annotate` with `by: "ai"`); the user accepts,
-edits or adds in the annotation view. Over MCP the user can also just say "the centre photo is the product,
-keep the blue bar, ignore the watermark".
+Claude writes the concept list, SAM 3.1 returns the instances, and Claude assigns roles and fixes misses with
+`refine_element`. The annotation view is a review screen for flagged shots. Over MCP the user can still just
+say "the centre photo is the product, keep the blue bar, ignore the watermark".
 
 ## 4. What gets recovered, and how
 
 | Element | Recovered as | Method | Limit |
 |---|---|---|---|
 | Cuts, spans | layer spans | ffmpeg scene scores | ±1 frame |
-| Still-shot / background motion | x, y, scale, rotation keys + easing | similarity alignment to the widest frame; piecewise fit with the engine's easings | other editors' curves → nearest of 5 easings until bezier easing exists (Phase 8) |
-| Element motion (photos, panes, logos, text blocks) | same, per element layer | template tracking through the user's boundaries | rigid only; perspective quads, non-rigid shapes → Phase 8 |
+| Still-shot / background motion | x, y, scale, rotation keys + easing | similarity alignment to the widest frame; piecewise fit with the engine's easings | custom curves and overshoot need E1 |
+| Element motion (cards, panes, logos, text blocks) | same, per element layer | SAM 3.1 mask tracks + the aligner inside each mask | rigid and 3D-tilted (E6); non-rigid shapes get a matte per frame, motion approximated |
 | Element visibility | span + opacity keys | region change energy + blend factor | — |
 | Footage motion | punch-ins (single-frame scale steps) | alignment | smooth zoom/pan inside footage is ambiguous (camera vs digital) → flagged |
 | Transitions | engine, direction, duration | synthesis over the registry through the app's compositing path | exact for references made here; nearest engine otherwise; seeded engines match timing, not pixels |
@@ -145,7 +167,12 @@ keep the blue bar, ignore the watermark".
 | Vignette, grain | `vignette`, `filmgrain` params | radial profile; residual between aligned frames; calibrated on synthetic renders | — |
 | Text | copy, role, font, size, colour, plate, position keys, letter preset + timing | Claude reads; measured; fonts by synthesis | font exact only if installed |
 | Overlays (sparkle, flare, light wash) | GPU effects | Claude names them; opacity from residual | approximate |
-| Blur-fill background, grids, split screens, masks, 3D | — | — | Phase 8 (blur-fill first — it's everywhere in reels) |
+| Card edges, shape reveals | layer mattes (E3) | the element's SAM mask, aligned to its track | — |
+| Motion blur | shutter angle (E2) | streak length vs measured velocity | — |
+| Shadows and borders | layer styles (E4) | darkening just outside the mask; the edge band | — |
+| Kinetic type (glitch, outline, draw-on, per-letter motion) | E5, E7 | per-glyph tracking; Claude names effects | plugin-level text effects → nearest |
+| Camera shake and push | `Group` transform (E8) | motion shared by every element | — |
+| Particles, plugin effects (Trapcode, Saber-style) | — | — | nearest built-in effect + gap |
 | Music | beat grid only | — | never reused |
 
 ## 5. MCP and where code runs
@@ -153,8 +180,10 @@ keep the blue bar, ignore the watermark".
 **One MCP server: the existing bridge.** All tools go into `TOOLS` in `src/agent/tools.ts`, so Claude
 Desktop/Code and the in-app agent share them and the manifest can't drift. Measurement and tracking live in
 Rust (`src-tauri/src/analyze/`): they ship in the installer and need no Python. Synthesis lives in the
-WebView, the only renderer. A Python MCP server (FastMCP) is justified for one job — SAM 2 masks for
-non-rigid elements (Phase 8) — and as a fallback if the Rust tracker misses its targets.
+WebView, the only renderer. The one Python component is the **SAM 3.1 service** (Phase 3): the app starts
+it on demand on the GPU workstation and calls it over localhost, so both front doors reach it through the
+app's own tools; it can also run as a FastMCP server for debugging from Claude Code. A Python/OpenCV tracker
+stays a fallback only if the Rust aligner misses its targets.
 
 Keep each tool call under ~60 s (MCP clients enforce their own timeouts): split work per shot, per element
 and per boundary.
@@ -162,6 +191,7 @@ and per boundary.
 | Family | Tools | Runs in |
 |---|---|---|
 | Measure | `analyze_reference`, `get_analysis`, `video_frames` | Rust + ffmpeg |
+| Decompose | `segment_concepts`, `refine_element` | Python (SAM 3.1), called by the app |
 | Supervise | `annotate`, `list_annotations`, `delete_annotation` | TS (JSON beside the analysis) |
 | Track & fit | `track_element`, `fit_background` | Rust |
 | Synthesize | `fit_transition`, `fit_text`, `match_font`, `match_look` | TS |
@@ -178,7 +208,7 @@ and tool choice gets less reliable as similar tools pile up, so the in-app agent
 filtered views.
 
 Analysis artifacts live in `appLocalDataDir/refs/<hash(path, size, mtime)>/`: `analysis.json`,
-`annotations.json`, tracks, placeholders. JSON files, no database.
+`annotations.json`, `masks/`, tracks, sprites and placeholders. Files, no database.
 
 ## 6. Ground truth: references whose answer is known
 
@@ -190,7 +220,9 @@ half hard cuts, half random registry transitions; fades; a random grade; sometim
 with random installed fonts, presets and plates — exports it and writes `truth.json` (the project) beside the
 MP4. It also writes **synthetic annotations** from the truth: element boxes at a few key times, jittered, some
 deliberately missing — supervision the way a hurried user gives it. Use real photos (HSI's own); alignment
-needs texture.
+needs texture. **v4:** the generator also emits Phase E features with random parameters — overlapping cards
+with stagger, mattes, motion blur, custom easing, shadows, 3D tilt — so every new estimator is scored against
+exact truth.
 
 `score_recovery(truth, recovered)` — a pure TS function under vitest — matches layers by role, time and
 overlap and reports per-parameter errors. Every phase's "done when" is stated against it, and it lets the
@@ -370,6 +402,10 @@ the 2.5 fitter if time allows) and run it on the 20 synthetic references plus th
   scores, 256 px for motion, 720 px only for placeholders. Refuse inputs over 180 s.
 - **2.2 Shots.** `segment_cuts` (pure): hard cut = local max ≥ `HARD`; soft = ≥ 3 frames ≥ `SOFT` summing ≥
   `SOFT_SUM`, ≤ 1.5 s; cuts < 200 ms apart merge. Constants are calibration knobs tuned on ground truth.
+  **v4:** replace the fixed `hard` threshold with adaptive detection — a frame's change measured against the
+  rolling average of its neighbours (PySceneDetect's AdaptiveDetector idea) — plus a brightness-threshold pass
+  for fades and dips to black, which catches the dark-to-black cut the fixed threshold missed. Check it against
+  PySceneDetect's own output on the sample reels during development only; PySceneDetect isn't shipped.
 - **2.3 Still vs footage.** Align consecutive frames with a similarity transform: low residual → a still under
   a keyframed transform; high → footage.
 - **2.4 Full-frame motion.** Reference = the widest frame (smallest scale, so every other frame is a zoom-in).
@@ -398,25 +434,79 @@ the 2.5 fitter if time allows) and run it on the 20 synthetic references plus th
 background scale ≤ 1 %, position ≤ 2 px at 1080 p, rotation ≤ 0.3°, key times ±2 frames, easing correct
 ≥ 80 %; fades ±2 frames; a 30 s reel analyzed in < 30 s.
 
-**Gate B:** go/no-go on Phases 3–7, decided on these numbers plus the 3 real reels (§11).
+**Gate B:** go/no-go on Phases 3–7, decided on these numbers plus the 3 real reels (§11). **v4:** Gate B
+still applies to photo slideshows; for the motion-graphics path, Gates S and C take its place.
 
-## Phase 3 — Supervision and element tracking (~6–8 days)
+## Phase 3 — Automatic decomposition with SAM 3.1 (~2–3 weeks)
 
-- **3.1 Store + tools.** `annotate`, `list_annotations`, `delete_annotation` → `annotations.json` (§3).
-- **3.2 Annotation view.** The reference in a `<video>` with a canvas overlay: scrub, draw a box or polygon,
-  pick a role, add a label; pick an existing element to add another key boundary; AI proposals dashed with
-  accept/reject. Nothing more — timeline editing stays in the editor.
-- **3.3 `track_element { analysisId, elementId }`** (Rust): template tracking of the element's region
-  (polygon as mask) forwards and backwards from each boundary, constrained to hit every user boundary;
-  appearance window from region change energy; per-frame similarity transform + confidence; falls back to
-  interpolating the user's poses where confidence drops. Then the Phase 2 fitter → element keyframes.
-- **3.4 `fit_background { analysisId, shot }`.** Re-run the full-frame alignment with every element and
-  `ignore` region masked out; background placeholder = median with elements inpainted (blur-fill).
-- **3.5 Element placeholders.** Temporal median of each aligned region; polygon-masked PNG for cut-outs.
+No manual marking. Claude names what's on screen, SAM 3.1 finds and tracks every instance on the GPU, and
+the renderer checks the result.
 
-*Done when* (synthetic, with synthetic annotations): with 2 boundaries per element — scale ≤ 1 %,
-position ≤ 2 px, key times ±2 frames; with 1 boundary still usable (≤ 2 %, ±4 frames); background accuracy
-unchanged by the elements.
+### Gate S — SAM 3.1 spike (~2–3 days, first)
+
+Set up a `uv`-managed Python environment (a PyTorch build with RTX 50-series support; accept Meta's licence
+to download the SAM 3.1 weights) and run SAM 3.1 on the Envato reel with a hand-written concept list
+("photo card", "headline text", "logo", "icon", "line", "shape").
+- **Go:** at least 80 % of the cards and text lines are segmented with a stable ID through their visible
+  span; a 30 s reel processes in about 2 minutes or less; it fits in the RTX 5070's 12 GB.
+- **No-go:** SAM 2 with box prompts from `layout.rs` / `regions.rs` and Claude, behind the same tools.
+
+- **3.1 SAM service.** `sam/` (Python, `uv`), started on demand by the app — Rust spawns it and talks JSON
+  over localhost, the same shape as the MCP bridge — so both front doors reach it through the app's own
+  tools. Optionally also a FastMCP server for debugging from Claude Code. Mask tracks go under
+  `refs/<hash>/masks/`.
+- **3.2 Tools.** `segment_concepts { analysisId, shot?, concepts[] }` → instances (id, concept, score,
+  per-frame box, mask-track path) plus an overlay sheet (masks coloured over frames) for Claude to review.
+  `refine_element { analysisId, elementId, points | boxes | exemplar }` for corrections.
+- **3.3 Concept list.** Claude looks at the overview sheet and writes the concepts per shot (cards, texts,
+  logos, icons, lines, background). `regions.rs` / `layout.rs` candidates become exemplar prompts for anything
+  the concept pass missed. Without an API key, a default list runs ("photo", "text", "logo", "shape").
+- **3.4 Per-element fit.** For each mask track: the aligner (`align.rs`) solved inside the mask → a transform
+  per frame (similarity; perspective once E6 exists) → the 2.5 fitter → keyframes with easing (E1).
+  Visibility window and opacity from mask area and contrast. The background is re-fitted with every element
+  and `ignore` region masked out.
+- **3.5 Sprites and mattes.** Each element's appearance = the aligned temporal median inside its mask, saved
+  as an RGBA sprite; its matte comes from the mask (E3). Footage inside a card stays a footage slot.
+- **3.6 Residual loop.** `reconstruction_error` (4.4) also returns a residual map. Claude inspects the
+  unexplained regions and adds concepts or exemplars; at most 3 rounds.
+- **3.7 Auto-accept.** Shots whose per-element fidelity passes the threshold are accepted; the rest are listed
+  as "needs a look".
+- **3.8 Review channel.** The v3 annotation store, tools (`annotate`, `list_annotations`,
+  `delete_annotation`) and view stay: SAM instances are written as annotations (`by: "sam"`), the view opens
+  on flagged shots, and a user's box or polygon there becomes a `refine_element` prompt.
+
+*Done when:* on synthetic motion-graphics references (overlapping, independently moving elements with Phase E
+features), element count ≥ 95 %, per-element key times ±2 frames, and transforms within Phase 2's tolerances.
+On the Envato set, per-element fidelity rises round over round, and what's left in the residual is limited to
+effects the engine doesn't have yet.
+
+**Gate C:** after Phase 3 and E1, measure the Envato set. If per-element fidelity isn't climbing, stop and
+re-plan before E2–E8 (§11).
+
+## Phase E — Engine vocabulary for motion graphics (~6–8 weeks, alongside Phase 3 from E1)
+
+Without these, even perfect decomposition gives the right elements moving at the right times, drawn in a
+style that doesn't look like the template. Every feature ships in three parts, or it isn't done:
+1. **Render:** a model field with a serde default (old projects keep loading), eval.rs, Preview.tsx, export.
+2. **Inverse:** an estimator in `analyze/` that recovers its parameters from video.
+3. **Ground truth:** `make_synthetic_reference` emits it with random parameters, so the estimator is scored
+   against exact truth.
+
+Order is by visual impact on the Envato set; re-rank after each feature using reconstruction error.
+
+| # | Feature | Render | Inverse | Size |
+|---|---|---|---|---|
+| E1 | Custom-curve and overshoot easing | `Easing::Bezier { x1, y1, x2, y2 }` (y may leave 0–1 for overshoot) in `ease()` and the `track.ts` mirror, reusing the transitions library's bezier math on the TS side; easing presets in the keyframe UI | the 2.5 fitter fits the four control values per segment | 3–4 days |
+| E2 | Motion blur | export renders N sub-frames across a shutter angle (default 180°, 8 samples) and averages them — covers every layer with no per-effect work; the preview skips it | streak length vs measured velocity → shutter angle | 4–5 days |
+| E3 | Layer mattes | a matte on any layer, in the layer's own coordinates so it moves with it: an alpha image or a vector path, with feather. Masked media slots fill new media under the matte | the element's SAM mask, aligned to its track, traced to a path when clean | ~1 week |
+| E4 | Shadows and borders on every layer kind | drop shadow and stroke on image, video and shape layers, reusing text's `DropShadow` | darkening just outside the mask → offset, blur, opacity; the edge band → border | 3–4 days |
+| E5 | Effects and blend modes on every layer kind | the effect stack on text and shape layers (image and video have it already), rendered offscreen first; a layer `blendMode` (screen, multiply, overlay…) | Claude names effects; blend mode chosen by fitting candidates against the residual | ~1 week |
+| E6 | 3D tilt and perspective on flat layers | rotationX / rotationY / z plus a comp camera field of view, drawn as a perspective quad (reuse the decal triangle mapping) | homography from the element's mask corners → rotations and z per frame → keyframes | 1–1.5 weeks |
+| E7 | Kinetic type | glitch text (a GPU effect, needs E5), stroke draw-on (trim path) for lines and outlines, outline-only text; per-letter motion fitted into the existing per-glyph keyframe tracks (`LetterOverride`) | per-glyph regions from the known text + font layout, tracked like elements | 1.5–2 weeks |
+| E8 | Camera moves | reuse `Group`: all layers inside a group whose transform is keyframed (shake, push, whip) | motion shared by every element → the group's transform | 2–3 days |
+
+*Done when* (per feature): its parameters are recovered within tolerance on synthetic references, and
+reconstruction fidelity on the Envato set improves where the feature appears.
 
 ## Phase 4 — Synthesis, build, verify (~5–7 days)
 
@@ -434,6 +524,8 @@ unchanged by the elements.
   (Claude's call; default background < media < graphics < text); placeholders (stills cover-cropped so later
   replaces cover-fill); fitted keys with easing; opacity keys; vignette/grain; transitions from the fits
   (low-margin ones flagged in the layer name); `ignore` regions dropped; names `Slot 03 · <label>`.
+  **v4:** also each element's matte (E3), shadow and border (E4), motion-blur setting (E2) and 3D rotation
+  keys (E6).
 - **4.4 `reconstruction_error { times? }`.** Render at 256 px (`renderFrames`) vs reference frames; SSIM per
   frame, per shot and per element region; masks `ignore` regions and not-yet-recreated elements; returns a
   table + a worst-moments sheet. `compare_to_reference` gives visual pairs.
@@ -446,7 +538,7 @@ rebuilt shots SSIM ≥ 0.90 at 256 px.
 For each `replace_text` element — Claude proposes and reads them from single frames (not tiles, so its pixel
 coordinates map back 1:1; Opus 5 reads up to 2576 px):
 - **`fit_text { analysisId, elementId }`:** entrance start and settle (region change energy), position/scale
-  track (from 3.3), fill colour (dominant cluster), plate (uniform rectangle behind the text: colour, padding,
+  track (from 3.4), fill colour (dominant cluster), plate (uniform rectangle behind the text: colour, padding,
   radius), stroke/shadow hints.
 - **Letter preset:** Claude classifies from a dense entrance sheet (5 presets); timing from `fit_text`
   (typewriter stagger = reveal time ÷ letters).
@@ -462,10 +554,11 @@ the top 3 ≥ 80 %.
 
 ## Phase 6 — Semantic synthesis and apply (~3–4 days)
 
-- **6.1 `TEMPLATE_EXTRACT_PROMPT`** (in-app, and MCP prompt `extract_template`): analyze → propose
-  annotations → wait for the user's review → track/fit → `fit_transition` per soft boundary → rebuild →
-  texts/graphics → `reconstruction_error` → fix the worst (add a missed boundary, re-fit, take the runner-up
-  transition; ≤ 2 rounds) → write the design intent: slot content descriptions, text roles and constraints,
+- **6.1 `TEMPLATE_EXTRACT_PROMPT`** (in-app, and MCP prompt `extract_template`): analyze → concept list →
+  `segment_concepts` → assign roles → track/fit → `fit_transition` per soft boundary → rebuild →
+  texts/graphics → `reconstruction_error` → fix the worst (add a concept or exemplar, re-fit, take the
+  runner-up transition; ≤ 3 rounds) → flag shots still below threshold for review (don't wait) → write the
+  design intent: slot content descriptions, text roles and constraints,
   **patterns** (repeated structure as rules: "each photo pushes in 1.0→1.12 easeOut", "captions enter 200 ms
   after their photo", "cuts every 500 ms"), gaps → `save_template`.
 - **6.2 `match_look { layerId }`:** optimize brightness/contrast/saturate/hue on a 128 px copy of the new clip
@@ -481,9 +574,10 @@ looks within ΔE ≤ 5 of target, human verdict "same edit, our content".
 
 ## Phase 7 — Drop-a-video UX (~2–3 days)
 
-Drop a video on the app (or Templates → "Template from video…"): the automatic pass (Phase 2, transitions,
-rebuild) runs with no API key and opens a first template with per-shot fidelity badges. "Supervise" opens the
-annotation view with Claude's proposals; "Finish with Claude" runs 6.1. Dropping a folder of media onto an
+Drop a video on the app (or Templates → "Template from video…"): the automatic pass (Phase 2, SAM 3.1 with the
+default concept list, transitions, rebuild) runs with no API key and opens a first template with per-shot
+fidelity badges. "Finish with Claude" runs 6.1 (concept list, roles, text, fix rounds); "Review" opens the
+annotation view on the shots it flagged. Dropping a folder of media onto an
 open template runs apply. The Scenario panel gets the same two actions. The Claude passes need Anthropic
 (DeepSeek can't see frames).
 
@@ -491,15 +585,17 @@ open template runs apply. The Scenario panel gets the same two actions. The Clau
 
 | Upgrade | Trigger |
 |---|---|
-| Bezier keyframe easing (`Easing::Bezier{x1,y1,x2,y2}`; the transitions library already has the math) | fit residuals dominated by easing shape — likely for CapCut / After Effects references |
 | Colour-matrix / LUT effect | look match misses targets on tinted references |
-| Blur-fill background layout (blurred cover copy under a contained photo) | first layout to add — everywhere in reels |
-| Perspective quads (e.g. via FrameGrid vertices or decals) | annotated elements tilted in 3D |
-| SAM 2 masks (Python MCP server) | non-rigid elements that polygons + rigid tracking can't follow |
-| PiP/grid/split layouts, footage digital motion, speed ramps, blur over time | gaps cite them |
+| Time remapping and speed ramps on footage | gaps cite them |
+| Particle systems, plugin-style effects (Trapcode, Saber) | a reference depends on them and the nearest built-in effect scores too low |
+| Digital zoom/pan inside footage | gaps cite it |
 | Beat sync, retime, aspect re-flow | users need different music, length or aspect |
-| Python/OpenCV fallback tracker | the Rust tracker misses Phase 2–3 targets |
+| Python/OpenCV fallback tracker | the Rust aligner misses Phase 2–3 targets |
 | App as MCP client | a needed analyzer exists only as an external MCP server |
+
+v4 moved custom easing, perspective and mattes into Phase E, and segmentation into Phase 3. Layouts
+(picture-in-picture, grids, split screens, blur-fill backgrounds) now come out of decomposition as separate
+elements.
 
 ---
 
@@ -515,7 +611,7 @@ interface TemplateManifest {
   slots: {
     layerId: number; elementId: string;
     role: "background" | "keep_motion" | "replace_logo";
-    kind: "still" | "footage"; label: string; content: string; placeholder: string;
+    kind: "still" | "footage"; label: string; content: string; placeholder: string; matte?: string;
     lookTarget: { mean: [number, number, number]; std: [number, number, number] };   // Lab
     fidelity: number;         // reconstruction SSIM of this element
   }[];
@@ -534,12 +630,19 @@ Timing and keyframes live only in the `.sefx`.
 - **Handoff §11.1** corrupts ground truth and the objective until confirmed fixed (0.2); audit every synthetic
   reference.
 - **Downloaded reels are re-encoded** (often 720 p, heavy compression) → tolerances; analysis runs at 256 px.
-- **Tracker robustness** on real footage → Gate A.
+- **Tracker robustness** → Gate A (stills) and Gate S (SAM 3.1 on motion graphics).
 - **Engine vocabulary** (easing shapes, tints, layouts, kinetic type) → nearest fit + gap; `gaps` is the
   engine backlog.
 - **Compute:** a 30 s reel → analysis < 30 s, ≤ 10 s per transition boundary, < 10 s per element track; every
   call < 60 s.
 - **Tool count:** ≈ 50 tools → per-mode sets for the in-app agent (§5).
+- **GPU and licence:** SAM 3.1 needs the NVIDIA workstation (RTX 5070, 12 GB), so extraction happens there;
+  templates are portable and apply anywhere. Its weights come under Meta's own licence — read it before
+  shipping beyond this workstation. SAM 2 (Apache 2.0) is the fallback.
+- **"Identical" has limits:** plugin-level effects (particles, Trapcode/Saber-style) and fonts or textures you
+  don't have → nearest match + gap.
+- **Envato assets:** recreate motion, layout and timing; use your own fonts, textures and footage. The export
+  guard already blocks reference pixels.
 - **Privacy:** frames go to the model provider (BYO key); the bridge stays localhost-only.
 - **Copying:** templates carry parameters, not assets. The export guard blocks reference pixels, reference
   audio is never imported, and copy is always rewritten.
@@ -553,6 +656,9 @@ Timing and keyframes live only in the `.sefx`.
 | Remake from a template (~30–40 turns) | ~$1–2 | ~5× more |
 | Automatic pass (analysis, transitions, rebuild) and the synthetic dev loop through Phase 4 | $0 — no model calls | — |
 
+SAM 3.1 runs locally, so it has no API cost. Claude's concept, role and fix rounds add roughly $1–3 per
+template.
+
 Levers, in order: prompt caching (0.3); per-mode tool sets (§5); fewer and smaller images (tiled sheets
 everywhere except where Claude must return coordinates); lower effort on apply runs. Moving apply runs to
 `claude-sonnet-5` ($2 / $10) is the user's call, made on the logged numbers.
@@ -561,34 +667,42 @@ everywhere except where Claude must return coordinates); lower effort on apply r
 
 Sign off in stages; each stage leaves something usable if the work stops there.
 
+Status going into v4, from the notes in `docs/`: 0.2, 0.3, 1.1 and 1.2 are done (§11.1 closed in
+`d9166a3`). 1.3 (templates and apply) isn't reported yet. Gate A still waits for a photo-slideshow reel.
+Parts of Phases 2 and 4 were built ahead of the gates.
+
 | Stage | Approve | What you have if you stop here |
 |---|---|---|
-| Phase 0 | now, regardless of this feature | exports you can trust (handoff §11.1 affects every export today, including delivered videos), current models, cost logging |
-| Phase 1 + Gate A | next | save any project as a template and fill it with new media automatically; test videos with known answers; a measured verdict on the tracker |
-| Phase 2 → **Gate B** | after Gate A | photo-slideshow reels (likely most of HSI's) inverted automatically, plus accuracy numbers to decide the rest on |
-| Phases 3–7 | after Gate B | supervised multi-element inversion, fitted transitions, text, semantic synthesis, the drop-a-video UX |
+| 2.2 adaptive cuts, Gate S, E1 + the 2.5 fitter | now | reliable cuts; a measured verdict on SAM 3.1 for motion graphics; custom and overshoot easing |
+| Phase 3 → **Gate C** | after Gate S | Envato-style references decomposed automatically into tracked elements with fitted keys, plus per-element fidelity numbers |
+| E2–E4 | after Gate C | motion blur, mattes, shadows and borders — the biggest visual gap for the genre |
+| E5–E8, then Phases 4–7 | after E2–E4 are measured | effects and blend modes everywhere, 3D tilt, kinetic type, camera moves; text; apply; the drop-a-video UX |
 
-PRs: 1. Phase 0.3 plumbing + cost logging · 2. Phase 0.2 checker (`extract_frames`, `audit_export`), then
-the fix · 3. Phase 1 · 4. Gate A spike · 5. Phase 2 (Gate B) · 6. Phase 3 · 7. Phase 4 · 8. Phase 5 ·
-9. Phase 6 · 10. Phase 7. Each PR: `npm test` + `cargo test` green; commit only on the human's say-so.
+**Target ("identical"):** on each Envato-style reference, rebuilt with its own element sprites as
+placeholders — per-element SSIM ≥ 0.90 at 256 px, ≥ 0.85 averaged over the video, and in a side-by-side at
+playback speed you can't reliably tell which is the original. With HSI media swapped in: same template, your
+content. Plugin-level effects are the known exception (§10).
 
-**Schedule:** roughly **7 weeks of coding-agent time for Phases 1–7 — an order of magnitude, not a
-commitment.** Phase 0.2 comes on top and its length is unknown. Computer-vision fitting tends to run long
-once real compression and occlusion show up; Gates A and B exist so an overrun shows up in days, not weeks.
+PRs: 1. commit the current work (the human's say-so) · 2. 2.2 adaptive cuts · 3. Gate S spike · 4. E1 + the
+2.5 fitter · 5. Phase 3 · 6. Gate C report · 7. E2 · 8. E3 · 9. E4 · 10. rebuild/verify updates (Phase 4) ·
+11. E5–E8 · 12. Phases 5–7. Each PR: `npm test` + `cargo test` green; commit only on the human's say-so.
+
+**Schedule:** about **3 months of coding-agent time** from here to the target — an order of magnitude, not a
+commitment. Gates S and C exist so an overrun shows up in days, not weeks.
 
 ## 12. The earlier 12-sprint plan, mapped
 
 | Sprint | Here | Difference and why |
 |---|---|---|
 | 0 Schema + renderer | §2: the app's `Project` + renderer | the template must be the renderer's own parameters to be verifiable |
-| 1 Ingest | Phase 2.1–2.2 | ffmpeg in Rust, streamed; scene scores instead of PySceneDetect |
-| 2 Annotations | §3, Phase 3.1–3.2 | same roles; JSON beside the analysis instead of FastAPI/SQLite; Claude proposes, the user corrects; also MCP tools |
-| 3 Decomposition | Phase 3.3–3.5 | supervised by the boundaries: rigid tracking + masked background + aligned-median placeholders; PROVIDE/Omnimatte not needed; SAM 2 kept for non-rigid elements (Phase 8) |
-| 4 Motion + easing fit | Phase 2.4–2.5, 3.3 | Lucas–Kanade instead of RAFT/CoTracker; easing fitted against the engine's own 5 curves; bezier easing when residuals demand it |
+| 1 Ingest | Phase 2.1–2.2 | ffmpeg in Rust, streamed; adaptive detection checked against PySceneDetect during development |
+| 2 Annotations | §3, Phase 3.8 | same roles; boundaries come from Claude + SAM 3.1 automatically and the user only reviews flagged shots; JSON instead of FastAPI/SQLite |
+| 3 Decomposition | Phase 3 | SAM 3.1 concept segmentation + video tracking (the successor to the SAM 2 the earlier plan proposed); aligned-median sprites; PROVIDE/Omnimatte not needed |
+| 4 Motion + easing fit | Phase 2.4–2.5, 3.4, E1 | Lucas–Kanade inside SAM masks instead of RAFT/CoTracker; easing fitted against the engine's own curves, including custom and overshoot (E1) |
 | 5 Style | Phase 2.7, 6.2 | Lab look targets + vignette/grain; a LUT needs an engine effect (Phase 8) |
 | 6 Scene graph + naming | Phases 5–6 | Claude reads frames directly; fonts by synthesis instead of a classifier |
 | 7 Synthesizer | Phase 4.3 | `rebuild_from_analysis` in Rust, one undo step |
-| 8 MCP server | §5 | the existing bridge; FastMCP only for the optional Python server |
+| 8 MCP server | §5 | the existing bridge; the one Python piece is the SAM 3.1 service (FastMCP for debugging) |
 | 9 AI reasoning | Phase 6.1 | validated by re-rendering + reconstruction error (the earlier SSIM/LPIPS idea) |
 | 10 Feedback | annotations + editing the template on the timeline | no corrections table |
 | 11 Export (Lottie/AEP/SVG) | cut | the deliverable is the video; the template is a `.sefx` |

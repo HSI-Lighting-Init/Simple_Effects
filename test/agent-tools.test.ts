@@ -62,8 +62,9 @@ describe("agent tool boundary", () => {
     expect(r.text).toMatch(/not found/);
   });
 
-  it("rejects an unknown colour effect and out-of-range media index", async () => {
-    expect((await call("apply_color", { layerId: 1, kind: "teleport", amount: 1 })).isError).toBe(true);
+  it("rejects an unknown effect kind, an unknown param, and an out-of-range media index", async () => {
+    expect((await call("add_effect", { layerId: 1, kind: "teleport" })).isError).toBe(true);
+    expect((await call("add_effect", { layerId: 1, kind: "brightness", params: { teleport: 1 } })).isError).toBe(true);
     expect((await call("add_media_layer", { mediaIndex: 7 })).isError).toBe(true);
   });
 

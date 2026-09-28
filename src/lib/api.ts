@@ -22,6 +22,9 @@ import type { TextStyle } from "../bindings/TextStyle";
 import type { TextAnimator } from "../bindings/TextAnimator";
 import type { TextLayerStyles } from "../bindings/TextLayerStyles";
 import type { AuditReport } from "../bindings/AuditReport";
+import type { AlignSample } from "../bindings/AlignSample";
+import type { Cut } from "../bindings/Cut";
+import type { TemplateAnalysis } from "../bindings/TemplateAnalysis";
 
 export const getProject = () => invoke<Project>("get_project");
 
@@ -30,6 +33,9 @@ export const setProject = (project: Project) =>
 
 /** Start a fresh, blank project (clears the timeline and undo/redo history). */
 export const newProject = () => invoke<Project>("new_project");
+
+/** List image files directly inside `dir` (no recursion), sorted. */
+export const listDirImages = (dir: string) => invoke<string[]>("list_dir_images", { dir });
 
 /** Set the composition resolution (workspace size / orientation). */
 export const setCompSize = (width: number, height: number) =>
@@ -181,15 +187,18 @@ export const setLayerAnchor = (layerId: number, ax: number, ay: number, tMs: num
 
 /** Replace an image/video layer's media with `path` (image or video), keeping its
  *  effects, transitions, timing and transform (rescaled to the same on-screen box).
- *  For a video, pass its `width`/`height`/`durationMs`; images are measured backend-side. */
+ *  For a video, pass its `width`/`height`/`durationMs`; images are measured backend-side.
+ *  `fit`: "contain" (default) letterboxes; "cover" cover-crops an uncropped image slot
+ *  to the old box's aspect (video targets always letterbox — see the Rust doc comment). */
 export const replaceLayerMedia = (
   layerId: number,
   path: string,
   kind: "image" | "video",
   width = 0,
   height = 0,
-  durationMs = 0
-) => invoke<Project>("replace_layer_media", { layerId, path, kind, width, height, durationMs });
+  durationMs = 0,
+  fit: "contain" | "cover" = "contain"
+) => invoke<Project>("replace_layer_media", { layerId, path, kind, width, height, durationMs, fit });
 
 /** Template: a before/after reveal — `before` fills the frame and `after` is
  *  revealed by a divider bar that sweeps across (`orientation` "horizontal" or
@@ -613,6 +622,28 @@ export const keyEffect = (
 export const setWipeStatic = (layerId: number, index: number, angle: number, invert: boolean) =>
   invoke<Project>("set_wipe_static", { layerId, index, angle, invert });
 
+/** Set a torn-edge effect's static fields (all of them — no Track fields). */
+export const setTornEdgeStatic = (
+  layerId: number,
+  index: number,
+  side: number,
+  depth: number,
+  seed: number,
+  toothCount: number,
+  paperWidth: number,
+  paperColor: Rgba
+) =>
+  invoke<Project>("set_tornedge_static", {
+    layerId,
+    index,
+    side,
+    depth,
+    seed,
+    toothCount,
+    paperWidth,
+    paperColor,
+  });
+
 /** Set a shiny-clouds effect's static fields (tint + blend mode). */
 export const setShineStatic = (layerId: number, index: number, tint: Rgba, blend: number) =>
   invoke<Project>("set_shine_static", { layerId, index, tint, blend });
@@ -796,6 +827,23 @@ export const exportVideo = (
  *  handoff §11.1 fix (template-extractor roadmap, Phase 0.2). */
 export const auditExport = (path: string, verbose = false) =>
   invoke<AuditReport>("audit_export", { path, verbose });
+
+/** Gate A spike: align a shot's frames against a reference frame. See
+ *  `AlignSample`'s doc (generated from the Rust side) for what's returned. */
+export const alignReference = (path: string, startMs: number, endMs: number, refMs?: number, sampleEveryMs?: number) =>
+  invoke<AlignSample[]>("align_reference", { path, startMs, endMs, refMs: refMs ?? null, sampleEveryMs: sampleEveryMs ?? null });
+
+/** Phase 2.2: find shot/cut boundaries in a video. */
+export const detectCuts = (path: string) => invoke<Cut[]>("detect_cuts", { path });
+
+/** The inverse-render entry point: cuts + per-shot motion/look/text-region
+ *  measurement in one call. */
+export const analyzeReference = (path: string) => invoke<TemplateAnalysis>("analyze_reference", { path });
+
+/** Grab real frames from an arbitrary video file (not the live project) as
+ *  base64 PNG data URLs, for the transition-matching harness. */
+export const extractVideoFrames = (path: string, timesMs: number[], shortSide: number) =>
+  invoke<[number, string][]>("extract_video_frames", { path, timesMs, shortSide });
 
 /** Delete a layer (object). Shapes detach any layers pinned to them. */
 export const deleteLayer = (layerId: number) =>

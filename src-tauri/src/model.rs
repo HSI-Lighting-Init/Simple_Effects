@@ -1202,6 +1202,30 @@ pub enum Effect {
         softness: Track,
         invert: bool,
     },
+    /// A static hand-torn paper edge mask — clips one edge of the layer to a
+    /// deterministic jagged silhouette (seeded by `seed`), optionally with a
+    /// visible paper-coloured edge strip along the tear. Fully static (no
+    /// Track fields): the reference look holds the torn silhouette fixed for
+    /// a shot's whole duration, only the layer's own transform animates.
+    TornEdge {
+        /// Which edge is torn: 0=right, 1=left, 2=top, 3=bottom.
+        side: u8,
+        /// 0..1, how far the jagged teeth reach into the layer (fraction of
+        /// width for left/right, height for top/bottom).
+        depth: f32,
+        /// Seeds the deterministic jagged-edge shape.
+        seed: u32,
+        /// Roughly how many jagged "teeth" along the torn edge.
+        #[serde(rename = "toothCount")]
+        tooth_count: u32,
+        /// px; width of a visible paper-coloured edge strip along the tear.
+        /// 0 = clean clip with no visible strip.
+        #[serde(rename = "paperWidth")]
+        paper_width: f32,
+        /// The edge strip's colour, e.g. a slightly off-white.
+        #[serde(rename = "paperColor")]
+        paper_color: Rgba,
+    },
     /// Animated procedural "shiny clouds" — a drifting/morphing fBm caustic /
     /// light-leak pattern composited over the image on the GPU (WebGL). Every
     /// numeric knob is a keyframeable Track; `tint` (shine colour) and `blend`
@@ -1282,6 +1306,14 @@ impl Effect {
                 softness: Track::constant(0.15),
                 invert: false,
             },
+            "tornedge" => Effect::TornEdge {
+                side: 0,
+                depth: 0.12,
+                seed: 1,
+                tooth_count: 16,
+                paper_width: 10.0,
+                paper_color: Rgba { r: 245, g: 242, b: 235, a: 255 },
+            },
             "shinyclouds" => Effect::ShinyClouds {
                 intensity: Track::constant(1.0),
                 scale: Track::constant(1.0),
@@ -1361,6 +1393,11 @@ pub struct TransformEdit {
     pub rotation: Option<f32>,
     #[ts(optional)]
     pub opacity: Option<f32>,
+    /// Shape of the segment(s) this edit creates, applied to every channel it
+    /// touches. Defaults to `EaseInOut` (the prior hardcoded behaviour) when
+    /// omitted.
+    #[ts(optional)]
+    pub easing: Option<Easing>,
 }
 
 impl Track {

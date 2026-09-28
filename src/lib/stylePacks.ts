@@ -398,7 +398,7 @@ async function placeBelow(p: Project, id: number, belowId: number): Promise<Proj
 }
 
 /** Natural contain-fit scale of a clip in this comp (what add-media gives it). */
-function fitScale(l: Layer, W: number, H: number): number | null {
+export function fitScale(l: Layer, W: number, H: number): number | null {
   const k = l.kind;
   if (k.kind === "image") {
     const w = k.crop ? k.crop.width : k.width;

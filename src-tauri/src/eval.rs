@@ -483,6 +483,19 @@ pub enum ResolvedEffect {
     Hue { degrees: f32 },
     Invert { amount: f32 },
     Wipe { angle: f32, position: f32, softness: f32, invert: bool },
+    /// A static hand-torn paper edge mask (see `Effect::TornEdge`) — no Track
+    /// fields, so this is a direct copy of the source effect.
+    TornEdge {
+        side: u8,
+        depth: f32,
+        seed: u32,
+        #[serde(rename = "toothCount")]
+        tooth_count: u32,
+        #[serde(rename = "paperWidth")]
+        paper_width: f32,
+        #[serde(rename = "paperColor")]
+        paper_color: Rgba,
+    },
     /// `time` is the comp playhead in seconds (drives the drift/morph on the GPU,
     /// so the animation is fully determined by the timeline → export-accurate).
     ShinyClouds {
@@ -545,6 +558,16 @@ fn resolve_effect(effect: &Effect, t_ms: u32) -> ResolvedEffect {
             softness: sample_track(softness, t_ms),
             invert: *invert,
         },
+        Effect::TornEdge { side, depth, seed, tooth_count, paper_width, paper_color } => {
+            ResolvedEffect::TornEdge {
+                side: *side,
+                depth: *depth,
+                seed: *seed,
+                tooth_count: *tooth_count,
+                paper_width: *paper_width,
+                paper_color: *paper_color,
+            }
+        }
         Effect::ShinyClouds {
             intensity, scale, speed, complexity, contrast, brightness, opacity, tint, blend,
         } => ResolvedEffect::ShinyClouds {
@@ -634,7 +657,7 @@ impl LetterTransform {
 }
 
 /// Map an eased parameter `u` in [0, 1].
-fn ease(easing: Easing, u: f32) -> f32 {
+pub(crate) fn ease(easing: Easing, u: f32) -> f32 {
     let u = u.clamp(0.0, 1.0);
     match easing {
         Easing::Linear => u,
