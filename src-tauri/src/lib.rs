@@ -5407,6 +5407,14 @@ fn align_reference(
     analyze::align_shot(&path, start_ms, end_ms, ref_ms.unwrap_or(start_ms), sample_every_ms.unwrap_or(250), 256)
 }
 
+/// Phase 2.5: key down `align_reference`'s (or a shot's `motion` field's)
+/// dense per-frame samples into a small set of keyframes with easing —
+/// see `analyze::fit_background`'s doc.
+#[tauri::command]
+fn fit_background(samples: Vec<analyze::AlignSample>, start_ms: u32, end_ms: u32) -> analyze::FittedMotion {
+    analyze::fit_background(&samples, start_ms, end_ms)
+}
+
 /// Phase 2.2: find shot/cut boundaries in a video — the first step of
 /// actually inverse-rendering an existing edit (vs. Gate A's per-shot
 /// aligner, which needs the boundaries already known).
@@ -5882,6 +5890,7 @@ pub fn run() {
             export_video,
             audit_export,
             align_reference,
+            fit_background,
             detect_cuts,
             analyze_reference,
             extract_video_frames,

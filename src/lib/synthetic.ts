@@ -87,6 +87,18 @@ function mulberry32(seed: number): () => number {
 
 const EASINGS: NonNullable<TransformEdit["easing"]>[] = ["linear", "easeIn", "easeOut", "easeInOut"];
 
+/** E1 ground truth: a random cubic-bezier easing, sometimes overshooting
+ *  (y1/y2 outside 0..1) like a motion-graphics "ease out back" bounce — so
+ *  the 2.5 fitter has real overshoot segments to recover, not just the four
+ *  named shapes. */
+function randomBezier(rng: () => number): NonNullable<TransformEdit["easing"]> {
+  const x1 = range(rng, 0.2, 0.6);
+  const x2 = range(rng, 0.4, 0.8);
+  const y1 = rng() < 0.5 ? range(rng, 0, 1) : range(rng, 1.1, 1.8);
+  const y2 = rng() < 0.3 ? range(rng, 1.0, 1.4) : range(rng, 0, 1);
+  return { bezier: { x1, y1, x2, y2 } };
+}
+
 function pick<T>(rng: () => number, arr: readonly T[]): T {
   return arr[Math.floor(rng() * arr.length) % arr.length];
 }
@@ -128,7 +140,7 @@ async function animateShot(rng: () => number, layerId: number, startMs: number, 
   let p: Project | undefined;
   for (const [i, k] of keys.entries()) {
     const edit: TransformEdit = { scaleX: k.scale, scaleY: k.scale, x: k.x, y: k.y, rotation: k.rot };
-    if (i > 0) edit.easing = pick(rng, EASINGS);
+    if (i > 0) edit.easing = rng() < 0.2 ? randomBezier(rng) : pick(rng, EASINGS);
     p = await editKeyframes(layerId, k.t, edit, i === 0);
   }
   return p!; // keys always has >= 2 entries

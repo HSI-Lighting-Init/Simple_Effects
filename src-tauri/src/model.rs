@@ -587,7 +587,7 @@ where
     Ok(v.round().clamp(0.0, u32::MAX as f64) as u32)
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum Easing {
@@ -597,6 +597,11 @@ pub enum Easing {
     EaseInOut,
     /// Step: hold this keyframe's value until the next keyframe.
     Hold,
+    /// Custom cubic-bezier timing, like CSS `cubic-bezier(x1,y1,x2,y2)`. The
+    /// curve always starts at (0,0) and ends at (1,1); `y1`/`y2` may leave
+    /// 0..1, which makes the sampled value overshoot past the keyframe it's
+    /// approaching (e.g. an "ease out back" bounce) before settling.
+    Bezier { x1: f32, y1: f32, x2: f32, y2: f32 },
 }
 
 /// A keyframe on a text layer's fill colour. `easing` shapes the segment that

@@ -53,6 +53,17 @@ const fake = vi.hoisted(() => {
       Object.assign(L(id).effects[index], { side, depth, seed, toothCount, paperWidth, paperColor });
       return clone();
     },
+    // Fake 2.5 fitter: just the first/last sample as start/end keys (linear)
+    // — enough to test animateMotion's wiring, not a DP/bezier reimplementation.
+    fitBackground: async (samples: { scale: number; rotationDeg: number; tx: number; ty: number }[], startMs: number, endMs: number) => {
+      const first = samples[0];
+      const last = samples[samples.length - 1];
+      const mk = (get: (s: typeof first) => number) => [
+        { timeMs: startMs, value: get(first), easing: "linear" as const },
+        { timeMs: endMs, value: get(last), easing: "linear" as const },
+      ];
+      return { scale: mk((s) => s.scale), rotationDeg: mk((s) => s.rotationDeg), tx: mk((s) => s.tx), ty: mk((s) => s.ty) };
+    },
   };
   return { state, api, baseLayer, nextId };
 });
@@ -128,6 +139,38 @@ describe("rebuildFromAnalysis (mock engine)", () => {
     const keys = layer.transform.scaleX.keys as { timeMs: number; value: number }[];
     expect(keys.map((k) => k.timeMs)).toEqual([0, 3000]);
     expect(keys[1].value / keys[0].value).toBeCloseTo(1.25, 5); // ratio, not absolute value
+  });
+
+  it("keys every fitted keyframe (not just start/end) with its own easing, including bezier", async () => {
+    const original = fake.api.fitBackground;
+    fake.api.fitBackground = async () => ({
+      scale: [
+        { timeMs: 0, value: 1.0, easing: "linear" as const },
+        { timeMs: 1200, value: 1.1, easing: { bezier: { x1: 0.34, y1: 1.56, x2: 0.64, y2: 1.0 } } },
+        { timeMs: 3000, value: 1.25, easing: "linear" as const },
+      ],
+      rotationDeg: [], tx: [], ty: [],
+    });
+    try {
+      const analysis = base([
+        {
+          index: 0, startMs: 0, endMs: 3000, isStill: true,
+          motion: [
+            { tMs: 0, scale: 1.0, rotationDeg: 0, tx: 0, ty: 0 },
+            { tMs: 1200, scale: 1.1, rotationDeg: 0, tx: 0, ty: 0 },
+            { tMs: 3000, scale: 1.25, rotationDeg: 0, tx: 0, ty: 0 },
+          ],
+          look: flatLook,
+        },
+      ]);
+      const r = await rebuildFromAnalysis(analysis, ["a.png"], io, "out.mp4");
+      const layer = r.project.layers.find((l) => l.kind.kind === "image")!;
+      const keys = layer.transform.scaleX.keys as { timeMs: number; value: number; easing: unknown }[];
+      expect(keys.map((k) => k.timeMs)).toEqual([0, 1200, 3000]);
+      expect(keys[1].easing).toEqual({ bezier: { x1: 0.34, y1: 1.56, x2: 0.64, y2: 1.0 } });
+    } finally {
+      fake.api.fitBackground = original;
+    }
   });
 
   it("leaves scaleX unkeyed when the shot isn't still", async () => {

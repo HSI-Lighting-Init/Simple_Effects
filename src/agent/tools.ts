@@ -34,6 +34,7 @@ import {
   createCarouselVideo,
   auditExport,
   alignReference,
+  fitBackground,
   detectCuts,
   analyzeReference,
 } from "../lib/api";
@@ -344,7 +345,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "set_keyframe",
-    description: "Set a keyframe on a layer's transform at an exact time — position (x/y), scale (scaleX/scaleY), rotation, or opacity. Only the fields you pass change. Call it at 2+ different times on the same layer to animate a custom move — e.g. a punch-in-then-back-out zoom (normal → zoomed at the midpoint → normal again), instead of apply_style's simple straight-line Ken Burns drift. Get the layer's current scale/position first (fit-to-frame scale = min(compWidth/imageWidth, compHeight/imageHeight)) so your keyframes start from where it already sits, not a jump. `easing` shapes the segment(s) this call creates (default easeInOut); it only takes effect on a NEW keyframe or the seed key — nudging an already-keyframed time's value without passing easing leaves that segment's shape alone.",
+    description: "Set a keyframe on a layer's transform at an exact time — position (x/y), scale (scaleX/scaleY), rotation, or opacity. Only the fields you pass change. Call it at 2+ different times on the same layer to animate a custom move — e.g. a punch-in-then-back-out zoom (normal → zoomed at the midpoint → normal again), instead of apply_style's simple straight-line Ken Burns drift. Get the layer's current scale/position first (fit-to-frame scale = min(compWidth/imageWidth, compHeight/imageHeight)) so your keyframes start from where it already sits, not a jump. `easing` shapes the segment(s) this call creates (default easeInOut); it only takes effect on a NEW keyframe or the seed key — nudging an already-keyframed time's value without passing easing leaves that segment's shape alone. `easing: \"bezier\"` needs bezierX1/bezierY1/bezierX2/bezierY2 too — a custom timing curve like CSS cubic-bezier(x1,y1,x2,y2); y1/y2 may leave 0..1 for overshoot (e.g. 0.34,1.56,0.64,1 is a snappy 'ease out back' bounce past the target before settling).",
     inputSchema: {
       type: "object",
       properties: {
@@ -356,7 +357,11 @@ export const TOOLS: ToolDef[] = [
         scaleY: { type: "number" },
         rotation: { type: "number", description: "degrees" },
         opacity: { type: "number", description: "0..1" },
-        easing: { type: "string", enum: ["linear", "easeIn", "easeOut", "easeInOut", "hold"], description: "default easeInOut; hold = step (snaps to this value, no tween)" },
+        easing: { type: "string", enum: ["linear", "easeIn", "easeOut", "easeInOut", "hold", "bezier"], description: "default easeInOut; hold = step (snaps to this value, no tween); bezier needs bezierX1/Y1/X2/Y2 too" },
+        bezierX1: { type: "number" },
+        bezierY1: { type: "number" },
+        bezierX2: { type: "number" },
+        bezierY2: { type: "number" },
       },
       required: ["layerId", "tMs"],
       additionalProperties: false,
@@ -368,7 +373,16 @@ export const TOOLS: ToolDef[] = [
       for (const k of ["x", "y", "scaleX", "scaleY", "rotation", "opacity"] as const)
         if (typeof a[k] === "number" && isFinite(a[k] as number)) edit[k] = a[k] as number;
       if (!Object.keys(edit).length) return err("provide at least one of x/y/scaleX/scaleY/rotation/opacity");
-      if (typeof a.easing === "string") edit.easing = a.easing as TransformEdit["easing"];
+      if (a.easing === "bezier") {
+        const parts = [a.bezierX1, a.bezierY1, a.bezierX2, a.bezierY2];
+        if (parts.some((v) => typeof v !== "number" || !isFinite(v))) {
+          return err("easing \"bezier\" needs bezierX1/bezierY1/bezierX2/bezierY2");
+        }
+        const [x1, y1, x2, y2] = parts as number[];
+        edit.easing = { bezier: { x1, y1, x2, y2 } };
+      } else if (typeof a.easing === "string") {
+        edit.easing = a.easing as TransformEdit["easing"];
+      }
       await ctx.commit(await editKeyframes(id, int(a.tMs), edit, false));
       return ok("ok");
     },
@@ -765,6 +779,29 @@ export const TOOLS: ToolDef[] = [
               return ok(JSON.stringify(samples));
             } catch (e) {
               return err(`align_reference failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
+        },
+        {
+          name: "fit_background",
+          description: "DEV ONLY (2.5). Key down align_reference's dense per-frame samples into a small set of keyframes with easing (Linear/EaseIn/EaseOut/EaseInOut/Hold/Bezier — an overshoot 'ease out back' is possible), one list per channel (scale/rotationDeg/tx/ty), all sharing the same key TIMES (how an editor keys a whole transform at once). Values stay in align_reference's relative, analysis-pixel space — not yet this engine's absolute comp-space transform.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              samples: { type: "array", description: "the array align_reference returned" },
+              startMs: { type: "integer", description: "the shot/element span's start — the fit always keys exactly here, not just the nearest sample" },
+              endMs: { type: "integer", description: "the shot/element span's end" },
+            },
+            required: ["samples", "startMs", "endMs"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>) => {
+            if (!Array.isArray(a.samples)) return err("samples is required (the array align_reference returned)");
+            try {
+              const fitted = await fitBackground(a.samples as Parameters<typeof fitBackground>[0], int(a.startMs), int(a.endMs));
+              return ok(JSON.stringify(fitted));
+            } catch (e) {
+              return err(`fit_background failed: ${e instanceof Error ? e.message : String(e)}`);
             }
           },
         },

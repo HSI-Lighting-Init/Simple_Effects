@@ -14,6 +14,7 @@ use std::io::Read;
 use std::process::Stdio;
 
 pub(crate) mod align;
+pub(crate) mod fit;
 pub(crate) mod layout;
 pub(crate) mod look;
 pub(crate) mod regions;
@@ -22,7 +23,7 @@ pub(crate) mod shots;
 use align::SimParams;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::model::{LayerKind, Project};
@@ -160,7 +161,7 @@ pub(crate) fn extract_frames(
 /// (analysis-resolution scale/rotation/translation — see `align_shot`'s doc
 /// for how to compose these onto the reference frame's own absolute
 /// transform).
-#[derive(Clone, Serialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct AlignSample {
@@ -238,6 +239,52 @@ pub(crate) fn align_shot(path: &str, start_ms: u32, end_ms: u32, ref_ms: u32, sa
     walk(Box::new((ref_idx + 1)..decoded.len()));
 
     Ok(out)
+}
+
+/// 2.5: `align_shot`'s dense per-frame samples, keyed down to a small
+/// editor-style set of `Keyframe`s per channel — see `fit::fit_channels`'s
+/// doc for the algorithm. Still in `align_shot`'s relative, analysis-pixel
+/// space (not this engine's absolute comp-space transform) — the same
+/// anchor/centre composition `align_shot`'s own doc describes applies to
+/// these keyframes' VALUES before they land in a real `Transform`; only the
+/// shaping (times + easing) happens here.
+#[derive(Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct FittedMotion {
+    pub scale: Vec<crate::model::Keyframe>,
+    pub rotation_deg: Vec<crate::model::Keyframe>,
+    pub tx: Vec<crate::model::Keyframe>,
+    pub ty: Vec<crate::model::Keyframe>,
+}
+
+pub(crate) fn fit_background(samples: &[AlignSample], span_start_ms: u32, span_end_ms: u32) -> FittedMotion {
+    // `solved: false` rows are carried-forward placeholders (align_shot's
+    // doc), not real measurements — fitting a curve through them alongside
+    // real samples reads a frozen placeholder run as if it were genuine
+    // flat motion, and can badly mislead the shape search right where the
+    // aligner actually lost track. Fall back to the raw list only if
+    // filtering would leave nothing to fit.
+    let solved: Vec<&AlignSample> = samples.iter().filter(|s| s.solved).collect();
+    let samples: Vec<&AlignSample> = if solved.is_empty() { samples.iter().collect() } else { solved };
+
+    let times: Vec<u32> = samples.iter().map(|s| s.t_ms).collect();
+    let scale: Vec<f32> = samples.iter().map(|s| s.scale).collect();
+    let rotation: Vec<f32> = samples.iter().map(|s| s.rotation_deg).collect();
+    let tx: Vec<f32> = samples.iter().map(|s| s.tx).collect();
+    let ty: Vec<f32> = samples.iter().map(|s| s.ty).collect();
+    let channels = [
+        fit::Channel { name: "scale", values: &scale },
+        fit::Channel { name: "rotationDeg", values: &rotation },
+        fit::Channel { name: "tx", values: &tx },
+        fit::Channel { name: "ty", values: &ty },
+    ];
+    let mut fitted = fit::fit_channels(&times, &channels, (span_start_ms, span_end_ms), &[], &fit::FitParams::default());
+    let ty_keys = fitted.pop().unwrap();
+    let tx_keys = fitted.pop().unwrap();
+    let rot_keys = fitted.pop().unwrap();
+    let scale_keys = fitted.pop().unwrap();
+    FittedMotion { scale: scale_keys, rotation_deg: rot_keys, tx: tx_keys, ty: ty_keys }
 }
 
 /// Parse ffmpeg's own `-i <path>` stderr banner ("Duration: 00:00:28.02, ...")
@@ -640,6 +687,41 @@ mod tests {
 
     fn solid_rgb(r: u8, g: u8, b: u8) -> Vec<u8> {
         std::iter::repeat_n([r, g, b], 17 * 16).flatten().collect()
+    }
+
+    #[test]
+    fn fit_background_ignores_unsolved_carried_forward_samples() {
+        // Mirrors a real live case: the aligner solves cleanly for a while,
+        // then loses convergence and carries the last value forward
+        // (`solved: false`) for the rest of the span. Fitting through those
+        // placeholders as if they were real, unchanging motion would read a
+        // late jump as an early, gradual ramp — check the unsolved tail is
+        // excluded, not blended in.
+        let mut samples = Vec::new();
+        for t in (0..500).step_by(100) {
+            samples.push(AlignSample { t_ms: t, scale: 1.0, rotation_deg: 0.0, tx: 0.0, ty: 0.0, solved: true });
+        }
+        samples.push(AlignSample { t_ms: 500, scale: 2.0, rotation_deg: 0.0, tx: 0.0, ty: 0.0, solved: true });
+        for t in (600..1700).step_by(100) {
+            samples.push(AlignSample { t_ms: t, scale: 2.0, rotation_deg: 0.0, tx: 0.0, ty: 0.0, solved: false });
+        }
+        let fitted = fit_background(&samples, 0, 1700);
+        // No keys in the unsolved 600-1700 tail — it carries no real
+        // information, so nothing there should have earned its own key.
+        assert!(
+            fitted.scale.iter().all(|k| k.time_ms <= 500 || k.time_ms == 1700),
+            "expected no keys in the unsolved 600-1600 tail, got {:?}",
+            fitted.scale
+        );
+        // Functional check, not a structural one — however many keys it
+        // used, RENDERING the fitted track (the actual evaluator, not a
+        // hand-rolled check) should reproduce the true step (flat at 1.0,
+        // jump to 2.0 around t=500, held to the span end), not a gradual
+        // ramp smeared across the unsolved tail.
+        let track = crate::model::Track { keys: fitted.scale, default: 1.0 };
+        assert!(crate::eval::sample_track(&track, 0) < 1.2, "expected ~1.0 near the start, got {}", crate::eval::sample_track(&track, 0));
+        assert!(crate::eval::sample_track(&track, 1600) > 1.8, "expected ~2.0 well after the jump, got {}", crate::eval::sample_track(&track, 1600));
+        assert_eq!(crate::eval::sample_track(&track, 1700), 2.0, "expected the span-edge value to hold the last real value");
     }
 
     #[test]

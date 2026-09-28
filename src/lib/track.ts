@@ -7,9 +7,17 @@ import type { Track } from "../bindings/Track";
 import type { Easing } from "../bindings/Easing";
 import type { ColorKey } from "../bindings/ColorKey";
 import type { Rgba } from "../bindings/Rgba";
+import { cubicBezier } from "./transitions/spring";
 
+// Mirrors eval.rs's `ease()` — see its doc comment for the bezier algorithm
+// (ported from `cubicBezier` in transitions/spring.ts, reused here per the
+// roadmap rather than re-implemented).
 function ease(easing: Easing, u: number): number {
   const x = Math.max(0, Math.min(1, u));
+  if (typeof easing !== "string") {
+    const { x1, y1, x2, y2 } = easing.bezier;
+    return cubicBezier(x1, y1, x2, y2)(x);
+  }
   switch (easing) {
     case "linear":
       return x;

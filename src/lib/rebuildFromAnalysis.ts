@@ -23,6 +23,7 @@ import {
   addTextLayer,
   setTextStyle,
   setTornEdgeStatic,
+  fitBackground,
 } from "./api";
 
 /** One measured shot from a reference video's analysis. */
@@ -36,8 +37,13 @@ export interface ShotAnalysis {
   isStill: boolean;
   /** Sparse relative-motion samples across the shot, RELATIVE TO THE SHOT'S
    *  OWN START (t=0 at shot start), scale 1.0 = same framing as the shot's
-   *  first frame. Optional — only present when isStill. */
-  motion?: { tMs: number; scale: number; rotationDeg: number; tx: number; ty: number }[];
+   *  first frame. Optional — only present when isStill. `solved` (default
+   *  true when omitted — a hand-built/synthetic sample is real by
+   *  construction) mirrors `AlignSample.solved`: false means the aligner
+   *  lost track and carried the previous value forward, not a genuine
+   *  reading — `fitBackground` (the Rust side) excludes those before
+   *  fitting. */
+  motion?: { tMs: number; scale: number; rotationDeg: number; tx: number; ty: number; solved?: boolean }[];
   look: {
     brightness: number; contrast: number; saturate: number; // 1.0 = unchanged
     vignetteStrength: number; // 0..1
@@ -216,25 +222,37 @@ async function placeRegion(layerId: number, shot: ShotAnalysis, region: ElementR
   return editKeyframes(layerId, shot.endMs, { x: cx, y: cy, scaleX: baseline * ratio, scaleY: baseline * ratio, easing: "linear" }, false);
 }
 
-/** Ken Burns from the shot's measured motion: 2 keyframes (start/end) at
- *  baseline × (sample scale / first sample scale), where baseline is the
- *  layer's OWN current scale (read from `p`) — the cover-fit the caller
- *  already applied via replaceLayerMedia before calling this, not a guess.
- *  Getting the RATIO between the shot's first/last measured scale right is
- *  what actually reproduces the reference's zoom; multiplying it onto the
- *  real fit baseline (rather than an arbitrary 1.0) means the result covers
- *  the frame at every keyframe, not just at time zero. Returns undefined
- *  when there's nothing to key (not still, or too few samples), so the
- *  caller leaves the layer at its flat cover-fit scale. */
+/** Ken Burns from the shot's measured motion, via the 2.5 fitter
+ *  (`fit_background`) rather than a crude first/last-sample straight line —
+ *  a multi-segment scale curve with real recovered easing (including
+ *  overshoot), scaled onto `baseline` (the layer's OWN current scale, read
+ *  from `p` — the cover-fit the caller already applied via
+ *  replaceLayerMedia before calling this, not a guess) so the result covers
+ *  the frame at every keyframe, not just at time zero. Scale only for now —
+ *  the fitter also recovers rotation/pan, but those are in `align_shot`'s
+ *  relative analysis-pixel space and need the anchor/centre composition
+ *  into this engine's absolute comp-space transform (documented, not yet
+ *  built — see STATUS-gateA-aligner.md's "Not done"), so applying them here
+ *  would be a guess, not a measurement. Returns undefined when there's
+ *  nothing to key (not still, or too few samples), so the caller leaves the
+ *  layer at its flat cover-fit scale. */
 async function animateMotion(layerId: number, shot: ShotAnalysis, p: Project): Promise<Project | undefined> {
   if (!shot.isStill || !shot.motion || shot.motion.length < 2) return undefined;
   const layer = p.layers.find((l) => l.id === layerId);
   const baseline = layer?.transform.scaleX.default ?? 1.0;
-  const first = shot.motion[0];
-  const last = shot.motion[shot.motion.length - 1];
-  const ratio = first.scale !== 0 ? last.scale / first.scale : 1;
-  await editKeyframes(layerId, shot.startMs, { scaleX: baseline, scaleY: baseline, easing: "linear" }, true);
-  return editKeyframes(layerId, shot.endMs, { scaleX: baseline * ratio, scaleY: baseline * ratio, easing: "linear" }, false);
+  const samples = shot.motion.map((m) => ({ ...m, solved: m.solved ?? true }));
+  const spanMs = shot.endMs - shot.startMs;
+  const fitted = await fitBackground(samples, 0, spanMs);
+  if (fitted.scale.length < 2) return undefined;
+  for (const [i, key] of fitted.scale.entries()) {
+    p = await editKeyframes(
+      layerId,
+      shot.startMs + key.timeMs,
+      { scaleX: baseline * key.value, scaleY: baseline * key.value, easing: key.easing },
+      i === 0
+    );
+  }
+  return p;
 }
 
 /** Fade in/out via opacity keyframes, from the shot's measured fade durations. */

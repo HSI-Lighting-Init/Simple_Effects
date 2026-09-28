@@ -25,6 +25,7 @@ import type { AuditReport } from "../bindings/AuditReport";
 import type { AlignSample } from "../bindings/AlignSample";
 import type { Cut } from "../bindings/Cut";
 import type { TemplateAnalysis } from "../bindings/TemplateAnalysis";
+import type { FittedMotion } from "../bindings/FittedMotion";
 
 export const getProject = () => invoke<Project>("get_project");
 
@@ -832,6 +833,11 @@ export const auditExport = (path: string, verbose = false) =>
  *  `AlignSample`'s doc (generated from the Rust side) for what's returned. */
 export const alignReference = (path: string, startMs: number, endMs: number, refMs?: number, sampleEveryMs?: number) =>
   invoke<AlignSample[]>("align_reference", { path, startMs, endMs, refMs: refMs ?? null, sampleEveryMs: sampleEveryMs ?? null });
+
+/** Phase 2.5: key down alignReference's dense per-frame samples into a
+ *  small set of keyframes with easing (one Vec per channel). */
+export const fitBackground = (samples: AlignSample[], startMs: number, endMs: number) =>
+  invoke<FittedMotion>("fit_background", { samples, startMs, endMs });
 
 /** Phase 2.2: find shot/cut boundaries in a video. */
 export const detectCuts = (path: string) => invoke<Cut[]>("detect_cuts", { path });

@@ -656,7 +656,8 @@ impl LetterTransform {
     };
 }
 
-/// Map an eased parameter `u` in [0, 1].
+/// Map an eased parameter `u` in [0, 1]. A `Bezier` easing's output is NOT
+/// re-clamped here — `sample_track` relies on that to let it overshoot.
 pub(crate) fn ease(easing: Easing, u: f32) -> f32 {
     let u = u.clamp(0.0, 1.0);
     match easing {
@@ -667,7 +668,46 @@ pub(crate) fn ease(easing: Easing, u: f32) -> f32 {
         Easing::EaseInOut => u * u * (3.0 - 2.0 * u),
         // Step: handled before this is called (value holds at the left key).
         Easing::Hold => 0.0,
+        Easing::Bezier { x1, y1, x2, y2 } => cubic_bezier(x1, y1, x2, y2, u),
     }
+}
+
+/// CSS-style `cubic-bezier(x1,y1,x2,y2)` timing: solve for the curve
+/// parameter `t` where the X component equals `x` (Newton's method, a few
+/// iterations are always enough for a monotonic cubic), then return the Y
+/// component at that `t`. Mirrors `cubicBezier` in
+/// `src/lib/transitions/spring.ts` (same algorithm, TS-side for transitions)
+/// — keep the two in sync.
+pub(crate) fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let ax = 3.0 * x1 - 3.0 * x2 + 1.0;
+    let bx = 3.0 * x2 - 6.0 * x1;
+    let cx = 3.0 * x1;
+    let ay = 3.0 * y1 - 3.0 * y2 + 1.0;
+    let by = 3.0 * y2 - 6.0 * y1;
+    let cy = 3.0 * y1;
+    let bx3 = |t: f32| ((ax * t + bx) * t + cx) * t;
+    let by3 = |t: f32| ((ay * t + by) * t + cy) * t;
+    let dbx = |t: f32| (3.0 * ax * t + 2.0 * bx) * t + cx;
+
+    let mut t = x;
+    for _ in 0..8 {
+        let err = bx3(t) - x;
+        if err.abs() < 1e-5 {
+            break;
+        }
+        let d = dbx(t);
+        if d.abs() < 1e-6 {
+            break;
+        }
+        t -= err / d;
+    }
+    by3(t.clamp(0.0, 1.0))
 }
 
 /// Sample one track at comp time `t_ms`.
@@ -1487,6 +1527,50 @@ mod tests {
         };
         assert_eq!(sample_track(&t, 999), 10.0);
         assert_eq!(sample_track(&t, 1000), 20.0);
+    }
+
+    #[test]
+    fn bezier_endpoints_match_linear() {
+        // Every cubic-bezier easing starts at (0,0) and ends at (1,1),
+        // regardless of the control points.
+        let e = Easing::Bezier { x1: 0.34, y1: 1.56, x2: 0.64, y2: 1.0 };
+        assert_eq!(ease(e, 0.0), 0.0);
+        assert_eq!(ease(e, 1.0), 1.0);
+    }
+
+    #[test]
+    fn bezier_can_overshoot_past_one() {
+        // A CSS "ease out back" preset (cubic-bezier(0.34, 1.56, 0.64, 1)):
+        // the value should swing past 1.0 before settling, not clamp to it.
+        let e = Easing::Bezier { x1: 0.34, y1: 1.56, x2: 0.64, y2: 1.0 };
+        let samples: Vec<f32> = (1..20).map(|i| ease(e, i as f32 / 20.0)).collect();
+        assert!(samples.iter().any(|&y| y > 1.0), "expected an overshoot above 1.0, got {samples:?}");
+    }
+
+    #[test]
+    fn bezier_overshoot_reaches_the_keyframe_value_not_just_the_curve() {
+        // sample_track must NOT re-clamp the eased factor — the whole point
+        // of an overshoot easing is that the sampled value itself swings
+        // past the target keyframe before settling back.
+        let t = Track {
+            default: 0.0,
+            keys: vec![
+                Keyframe { time_ms: 0, value: 0.0, easing: Easing::Bezier { x1: 0.34, y1: 1.56, x2: 0.64, y2: 1.0 } },
+                Keyframe { time_ms: 1000, value: 100.0, easing: Easing::Linear },
+            ],
+        };
+        let peak = (1..20).map(|i| sample_track(&t, i * 50)).fold(0.0f32, f32::max);
+        assert!(peak > 100.0, "expected the sampled value to overshoot past 100.0, got peak {peak}");
+    }
+
+    #[test]
+    fn bezier_matches_linear_for_the_identity_control_points() {
+        // cubic-bezier(0,0,1,1) degenerates to a straight line.
+        let e = Easing::Bezier { x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0 };
+        for i in 0..=10 {
+            let u = i as f32 / 10.0;
+            assert!((ease(e, u) - u).abs() < 1e-4, "u={u} gave {}", ease(e, u));
+        }
     }
 
     #[test]
