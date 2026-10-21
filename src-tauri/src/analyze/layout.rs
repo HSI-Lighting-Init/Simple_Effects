@@ -242,7 +242,7 @@ fn track_region(frames: &[GrayImage], times_ms: &[u32], x: u32, y: u32, w: u32, 
         if solved.is_some() {
             solved_count += 1;
         }
-        let p = solved.unwrap_or(prev);
+        let p = solved.map(|f| f.params).unwrap_or(prev);
         samples.push(RegionMotionSample { t_ms: times_ms[i], scale: p.scale(), rotation_deg: p.rotation_rad().to_degrees(), tx: p.tx, ty: p.ty });
         prev = p;
     }

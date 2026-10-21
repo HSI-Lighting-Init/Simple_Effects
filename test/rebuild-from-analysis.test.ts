@@ -173,6 +173,52 @@ describe("rebuildFromAnalysis (mock engine)", () => {
     }
   });
 
+  it("composes rotation/pan onto the layer's own anchor, translation rescaled by compW/256", async () => {
+    const original = fake.api.fitBackground;
+    fake.api.fitBackground = async () => ({
+      scale: [
+        { timeMs: 0, value: 1.0, easing: "linear" as const },
+        { timeMs: 3000, value: 1.2, easing: "linear" as const },
+      ],
+      rotationDeg: [
+        { timeMs: 0, value: 0, easing: "linear" as const },
+        { timeMs: 3000, value: 5, easing: "linear" as const },
+      ],
+      tx: [
+        { timeMs: 0, value: 0, easing: "linear" as const },
+        { timeMs: 3000, value: 10, easing: "linear" as const },
+      ],
+      ty: [
+        { timeMs: 0, value: 0, easing: "linear" as const },
+        { timeMs: 3000, value: 20, easing: "linear" as const },
+      ],
+    });
+    try {
+      const analysis = base([
+        {
+          index: 0, startMs: 0, endMs: 3000, isStill: true,
+          motion: [
+            { tMs: 0, scale: 1.0, rotationDeg: 0, tx: 0, ty: 0 },
+            { tMs: 3000, scale: 1.2, rotationDeg: 5, tx: 10, ty: 20 },
+          ],
+          look: flatLook,
+        },
+      ]);
+      // base()'s default comp width is 1080; MOTION_ANALYSIS_SHORT_SIDE is
+      // 256 — k = 1080/256 = 4.21875. The fake layer's own anchor (x/y/
+      // rotation) defaults to 0, so the composed value at t=3000 is exactly
+      // k * the fitted tx/ty/rotationDeg.
+      const r = await rebuildFromAnalysis(analysis, ["a.png"], io, "out.mp4");
+      const layer = r.project.layers.find((l) => l.kind.kind === "image")!;
+      const at3000 = (track: { timeMs: number; value: number }[]) => track.find((k) => k.timeMs === 3000)!.value;
+      expect(at3000(layer.transform.x.keys as never)).toBeCloseTo((1080 / 256) * 10, 5);
+      expect(at3000(layer.transform.y.keys as never)).toBeCloseTo((1080 / 256) * 20, 5);
+      expect(at3000(layer.transform.rotation.keys as never)).toBeCloseTo(5, 5);
+    } finally {
+      fake.api.fitBackground = original;
+    }
+  });
+
   it("leaves scaleX unkeyed when the shot isn't still", async () => {
     const analysis = base([{ index: 0, startMs: 0, endMs: 2000, isStill: false, look: flatLook }]);
     const r = await rebuildFromAnalysis(analysis, ["a.png"], io, "out.mp4");

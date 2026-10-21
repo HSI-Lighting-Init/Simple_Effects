@@ -6,7 +6,19 @@
  * for how to compose these onto the reference frame's own absolute
  * transform).
  */
-export type AlignSample = { tMs: number, scale: number, rotationDeg: number, tx: number, ty: number, 
+export type AlignSample = { 
+/**
+ * Shot-relative (0 at the shot's own `start_ms`) in every externally-
+ * visible use of this struct (the `align_reference` command, `analyze_
+ * reference`'s `ShotAnalysis.motion`) — `align_shot` itself internally
+ * works in absolute video time and each of those callers converts
+ * before handing samples out, so nothing outside this module ever sees
+ * absolute time here. Keep it that way: a caller that mixed the two
+ * once fed `fit_background` absolute times against a relative span and
+ * silently corrupted an entire scoring run (docs/STATUS-phase2-fitter-
+ * scoring.md) — the bug wasn't obvious from the data alone.
+ */
+tMs: number, scale: number, rotationDeg: number, tx: number, ty: number, 
 /**
  * True for the reference frame itself (always identity by construction)
  * and for any timestamp the aligner couldn't solve (too little texture,

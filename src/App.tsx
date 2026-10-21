@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import Konva from "konva";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open, save, ask } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
@@ -15,6 +15,8 @@ import {
   getAudioMeta,
   getVideoPoster,
   seekVideosForFrame,
+  setSeekProxies,
+  videoStartSec,
   IMPORT_EXTENSIONS,
 } from "./lib/media";
 import { hasAudio, waveformPng } from "./lib/waveform";
@@ -33,6 +35,7 @@ import { appLocalDataDir, desktopDir, join } from "@tauri-apps/api/path";
 import StylePacksDialog from "./components/StylePacksDialog";
 import { applyStylePack, stylePackById, type StyleResult } from "./lib/stylePacks";
 import TemplateDialog, { type TemplateSpec } from "./components/TemplateDialog";
+import TemplateExtractorDialog from "./components/TemplateExtractorDialog";
 import VideoTemplateDialog, { VIDEO_STYLES } from "./components/VideoTemplateDialog";
 import MixedTemplateDialog, { MIXED_TEMPLATES } from "./components/MixedTemplateDialog";
 import BeforeAfterDialog from "./components/BeforeAfterDialog";
@@ -130,6 +133,8 @@ import {
   dropImageOnShape,
   editKeyframes,
   exportVideo,
+  exportUploadChunk,
+  makeSeekProxy,
   keyDecal,
   keyEffect,
   removeEffect,
@@ -209,17 +214,31 @@ import type { TextLayerStyles } from "./bindings/TextLayerStyles";
 import type { ShapeParams } from "./components/Inspector";
 import "./App.css";
 
-/** Read a Blob into a base64 string (no data-URL prefix) for the Rust file save. */
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const s = reader.result as string;
-      resolve(s.slice(s.indexOf(",") + 1));
-    };
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
+/** Stream a Blob to Rust in raw 8 MiB slices; returns its length. (The old
+ *  Blob → base64 string → JSON route returned "" for blobs over ~384 MB, which
+ *  reached ffmpeg as a 0-byte input: "Invalid data found when processing input".) */
+async function uploadBlob(blob: Blob): Promise<number> {
+  const SLICE = 8 * 1024 * 1024;
+  for (let off = 0; off < blob.size; off += SLICE)
+    await exportUploadChunk(new Uint8Array(await blob.slice(off, off + SLICE).arrayBuffer()), off, off === 0);
+  return blob.size;
+}
+
+/** localStorage flag: an autosave is waiting to be offered on the next launch. */
+const AUTOSAVE_PENDING_KEY = "sefx.autosavePending";
+function autosaveFlag(): boolean {
+  try {
+    return localStorage.getItem(AUTOSAVE_PENDING_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function setAutosaveFlag(on: boolean) {
+  try {
+    localStorage.setItem(AUTOSAVE_PENDING_KEY, on ? "1" : "0");
+  } catch {
+    /* best effort */
+  }
 }
 
 /** Last path segment (Windows or POSIX separators) — the file's display name. */
@@ -313,22 +332,6 @@ async function preloadImages(urls: string[]): Promise<void> {
   );
 }
 
-export default function App() {
-  const [project, setProject] = useState<Project | null>(null);
-  const [resolved, setResolved] = useState<Record<number, ResolvedLayer>>({});
-  // The live Konva preview Stage — used to force a synchronous redraw per frame
-  // during deterministic export (the `Konva.stages` global can be empty under
-  // bundler dedup, so we draw THIS stage directly instead).
-  const previewStageRef = useRef<Konva.Stage | null>(null);
-  const [images, setImages] = useState<Record<string, string>>({});
-  // A capture loop (renderFrames/onExport) needs the CURRENT map at the moment
-  // it runs, not whatever it closed over when created — mirror into a ref like
-  // every other piece of frequently-changing state this file reads from a
-  // callback (projectRef, timeRef, ...). Closing over stale `images` directly
-  // was one of the handoff §11.1 investigation's leads.
-  const imagesRef = useRef(images);
-  imagesRef.current = images;
-  const [fonts, setFonts] = useState<string[]>([]);
 // One text row per layer instead of the whole project JSON (the .sefx has that):
 // a full dump alone is ~48k chars and pushed the events past the 50k chat-paste
 // limit, so every pasted recording lost its tail.
@@ -347,6 +350,22 @@ function recProject(p: Project | null) {
   };
 }
 
+export default function App() {
+  const [project, setProject] = useState<Project | null>(null);
+  const [resolved, setResolved] = useState<Record<number, ResolvedLayer>>({});
+  // The live Konva preview Stage — used to force a synchronous redraw per frame
+  // during deterministic export (the `Konva.stages` global can be empty under
+  // bundler dedup, so we draw THIS stage directly instead).
+  const previewStageRef = useRef<Konva.Stage | null>(null);
+  const [images, setImages] = useState<Record<string, string>>({});
+  // A capture loop (renderFrames/onExport) needs the CURRENT map at the moment
+  // it runs, not whatever it closed over when created — mirror into a ref like
+  // every other piece of frequently-changing state this file reads from a
+  // callback (projectRef, timeRef, ...). Closing over stale `images` directly
+  // was one of the handoff §11.1 investigation's leads.
+  const imagesRef = useRef(images);
+  imagesRef.current = images;
+  const [fonts, setFonts] = useState<string[]>([]);
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   // Resizable panels: media-bin width, inspector width, timeline height, and the
@@ -410,6 +429,7 @@ function recProject(p: Project | null) {
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [showScenario, setShowScenario] = useState(false);
   const [showTemplate, setShowTemplate] = useState(false);
+  const [showTemplateExtractor, setShowTemplateExtractor] = useState(false);
   const [videoStyle, setVideoStyle] = useState<string | null>(null);
   const [mixedTemplate, setMixedTemplate] = useState<string | null>(null);
   const [showBeforeAfter, setShowBeforeAfter] = useState(false);
@@ -436,6 +456,27 @@ function recProject(p: Project | null) {
   const dirtyRef = useRef(false);
   const pristineRef = useRef(true); // suppress the dirty mark on load/open
   const [showClosePrompt, setShowClosePrompt] = useState(false);
+  // Was an autosave left pending by the last session? Read once, on the first
+  // render, before anything can clear the flag.
+  const [autosaveAtLaunch] = useState(autosaveFlag);
+  // Every "this is now saved / freshly loaded" transition goes through here. The
+  // ref and the autosave flag are updated synchronously, not by an effect: Save
+  // & close destroys the window right after saving, before effects run, which
+  // used to leave a stale autosave flagged for the next launch to resurrect.
+  const markClean = useCallback(() => {
+    dirtyRef.current = false;
+    setDirty(false);
+    setAutosaveFlag(false);
+  }, []);
+  // Ask before replacing a project that has unsaved changes. Uses the dialog
+  // plugin's async `ask`: the plugin swaps window.confirm for an async version
+  // whose Promise is always truthy, so `if (!window.confirm(...))` never blocked.
+  const confirmDiscard = useCallback(
+    async (then: string) =>
+      !dirtyRef.current ||
+      (await ask(`Discard unsaved changes and ${then}?`, { title: "Simple Effects", kind: "warning", okLabel: "Discard", cancelLabel: "Cancel" })),
+    []
+  );
   // Layer copy/paste clipboard (holds the copied layer ids — supports multi-select).
   const copiedLayersRef = useRef<number[]>([]);
   // Razor (cut) tool: when on, clicking a timeline block splits it there.
@@ -864,6 +905,22 @@ function recProject(p: Project | null) {
     [resolveImages, loadProjectMedia, seek, recordAction]
   );
 
+  // "Extract template from video" (Templates menu, Phase 7): templateExtractor.ts
+  // already built and committed the new project via rebuildFromAnalysis's own
+  // RebuildIO (checkpoint/commit through buildAgentCtx) - just load it into the
+  // live UI the same way every other onCreate* handler here does.
+  const onTemplateExtracted = useCallback(
+    async (result: { project: Project }) => {
+      setProject(result.project);
+      durationRef.current = result.project.durationMs;
+      await resolveImages(result.project);
+      await loadProjectMedia(result.project);
+      seek(0);
+      recordAction("template_extracted", { shots: result.project.layers.length });
+    },
+    [resolveImages, loadProjectMedia, seek, recordAction]
+  );
+
   // Build a full slideshow-video template (Templates menu): the backend sequences
   // the images with the style's transitions + Ken Burns + grade + captions; here
   // we load the new media and jump to the start.
@@ -1150,6 +1207,8 @@ function recProject(p: Project | null) {
       setProject(p);
       durationRef.current = p.durationMs;
       setSelectedId(null);
+      setSelectedIds([]);
+      setGroupPath([]); // the backend cleared its group stack when it loaded the file
       setDecomposeId(null);
       await resolveImages(p);
       await loadProjectMedia(p);
@@ -1251,28 +1310,17 @@ function recProject(p: Project | null) {
 
   // Autosave: every 30s while there are unsaved changes, write the whole project
   // to the app's data folder so a crash or an app update never loses work; the
-  // next launch offers to restore it. Normal saves clear the pending flag.
-  useEffect(() => {
-    if (localStorage.getItem("sefx.autosavePending") !== "1") return;
-    void (async () => {
-      const path = await join(await appLocalDataDir(), "autosave.sefx");
-      const [exists] = await filterExistingFiles([path]);
-      if (exists && window.confirm("Simple Effects auto-saved unsaved work from your last session. Restore it?"))
-        await restoreProjectFrom(path);
-    })();
-    // Launch-only check; must run before the dirty effect below clears the flag.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  useEffect(() => {
-    if (!dirty) localStorage.setItem("sefx.autosavePending", "0");
-  }, [dirty]);
+  // next launch offers to restore it (startup effect, next to loadProjectPath).
+  // Save / Open / New / "Close without saving" clear the pending flag.
   useEffect(() => {
     const id = window.setInterval(async () => {
       if (!dirtyRef.current || exportingRef.current) return;
       try {
         if ((await navDepth()) > 0) return; // inside a group — a save now would be partial
         await saveProjectFile(await join(await appLocalDataDir(), "autosave.sefx"));
-        localStorage.setItem("sefx.autosavePending", "1");
+        // A save that landed while this write was in flight already cleared the
+        // flag; don't raise it again for work that's now on disk.
+        if (dirtyRef.current) setAutosaveFlag(true);
       } catch {
         /* best effort */
       }
@@ -1309,7 +1357,7 @@ function recProject(p: Project | null) {
     await saveProjectFile(path);
     filePathRef.current = path;
     setFileName(baseName(path));
-    setDirty(false);
+    markClean();
     return path;
   }, []);
 
@@ -2646,7 +2694,7 @@ function recProject(p: Project | null) {
       await saveProjectFile(path);
       filePathRef.current = path;
       setFileName(baseName(path));
-      setDirty(false);
+      markClean();
       recordAction("save_as", { path });
       return true;
     } catch (e) {
@@ -2663,7 +2711,7 @@ function recProject(p: Project | null) {
     try {
       await ensureRootScope(); // save the whole tree, not a group's inner scope
       await saveProjectFile(filePathRef.current);
-      setDirty(false);
+      markClean();
       recordAction("save", { path: filePathRef.current });
       return true;
     } catch (e) {
@@ -2675,6 +2723,7 @@ function recProject(p: Project | null) {
   // Close-confirmation prompt actions.
   const closeWithoutSaving = useCallback(async () => {
     setShowClosePrompt(false);
+    setAutosaveFlag(false); // discarded on purpose; don't offer it back next launch
     await getCurrentWindow().destroy();
   }, []);
   const saveThenClose = useCallback(async () => {
@@ -2692,11 +2741,13 @@ function recProject(p: Project | null) {
         const p = await openProjectFile(path);
         pristineRef.current = true; // a freshly-opened file is not "unsaved"
         setProject(p);
-        setDirty(false);
+        markClean();
         durationRef.current = p.durationMs;
         filePathRef.current = path;
         setFileName(baseName(path));
         setSelectedId(null);
+        setSelectedIds([]);
+        setGroupPath([]); // the backend cleared its group stack when it loaded the file
         setDecomposeId(null);
         await resolveImages(p);
         await loadProjectMedia(p);
@@ -2713,17 +2764,19 @@ function recProject(p: Project | null) {
   const doOpenProject = useCallback(async () => {
     const selected = await open({ multiple: false, filters: SEFX_FILTER });
     if (typeof selected !== "string") return;
+    // Open used to replace the project with no unsaved-changes check at all.
+    if (!(await confirmDiscard("open another project"))) return;
     await loadProjectPath(selected);
-  }, [loadProjectPath]);
+  }, [loadProjectPath, confirmDiscard]);
 
   // Start a fresh, blank project. Warns first if there are unsaved changes.
   const doNewProject = useCallback(async () => {
-    if (dirty && !window.confirm("Discard unsaved changes and start a new project?")) return;
+    if (!(await confirmDiscard("start a new project"))) return;
     stop();
     const p = await newProject();
     pristineRef.current = true; // a brand-new project isn't "unsaved" yet
     setProject(p);
-    setDirty(false);
+    markClean();
     durationRef.current = p.durationMs;
     filePathRef.current = null; // unbound from any file → next Save prompts
     setFileName(null);
@@ -2738,19 +2791,41 @@ function recProject(p: Project | null) {
     await resolveImages(p);
     seek(0);
     recordAction("new_project", {});
-  }, [dirty, stop, resolveImages, seek, recordAction]);
+  }, [confirmDiscard, stop, resolveImages, seek, recordAction]);
 
-  // If the app was launched by double-clicking a .sefx file, open it on startup
-  // instead of showing the blank default project. Runs exactly once.
+  // Startup, exactly once: a double-clicked .sefx opens instead of the blank
+  // default project; otherwise offer last session's autosave. One effect on
+  // purpose: as two independent ones they raced, and the autosave (more IPC
+  // round-trips) landed AFTER the file the user had actually opened.
   const openedLaunchFile = useRef(false);
   useEffect(() => {
     if (openedLaunchFile.current) return;
     openedLaunchFile.current = true;
     void (async () => {
       const path = await takeLaunchFile();
-      if (path) await loadProjectPath(path);
+      if (path) {
+        await loadProjectPath(path); // also clears the autosave flag (markClean)
+        return;
+      }
+      if (!autosaveAtLaunch) return;
+      try {
+        const auto = await join(await appLocalDataDir(), "autosave.sefx");
+        const [exists] = await filterExistingFiles([auto]);
+        if (
+          exists &&
+          (await ask("Simple Effects auto-saved unsaved work from your last session. Restore it?", {
+            title: "Simple Effects",
+            kind: "info",
+            okLabel: "Restore",
+            cancelLabel: "Discard",
+          }))
+        )
+          await restoreProjectFrom(auto);
+      } finally {
+        setAutosaveFlag(false); // answered (or nothing to restore): one offer per crash
+      }
     })();
-  }, [loadProjectPath]);
+  }, [loadProjectPath, restoreProjectFrom, autosaveAtLaunch]);
 
   // Reflect the bound file name (and unsaved-changes dot) in the window title.
   useEffect(() => {
@@ -2851,6 +2926,28 @@ function recProject(p: Project | null) {
         const inMs = range ? Math.max(0, Math.min(range.inMs, p.durationMs)) : 0;
         const outMs = range ? Math.max(inMs + 1, Math.min(range.outMs, p.durationMs)) : p.durationMs;
         const duration = outMs - inMs;
+        // Short-GOP copies of the range's video clips, so each per-frame seek decodes
+        // a few frames instead of everything since the clip's last keyframe (see
+        // make_seek_proxy). Cached after the first export. Without ffmpeg, or if a
+        // clip fails, that clip renders from its original: still correct, just slower.
+        const proxies = new Map<string, string>();
+        const clipSrcs = [
+          ...new Set(
+            p.layers.flatMap((l) =>
+              l.kind.kind === "video" && !l.hidden && l.endMs > inMs && l.startMs < outMs ? [l.kind.src] : []
+            )
+          ),
+        ];
+        for (const [i, src] of clipSrcs.entries()) {
+          if (!exportingRef.current) break;
+          setExportMsg(`Preparing videos for export… ${i + 1}/${clipSrcs.length}`);
+          try {
+            proxies.set(src, await makeSeekProxy(src));
+          } catch (e) {
+            console.warn("seek proxy failed, using the original", src, e);
+          }
+        }
+        setSeekProxies(proxies);
         // Frame count for this render — used to calibrate the render-time estimate
         // shown in the export dialog on the next run.
         const totalFrames = Math.max(1, Math.ceil((duration / 1000) * fps));
@@ -2905,23 +3002,34 @@ function recProject(p: Project | null) {
           return new Blob(chunks, { type: mime });
         };
 
-        // Deterministic path: render each frame, encode with an exact timestamp.
-        let blob: Blob | null = null;
+        // Deterministic path: render each frame, encode with an exact timestamp, and
+        // stream the WebM to Rust as it's muxed (never one in-memory blob / string).
+        let webmLen = 0;
+        // Only the debug probe needs the finished video back in JS.
+        let probeBlob: Blob | null = null;
         // Diagnostic: the transition factor sampled per frame. If these vary but
         // the captured pixels don't, the freeze is in the capture/paint path, not
         // the evaluator. If they're constant, it's the backend/transition.
         const dbgFactors: (number | null)[] = [];
         if (isDeterministicSupported()) {
+          const probeChunks: { d: Uint8Array; pos: number }[] = [];
+          let firstSlice = true;
           try {
             setExportMsg("Rendering frames…");
             let lastPct = -1;
-            const bytes = await encodeDeterministicWebm({
+            webmLen = await encodeDeterministicWebm({
               canvas,
               width: p.width,
               height: p.height,
               fps,
               durationMs: duration,
               bitrate: encodeBitrate,
+              onData: async (d, pos) => {
+                if (probing) probeChunks.push({ d, pos });
+                const reset = firstSlice;
+                firstSlice = false;
+                await exportUploadChunk(d, pos, reset);
+              },
               renderFrame: async (relMs) => {
                 // The encoder counts from 0; shift into absolute comp time so a
                 // partial export renders the right section (inMs = 0 for a full comp).
@@ -2945,10 +3053,10 @@ function recProject(p: Project | null) {
                 dbgFactors.push(withTr?.transition ? withTr.transition.factor : null);
                 setResolved(map);
                 setTime(tMs);
-                // Seek every video layer to this exact source-time and wait for the
-                // decode, so the captured frame shows the right video content.
+                // Seek every on-screen video layer to this exact source-time and wait
+                // for the decode, so the captured frame shows the right video content.
                 const videoTargets = p.layers
-                  .filter((l) => l.kind.kind === "video")
+                  .filter((l) => l.kind.kind === "video" && map[l.id])
                   .map((l) => {
                     const k = l.kind.kind === "video" ? l.kind : null;
                     const durMs = k?.durationMs ?? 0;
@@ -2963,6 +3071,8 @@ function recProject(p: Project | null) {
                       : inMs / 1000 + elapsed * spd;
                     return {
                       layerId: l.id,
+                      src: k?.src ?? "",
+                      startSec: videoStartSec(inMs, spd, reverse, l.startMs, l.endMs),
                       timeSec: durMs > 0 ? Math.min(Math.max(0, wanted), durMs / 1000 - 0.001) : Math.max(0, wanted),
                     };
                   });
@@ -2987,18 +3097,37 @@ function recProject(p: Project | null) {
               onFlush: () => setExportMsg("Finalizing video…"),
               shouldAbort: () => !exportingRef.current,
             });
-            blob = new Blob([bytes], { type: "video/webm" });
+            if (probing) {
+              const whole = new Uint8Array(webmLen);
+              for (const c of probeChunks) whole.set(c.d, c.pos);
+              probeBlob = new Blob([whole], { type: "video/webm" });
+            }
           } catch (e) {
-            // Don't fail silently: a swallowed error here means we fall back to
-            // the realtime capture, which freezes when the main thread is busy —
-            // exactly the "single repeated frame" symptom. Surface it loudly so
-            // it's diagnosable instead of masquerading as a broken effect.
-            console.error("deterministic export failed; falling back to realtime capture", e);
-            setExportMsg(`Frame-accurate export failed (${e}) — using realtime capture…`);
-            blob = null;
+            // The realtime capture can't keep up wherever a transition or effect is
+            // heavy: those frames repeat (the "frozen transitions" symptom), and a
+            // failed capture hands ffmpeg an empty file. Falling back used to be
+            // silent (a status line the next message overwrote), so a failed
+            // frame-accurate render quietly turned into a frozen one. Say so and let
+            // the user decide; unattended (agent/MCP) exports just fail.
+            console.error("deterministic export failed", e);
+            const useRealtime =
+              !silent &&
+              (await ask(
+                `Frame-accurate export failed:\n${e}\n\nThe realtime fallback can freeze or drop frames wherever a transition or effect is heavy. Use it anyway?`,
+                { title: "Simple Effects", kind: "warning", okLabel: "Use realtime capture", cancelLabel: "Cancel export" }
+              ));
+            if (!useRealtime) {
+              if (silent) throw e;
+              return; // the user saw the error and declined the fallback
+            }
+            webmLen = 0;
           }
         }
-        if (!blob) blob = await realtimeCapture();
+        if (!webmLen) {
+          const blob = await realtimeCapture();
+          probeBlob = blob;
+          webmLen = await uploadBlob(blob);
+        }
 
         // Decode the produced video and probe its real frames (output trace).
         if (probing) {
@@ -3019,7 +3148,7 @@ function recProject(p: Project | null) {
           });
           setExportMsg("Analysing output video…");
           try {
-            await analyzeOutputVideo(blob);
+            if (probeBlob) await analyzeOutputVideo(probeBlob);
           } catch (e) {
             console.warn("output probe failed", e);
           }
@@ -3065,11 +3194,10 @@ function recProject(p: Project | null) {
               ? "Encoding MP4 (ffmpeg)…"
               : "Saving…"
         );
-        const base64 = await blobToBase64(blob);
         // MP4 transcode: in "bitrate" mode target the user's bitrate (size ≈
         // bitrate × duration); in "quality" mode use CRF from the compression
         // level (constant quality, variable size). WebM is copied through as-is.
-        await exportVideo(base64, path, format, rateMode, level, bitrate, audioTracks, duration);
+        await exportVideo(webmLen, path, format, rateMode, level, bitrate, audioTracks, duration);
         // Calibrate the render-time estimate: record how long this export took
         // per frame so the dialog can predict the next one more accurately.
         const msPerFrame = (performance.now() - renderStartedAt) / totalFrames;
@@ -3088,6 +3216,7 @@ function recProject(p: Project | null) {
         alert(`Export failed: ${e}`);
       } finally {
         exportingRef.current = false;
+        setSeekProxies(null); // back to the originals for editing
         setExporting(false);
         setFpsOverlay(null);
         setExportMsg("");
@@ -3968,6 +4097,7 @@ function recProject(p: Project | null) {
         { label: "Before / After…", onClick: () => setShowBeforeAfter(true) },
         { separator: true },
         { label: "🤖 AI: Scenario → Video…", onClick: () => setShowScenario(true) },
+        { label: "🤖 AI: Extract template from video…", onClick: () => setShowTemplateExtractor(true) },
         {
           label: bridgeOn ? "🔌 MCP bridge ON (127.0.0.1:8787)" : "🔌 AI: Enable MCP bridge (Claude Desktop / VS Code)…",
           onClick: () => void onEnableBridge(),
@@ -4582,6 +4712,10 @@ function recProject(p: Project | null) {
           onDone={() => setShowExportDialog(true)}
           onClose={() => setShowScenario(false)}
         />
+      )}
+
+      {showTemplateExtractor && (
+        <TemplateExtractorDialog buildIO={buildAgentCtx} onExtracted={onTemplateExtracted} onClose={() => setShowTemplateExtractor(false)} />
       )}
 
       {showTemplate && (

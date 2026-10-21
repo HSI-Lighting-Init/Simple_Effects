@@ -251,15 +251,29 @@ fn select_key_times(candidates: &[u32], times_ms: &[u32], channels: &[Channel], 
     chosen.into_iter().map(|i| times[i]).collect()
 }
 
-/// A channel's own value range (max - min), floored at 1 so a flat channel
-/// never divides by ~0. Channels are wildly different scales (pixels,
-/// degrees, a 1.0-ish scale factor) — every cross-channel comparison in this
-/// module (curvature ranking, and here) normalizes by this first so `lambda`
-/// means the same thing regardless of which channels were passed in.
+/// A channel's own value range (max - min), floored at 1 so a flat (or
+/// near-flat) channel never divides by ~0. Channels are wildly different
+/// scales (pixels, degrees, a 1.0-ish scale factor) — every cross-channel
+/// comparison in this module (curvature ranking, and here) normalizes by
+/// this first so `lambda` means the same thing regardless of which channels
+/// were passed in.
+///
+/// The floor matters more than it looks: found live (STATUS-phase2-fitter-
+/// scoring.md) that a `1e-6` floor isn't a floor in practice — a rotation
+/// channel that's really just measurement noise around a true constant 0°
+/// still has SOME real range (a few thousandths of a degree), comfortably
+/// clear of `1e-6`, so its tiny genuine noise got divided by its own tiny
+/// range and came out LARGER than a different channel's real, meaningful
+/// curvature — swamping the shared candidate signal and fitting a true
+/// 2-key scale curve as 5 spurious segments. `1.0` is a real floor: a
+/// channel has to move by a whole unit (a whole degree, a whole pixel, a
+/// full 1.0 of scale) before its own range even starts affecting the
+/// normalization, so near-constant noise on any channel reads as
+/// correctly negligible instead of amplified.
 fn channel_range(values: &[f32]) -> f32 {
     let max = values.iter().cloned().fold(f32::MIN, f32::max);
     let min = values.iter().cloned().fold(f32::MAX, f32::min);
-    (max - min).abs().max(1e-6)
+    (max - min).abs().max(1.0)
 }
 
 /// Total SSE across every channel for the segment [lo, hi], each channel
@@ -373,6 +387,73 @@ mod tests {
 
     fn times(n: usize, step_ms: u32) -> Vec<u32> {
         (0..n as u32).map(|i| i * step_ms).collect()
+    }
+
+    /// A REAL `align_reference` scale trace (synthetic-1.mp4, shot 1, 0-2732ms,
+    /// 100ms sampling) whose true generating curve is a plain 2-key EaseInOut
+    /// (docs/STATUS-phase2-fitter-scoring.md) — the fitter was over-segmenting
+    /// this into 5 keys with spurious bezier curves, which is what drove
+    /// Phase 2's scoring run to fail its easing/value targets. Real aligner
+    /// output, not a hand-built clean curve — this is exactly the case the
+    /// other tests here don't exercise.
+    fn real_scale_trace() -> (Vec<u32>, Vec<f32>) {
+        let raw: &[(u32, f32)] = &[
+            (0, 1.0), (100, 1.0004718), (200, 1.0018895), (300, 1.0038196), (400, 1.0066296),
+            (500, 1.0097805), (600, 1.013969), (700, 1.0185136), (800, 1.0235527), (900, 1.0290062),
+            (1000, 1.0345938), (1100, 1.0405719), (1200, 1.0466796), (1300, 1.052784), (1400, 1.0591416),
+            (1500, 1.0653685), (1600, 1.0713491), (1700, 1.0774868), (1800, 1.0832076), (1900, 1.0886694),
+            (2000, 1.093795), (2100, 1.0984797), (2200, 1.1026335), (2300, 1.106197), (2400, 1.1092585),
+            (2500, 1.1115957), (2600, 1.1131909), (2700, 1.1139065),
+        ];
+        (raw.iter().map(|&(t, _)| t).collect(), raw.iter().map(|&(_, v)| v).collect())
+    }
+
+    #[test]
+    fn a_real_smooth_curve_does_not_over_segment() {
+        let (t, values) = real_scale_trace();
+        let fitted = fit_channels(&t, &[Channel { name: "scale", values: &values }], (0, 2732), &[], &FitParams::default());
+        assert_eq!(fitted[0].len(), 2, "expected the real smooth easeInOut trace to fit with 2 keys, got {:?}", fitted[0]);
+        assert_eq!(fitted[0][0].easing, Easing::EaseInOut, "expected the correct named shape, not a spurious bezier, got {:?}", fitted[0][0].easing);
+    }
+
+    /// The actual bug (STATUS-phase2-fitter-scoring.md): fitting `scale` ALONE
+    /// (the test above) doesn't reproduce it — `fit_background` always fits
+    /// all 4 channels jointly (shared key times), and it was the near-flat
+    /// `rotationDeg` channel's tiny-range noise, summed into the SHARED
+    /// candidate signal, that dragged scale into 5 spurious segments too.
+    /// Real `align_reference` output for this exact shot, all 4 channels.
+    #[test]
+    fn a_near_flat_noisy_channel_does_not_contaminate_the_shared_candidates() {
+        let t: Vec<u32> = (0..28).map(|i| i * 100).collect();
+        let (_, scale) = real_scale_trace();
+        let rotation_deg: Vec<f32> = vec![
+            0.0, -0.00022036355, 0.0046842936, 0.004434095, 0.0010617874, 0.00013487882, -0.0012535721,
+            -0.00047858036, 0.0012007996, -0.0040239575, -0.004701379, 0.00061247684, -0.0011612793,
+            -0.002558786, 0.0013776177, -0.0039867763, -0.0050974954, -0.000033614262, 0.00014629541,
+            -0.0012216456, 0.0014621046, 0.0012782405, -0.0042223437, -0.0044137826, -0.004881033,
+            0.0004875836, 0.00019823317, 0.0003087241,
+        ];
+        let tx: Vec<f32> = vec![
+            0.0, 0.013323201, 0.02673637, 0.06126383, 0.13506496, 0.204912, 0.3222912, 0.40531147,
+            0.5101278, 0.64954716, 0.78279006, 0.8809974, 1.0233414, 1.1723281, 1.2952342, 1.4457195,
+            1.5933481, 1.7112478, 1.8230933, 1.9519691, 2.0510497, 2.1513946, 2.2706587, 2.3552797,
+            2.4199991, 2.4424336, 2.4842577, 2.5069888,
+        ];
+        let ty: Vec<f32> = vec![
+            0.0, 0.067362316, 0.23256156, 0.46456704, 0.8259925, 1.2607286, 1.7697289, 2.3424335,
+            2.9936123, 3.670619, 4.38235, 5.140123, 5.9117627, 6.6954436, 7.501597, 8.283303,
+            9.062752, 9.812229, 10.5651865, 11.239419, 11.89098, 12.4899025, 13.01129, 13.485416,
+            13.867592, 14.150407, 14.357943, 14.452115,
+        ];
+        let channels = [
+            Channel { name: "scale", values: &scale },
+            Channel { name: "rotationDeg", values: &rotation_deg },
+            Channel { name: "tx", values: &tx },
+            Channel { name: "ty", values: &ty },
+        ];
+        let fitted = fit_channels(&t, &channels, (0, 2732), &[], &FitParams::default());
+        assert_eq!(fitted[0].len(), 2, "expected scale to fit with 2 keys even alongside a noisy near-flat rotation channel, got {:?}", fitted[0]);
+        assert_eq!(fitted[0][0].easing, Easing::EaseInOut, "expected the correct named shape, got {:?}", fitted[0][0].easing);
     }
 
     #[test]

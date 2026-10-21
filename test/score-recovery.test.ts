@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { scoreRecovery } from "../src/lib/scoreRecovery";
+import { scoreRecovery, scoreKeyframeFit } from "../src/lib/scoreRecovery";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const track = (v: number, keys: { timeMs: number; value: number; easing?: string }[] = []) => ({
@@ -110,5 +110,56 @@ describe("scoreRecovery", () => {
     expect(r.matched).toBe(0);
     expect(r.missed).toBe(1);
     expect(r.extra).toBe(1);
+  });
+});
+
+describe("scoreKeyframeFit", () => {
+  const k = (timeMs: number, value: number, easing: any = "easeInOut") => ({ timeMs, value, easing });
+
+  it("scores an exact match as zero error, full easing accuracy", () => {
+    const truth = [k(0, 1.0, "linear"), k(1000, 1.3, "easeOut"), k(2000, 1.1, "linear")];
+    const fitted = [k(0, 1.0, "linear"), k(1000, 1.3, "easeOut"), k(2000, 1.1, "hold")]; // last key's easing is don't-care
+    const r = scoreKeyframeFit(truth, fitted, 100);
+    expect(r.missed).toBe(0);
+    expect(r.meanTimeErrorMs).toBe(0);
+    expect(r.meanValueError).toBe(0);
+    expect(r.easingAccuracy).toBe(1); // last key excluded, both middle keys correct
+  });
+
+  it("matches a key a couple frames off within tolerance, reports the real error", () => {
+    const truth = [k(0, 1.0), k(1000, 1.3)];
+    const fitted = [k(0, 1.0), k(1033, 1.32)]; // 1 frame off at 30fps, small value drift
+    const r = scoreKeyframeFit(truth, fitted, 100);
+    expect(r.missed).toBe(0);
+    expect(r.meanTimeErrorMs).toBeCloseTo(33 / 2, 5); // averaged with the exact t=0 match
+    const secondMatch = r.matches[1];
+    expect(secondMatch.timeErrorMs).toBe(33);
+    expect(secondMatch.valueError).toBeCloseTo(0.02, 5);
+  });
+
+  it("counts a truth key with nothing nearby as missed, not force-matched", () => {
+    const truth = [k(0, 1.0), k(1000, 1.3)];
+    const fitted = [k(0, 1.0)]; // fitter collapsed to a straight line, no key near 1000
+    const r = scoreKeyframeFit(truth, fitted, 100);
+    expect(r.missed).toBe(1);
+    expect(r.matches[1].matchedTimeMs).toBeNull();
+    expect(r.matches[1].easingCorrect).toBeNull();
+  });
+
+  it("scores a bezier-vs-bezier match as easing-correct regardless of exact control points", () => {
+    const truth = [k(0, 1.0, { bezier: { x1: 0.34, y1: 1.56, x2: 0.64, y2: 1.0 } }), k(1000, 1.3, "linear")];
+    const fitted = [k(0, 1.0, { bezier: { x1: 0.3, y1: 1.5, x2: 0.6, y2: 0.95 } }), k(1000, 1.3, "linear")];
+    const r = scoreKeyframeFit(truth, fitted, 100);
+    expect(r.matches[0].easingCorrect).toBe(true); // same KIND (bezier), params not compared
+  });
+
+  it("scores a wrong easing kind as incorrect", () => {
+    // Only t=0 is easing-rated (t=1000 is the last key, excluded); it's the
+    // only mismatch, so accuracy is 0/1, not diluted by the excluded key.
+    const truth = [k(0, 1.0, "easeOut"), k(1000, 1.3, "linear")];
+    const fitted = [k(0, 1.0, "linear"), k(1000, 1.3, "linear")];
+    const r = scoreKeyframeFit(truth, fitted, 100);
+    expect(r.matches[0].easingCorrect).toBe(false);
+    expect(r.easingAccuracy).toBe(0);
   });
 });

@@ -24,6 +24,75 @@ onto this one.
 - Cut detection becomes adaptive (2.2), checked against PySceneDetect during development.
 - "Identical" gets a measurable definition, and the schedule is about 3 months from here (§11).
 
+**v4.1 (2026-09-28) — Gate S runs on SAM 2.1 first.** Meta's approval for the SAM 3.1 weights is slow and
+uncertain (public reports range from weeks to months, some rejected). SAM 2.1 (Apache 2.0) needs no approval.
+SAM 3.1 drops in behind the same tools if access is granted.
+
+**v4.2 (2026-09-28) — access granted the same day.** Meta approved the "SAM3" gating group, so Gate S runs on
+SAM 3.1 as v4 planned, ahead of the remaining fitter items. SAM 2.1 is back to being the fallback only.
+
+**v4.3 (2026-09-28) — Gate S: SAM 3.1's video tracker is a no-go on this workstation.** It failed twice, the
+second time with CPU offload and one session per shot. Peak memory was 21–28 GB on a 12 GB card, so it spilled
+into system memory and took 20–30 minutes per concept per shot. "No available kernel" errors hit two
+concepts, and no objects were detected on any completed run, so the pipeline never produced a usable result.
+Per the user's standing rule, Phase 3 now tracks with **SAM 2.1**. Detection on key frames comes from SAM 3 in
+single-image mode if a quick test shows it works on this GPU; otherwise from SAM 2.1's automatic masks plus the
+`layout.rs` / `regions.rs` boxes, filtered by Claude. Every run starts with a single-frame smoke test.
+
+**v4.4 (2026-09-28) — the hybrid is Phase 3's design.** Both halves are confirmed on the RTX 5070:
+- **SAM 3 in single-image mode:** all concepts ran with no kernel errors, and it found real detections.
+- **SAM 2.1 video tracking:** a 57-frame shot in 3.3 s at 0.9 GB peak, versus 20–30 min per concept for SAM 3.1's tracker on the same clip.
+
+So detection runs on key frames with SAM 3 image mode, and tracking runs with SAM 2.1. Two findings shape the
+build:
+- **SAM 3 finds no text.** Text boxes come from Claude reading the key frame, cross-checked against
+  `regions.rs`.
+- **SAM 3 is sensitive to wording.** "photo card" found nothing where "photo" and "torn paper photo" did, so
+  Claude writes 2–3 phrasings per element type from the actual frame, and the boxes are merged with IoU-based
+  non-max suppression.
+
+Key frames per shot are the start, middle and end plus change-energy peaks. Each track is seeded where its
+element is most visible, propagated forwards and backwards, and deduplicated by mask IoU.
+
+**Gate S result (2026-09-28): Go on the architecture.** A simplified run of the hybrid (frame-0 detection,
+forward-only, greedy dedup) did the whole 28 s Envato reel in **133 s at 5.8 GB peak**. By eye, shot_05's stack
+of torn cards segmented correctly. The ≥ 80 % quality bar isn't established yet: text isn't built, the busy
+shot_11 over-segments (19 detections → 14 tracks, several duplicate slivers), and frame-0 detection misses
+later entrances. **It becomes Phase 3's first milestone:** after the fuller design, across all 15 shots, at least
+80 % of the visible cards and text lines are tracked and at most 10 % of tracks are duplicates, judged from
+overlay sheets. Expect about 4–6 min per reel once the extra key frames and backward passes are in.
+
+**v4.5 (2026-09-30) — the motion fitter is measured, and the aligner core is changing.**
+- **Scoring against the 20 synthetic references exposed three problems:** a fitter normalisation bug, an
+  absolute-vs-shot-relative time mix-up in the scoring harness, and an aligner that reported degenerate
+  solves as "solved".
+- **All three are fixed:** a single time convention (shot-relative, with a test), a plausibility gate on every
+  solve, retry-then-carry-forward on rejection, and transition frames trimmed from each shot.
+- **Results:** a new OpenCV core (SIFT + RANSAC → ECC, in the SAM Python environment) now meets the accuracy
+  checkpoint — scale 1.78 %, rotation 0.055°, in-core position 4.0 px (0.37 %). The Rust LK is less accurate
+  (scale 5.0 %) but solves more frames (44 % vs 26 %).
+- **Next:** a per-frame hybrid race (OpenCV vs LK, keeping the plausible lower-residual result), with
+  re-anchoring.
+- **Solve rate can't be judged yet:** every synthetic reference was built from the CCT folder, about 8 flat
+  illustrations (twins included), which is the worst case for alignment. The references are regenerated from
+  30–50 distinct, textured HSI photos (`SE-test-assets\photos\`), and the generator now dedupes its inputs.
+  Easing is parked until the solve rate is fixed.
+
+**v4.6 (2026-10-01) — Phase 3 quality milestone met on the user's review.** On the Envato reel, the full core
+tracks 46 card/logo elements and 45 text elements in about 12 min at 5.6 GB:
+- multi-key-frame detection, with 2–3 Claude phrasings per type (never "card") and a zero-detection guard;
+- bidirectional SAM 2.1 tracking and mask-IoU dedup;
+- text read by Claude and grouped before tracking; logo wordmarks as boxes.
+
+The user judged the gallery "tracked the shots well". The numeric bar (element count ≥ 95 %) moves to
+automated scoring against synthetic truth once the references are rebuilt from real photos. **Next is app
+integration, ending at Gate C:**
+- the Claude steps through the runtime model, with cost logged;
+- the SAM service started by the app, with its tools;
+- per-element fitting;
+- one layer per element in the rebuild;
+- then a side-by-side video of the original and the rebuild.
+
 **v3 — changes after the coding agent's review:**
 - Handoff §11.1 gets a definition of "confirmed fixed", and its checker (`extract_frames`, `audit_export`) moves from
   Phase 1 into Phase 0.2, so it exists before the fix is attempted.
@@ -413,6 +482,9 @@ the 2.5 fitter if time allows) and run it on the 20 synthetic references plus th
   initialized from the previous frame, Huber-weighted; skip transition windows. That transform *is* the
   layer's transform track, up to anchor/centre bookkeeping. This is Gate A's aligner, hardened.
   `// ponytail: hand-rolled LK (~250 lines); Python/OpenCV fallback if Gate A says no-go`.
+  **v4.5:** the LK alone missed on reliability. The core becomes a per-frame hybrid: OpenCV (SIFT + RANSAC →
+  ECC) raced against LK, both behind the plausibility gate, with frame-to-frame composition and re-anchoring
+  once the scale ratio to the anchor passes about 10–15 %.
 - **2.5 Keyframe fit** (shared by background and elements). Shared key times across channels (how editors
   key); DP over ≤ 4 segments from curvature-peak candidates plus annotated frames as preferred times; cost =
   SSE + λ·keys, λ tuned on ground truth. Per segment and channel, choose the easing from `ease()` by least
@@ -434,22 +506,46 @@ the 2.5 fitter if time allows) and run it on the 20 synthetic references plus th
 background scale ≤ 1 %, position ≤ 2 px at 1080 p, rotation ≤ 0.3°, key times ±2 frames, easing correct
 ≥ 80 %; fades ±2 frames; a 30 s reel analyzed in < 30 s.
 
+**v4.5 corrected targets.** The originals asked for more than the analysis can measure: one analysis pixel at
+256 px is about 4 px at 1080p, and equivalent easings with different labels look identical.
+- **Position:** ≤ 0.5 % of the comp's short side (about 5 px at 1080p), measured at keys inside each shot's
+  clean core. Span-edge keys are extrapolations, reported separately.
+- **Easing:** the fitted curve within 2 % of the channel's range of the truth curve over the segment, for
+  ≥ 80 % of segments.
+- **Solve rate:** reported by distance from the anchor.
+- Scale, rotation and key-time targets are unchanged.
+- Scored on references built from distinct, textured photos.
+
 **Gate B:** go/no-go on Phases 3–7, decided on these numbers plus the 3 real reels (§11). **v4:** Gate B
 still applies to photo slideshows; for the motion-graphics path, Gates S and C take its place.
 
 ## Phase 3 — Automatic decomposition with SAM 3.1 (~2–3 weeks)
 
-No manual marking. Claude names what's on screen, SAM 3.1 finds and tracks every instance on the GPU, and
+No manual marking. (v4.4: detection runs with SAM 3 image mode on key frames, text boxes come from Claude +
+`regions.rs`, and tracking runs with SAM 2.1; see the header's v4.4 note. Read "SAM 3.1" in this phase as "the
+SAM service".) Claude names what's on screen, SAM 3.1 finds and tracks every
+instance on the GPU, and
 the renderer checks the result.
 
-### Gate S — SAM 3.1 spike (~2–3 days, first)
+### Gate S — segmentation spike (~2–3 days, first)
 
-Set up a `uv`-managed Python environment (a PyTorch build with RTX 50-series support; accept Meta's licence
-to download the SAM 3.1 weights) and run SAM 3.1 on the Envato reel with a hand-written concept list
-("photo card", "headline text", "logo", "icon", "line", "shape").
+**Outcome (v4.3):** SAM 3.1's video tracker failed Gate S twice on the RTX 5070 (memory, speed, kernel errors,
+and zero detections). The gate reruns on **SAM 2.1** tracking, with the same criteria. Before any long run it
+needs a single-frame smoke test (objects found, no kernel errors, overlay saved), then one short shot with
+offload on, and only then all shots. Detection comes from SAM 3 single-image mode on key frames if a 10-minute
+test works, else from SAM 2.1's automatic mask generator plus the `layout.rs` / `regions.rs` boxes, filtered by
+Claude. If SAM 2.1 raises "No available kernel", allow torch's math and mem-efficient attention backends, or
+run that module in bf16. The v4.2 plan below is kept for the record.
+
+**v4.2:** runs on **SAM 3.1** (access granted on 2026-09-28). The environment already exists (`sam/`, with
+PyTorch on CUDA 12.8 working on the RTX 5070). Run it on the Envato reel with a concept list ("photo card",
+"headline text", "logo", "icon", "line", "shape"). If `facebook/sam3.1` still refuses the download, use
+`facebook/sam3` from the same approved group.
 - **Go:** at least 80 % of the cards and text lines are segmented with a stable ID through their visible
   span; a 30 s reel processes in about 2 minutes or less; it fits in the RTX 5070's 12 GB.
-- **No-go:** SAM 2 with box prompts from `layout.rs` / `regions.rs` and Claude, behind the same tools.
+- **No-go:** **SAM 2.1** (Apache 2.0) behind the same tools. It takes no text prompts, so its automatic mask
+  generator on key frames, plus boxes from `layout.rs` / `regions.rs` and Claude, feed the video predictor
+  after Claude keeps and labels the real elements. If that also fails, re-plan with the user before Phase 3.
 
 - **3.1 SAM service.** `sam/` (Python, `uv`), started on demand by the app — Rust spawns it and talks JSON
   over localhost, the same shape as the MCP bridge — so both front doors reach it through the app's own
@@ -636,9 +732,10 @@ Timing and keyframes live only in the `.sefx`.
 - **Compute:** a 30 s reel → analysis < 30 s, ≤ 10 s per transition boundary, < 10 s per element track; every
   call < 60 s.
 - **Tool count:** ≈ 50 tools → per-mode sets for the in-app agent (§5).
-- **GPU and licence:** SAM 3.1 needs the NVIDIA workstation (RTX 5070, 12 GB), so extraction happens there;
-  templates are portable and apply anywhere. Its weights come under Meta's own licence — read it before
-  shipping beyond this workstation. SAM 2 (Apache 2.0) is the fallback.
+- **GPU and licence:** segmentation needs the NVIDIA workstation (RTX 5070, 12 GB), so extraction happens there;
+  templates are portable and apply anywhere. SAM 3.1's weights are gated by Meta (access granted for this
+  account on 2026-09-28) and come under Meta's own licence — read it before shipping beyond this workstation.
+  Other machines would each need their own approval. SAM 2.1 (Apache 2.0) is the fallback.
 - **"Identical" has limits:** plugin-level effects (particles, Trapcode/Saber-style) and fonts or textures you
   don't have → nearest match + gap.
 - **Envato assets:** recreate motion, layout and timing; use your own fonts, textures and footage. The export

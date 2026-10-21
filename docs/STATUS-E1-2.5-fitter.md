@@ -117,14 +117,38 @@ the real reference video (fit_background alone was; the wiring around it is unit
 a mock, not yet confirmed end-to-end against real footage) — a reasonable next check, not
 done this pass.
 
+## Update — the anchor/centre composition (rotation + pan now applied)
+
+Built what `STATUS-gateA-aligner.md`'s "not done" and this doc's own last update both
+flagged: `align_shot`'s doc already specified the formula (`scale = ref_scale *
+sample.scale`, `rotation = ref_rotation + sample.rotationDeg`, `x/y = ref_x/y + k *
+sample.tx/ty`, `k = compW / analysis_width`) — turned it into code in `animateMotion`. The
+reference anchor is the layer's own current (cover-fit) x/y/scale/rotation, read from the
+project the same way `baseline` already was for scale — not the source video's real
+absolute framing, which the rebuild doesn't need to know. `k` uses a single shared constant
+(`MOTION_ANALYSIS_SHORT_SIDE = 256`, matching `align_shot`'s decode resolution) rather than
+a cross-language shared constant — no binding infra exists for that, and the Rust side
+already repeats the same literal in two places without one.
+
+One real simplification, not a bug: `editKeyframes` takes one `easing` per call, but the
+fitter computes an INDEPENDENT easing per channel (scale/rotation/tx/ty). Applying all four
+channels' own shapes would mean up to 4 calls per key-time instead of 1. Went with scale's
+easing for the whole compound key — usually the perceptually dominant parameter in a Ken
+Burns move — flagged with a `ponytail:` comment for whoever wants per-channel fidelity later.
+
+**Checked**: new test asserting the actual composed x/y/rotation values at a known compW
+(1080) and known fitted tx/ty/rotationDeg match `k * sample` exactly. 288/288 JS. Not
+re-verified with a full live `rebuild_from_analysis` run — hand-checked the formula against
+the REAL `fit_background` output captured earlier this session (scale 1.4169, rotation
+9.44°, tx -42.07, ty 14.18 at t=1700ms of the real reference's shot 1): composes to a ~180px
+pan and a real rotation on a 1080-wide comp — plausible numbers for a fast motion-graphics
+shot, not verified by eye against rendered frames.
+
 ## Not done
 
-- Rotation/pan from the fitter aren't applied yet — blocked on the anchor/centre composition
-  above, not on anything built this stage.
 - `placeRegion` (the grid/multi-motion per-region Ken Burns) still uses the old crude first/
   last-sample approach — only `animateMotion` (the plain single-shot path) was upgraded.
 - `score_recovery` doesn't score easing recovery yet — nothing to score against until
   something calls the fitter for real. Now has a real caller; add when it's worth measuring.
-- The anchor/centre composition from `align_shot`'s relative analysis-pixel space into this
-  engine's absolute comp-space transform — same gap `STATUS-gateA-aligner.md` already
-  flagged as "not done," unaffected by this stage.
+- Per-channel easing fidelity (see the `ponytail:` note above) — scale's shape currently
+  wins for x/y/rotation too.

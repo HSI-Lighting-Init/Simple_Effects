@@ -15,6 +15,7 @@ import { GPU_FX } from "../lib/effects";
 import { makeSyntheticReference } from "../lib/synthetic";
 import { rebuildFromAnalysis, type TemplateAnalysis as RebuildTemplateAnalysis } from "../lib/rebuildFromAnalysis";
 import { matchTransition } from "../lib/transitionMatch";
+import { submitPhrasings, submitTextLines, type ElementTypePhrasing, type TextLineReading } from "./extraction";
 import {
   setCompSize,
   setCompDuration,
@@ -37,6 +38,11 @@ import {
   fitBackground,
   detectCuts,
   analyzeReference,
+  saveProjectFile,
+  openProjectFile,
+  startSamService,
+  samServiceStatus,
+  stopSamService,
 } from "../lib/api";
 
 /** One selected source asset the agent may place. */
@@ -844,6 +850,82 @@ export const TOOLS: ToolDef[] = [
           },
         },
         {
+          name: "generate_phrasings",
+          description: "DEV ONLY (template decomposition). Submits one shot's distinct trackable element TYPES (typically photo/image cards, logos) and 2-3 varied SAM3-matchable phrasings per type, which YOU determine by looking at that shot's own key-frame images yourself first (read them directly - this tool does not read images or call any model, it only persists what you give it). Always include one plain literal noun per type; never use the bare word 'card' alone, SAM3 reliably fails to match it even on an obvious card. Merges into the phrasings.json-shaped file at outPath ({[shotName]: [{type, phrasings}]} — sam/phase3_core.py's own input shape), replacing any prior entry for this shot, plus an audit-trail line in extraction_submissions.jsonl.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              shotName: { type: "string" },
+              elementTypes: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: { type: { type: "string" }, phrasings: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 3 } },
+                  required: ["type", "phrasings"],
+                },
+                description: "empty array if this shot has no trackable image/logo elements - don't invent one to avoid an empty answer",
+              },
+              outPath: { type: "string", description: "absolute path to the phrasings.json-shaped file to merge into (created if missing)" },
+            },
+            required: ["shotName", "elementTypes", "outPath"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>) => {
+            const shotName = str(a.shotName);
+            const outPath = str(a.outPath);
+            if (!shotName) return err("shotName is required");
+            if (!outPath) return err("outPath is required");
+            if (!Array.isArray(a.elementTypes)) return err("elementTypes must be an array (can be empty)");
+            try {
+              await submitPhrasings(outPath, shotName, a.elementTypes as ElementTypePhrasing[]);
+              return ok(JSON.stringify({ shotName, elementTypeCount: a.elementTypes.length, outPath }));
+            } catch (e) {
+              return err(`generate_phrasings failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
+        },
+        {
+          name: "read_text_lines",
+          description: "DEV ONLY (template decomposition). Submits one key frame's visible text lines, which YOU determine by looking at that exact frame yourself first (read it directly - this tool does not read images or call any model, it only persists what you give it): a tight fractional [x0,y0,x1,y1] box per line, the exact content as currently visible (not guessed-ahead for a mid-reveal word), and a role (headline/label/logo wordmark/other). Call once per key frame, not once per shot — content changes frame to frame for a kinetic reveal. Merges into the text_lines.json-shaped file at outPath ({[shotName]: [{idx,box,content,role}]} — sam/phase3_core.py's own input shape), replacing any prior lines already submitted for this exact frameIdx, plus an audit-trail line.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              shotName: { type: "string" },
+              frameIdx: { type: "integer", description: "this key frame's own index within the shot" },
+              textLines: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    box: { type: "array", items: { type: "number" }, minItems: 4, maxItems: 4 },
+                    content: { type: "string" },
+                    role: { type: "string", enum: ["headline", "label", "logo wordmark", "other"] },
+                  },
+                  required: ["box", "content", "role"],
+                },
+                description: "empty array if no text is visible in this frame",
+              },
+              outPath: { type: "string", description: "absolute path to the text_lines.json-shaped file to merge into (created if missing)" },
+            },
+            required: ["shotName", "frameIdx", "textLines", "outPath"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>) => {
+            const shotName = str(a.shotName);
+            const outPath = str(a.outPath);
+            if (!shotName) return err("shotName is required");
+            if (!outPath) return err("outPath is required");
+            if (typeof a.frameIdx !== "number") return err("frameIdx is required");
+            if (!Array.isArray(a.textLines)) return err("textLines must be an array (can be empty)");
+            try {
+              await submitTextLines(outPath, shotName, int(a.frameIdx), a.textLines as TextLineReading[]);
+              return ok(JSON.stringify({ shotName, frameIdx: a.frameIdx, textLineCount: a.textLines.length, outPath }));
+            } catch (e) {
+              return err(`read_text_lines failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
+        },
+        {
           name: "match_transition",
           description: "DEV ONLY (inverse rendering). Given one real transition boundary in a reference video (a cut from analyze_reference, or detect_cuts), find which of the ~25 registry transition engines it most resembles: renders every candidate at a few progress points across the window using real beforeMs/afterMs reference frames as clip A/B, compares each against the REAL observed frames at those same points (SSIM-based, 0..1), and returns the top matches ranked best-first. beforeMs should be a clean frame well before the cut starts blending, afterMs a clean frame well after it settles; windowStartMs/windowEndMs bound the actual blend. A returned score near 1.0 is a confident match; scores clustered and mediocre (well under ~0.7) mean nothing matched well — a plain cut or an untracked custom look is more honest than forcing a weak match.",
           inputSchema: {
@@ -880,13 +962,14 @@ export const TOOLS: ToolDef[] = [
         },
         {
           name: "rebuild_from_analysis",
-          description: "DEV ONLY (inverse rendering). The actual replay step: given a full analysis object (durationMs/width/height/fps, shots[] with startMs/endMs/isStill/motion/look, transitions[] with atMs/engine/durMs — from match_transition, textBeats[] with startMs/endMs/content — content you supply, no OCR happens here) and a list of new media paths (one per shot in order; cycles if there are fewer images than shots), builds a BRAND NEW project replaying the measured structure with the new media and exports it. REPLACES the current project — checkpoints it first as 'before-rebuild-from-analysis' and restores it after, success or failure. This is where analyze_reference's raw output, your own match_transition calls, and your own read of the reference's on-screen text all get assembled together — this tool doesn't do that assembly, you do, then hand it the finished object.",
+          description: "DEV ONLY (inverse rendering). The actual replay step: given a full analysis object (durationMs/width/height/fps, shots[] with startMs/endMs/isStill/motion/look, transitions[] with atMs/engine/durMs — from match_transition, textBeats[] with startMs/endMs/content — content you supply, no OCR happens here) and a list of new media paths (one per shot in order; cycles if there are fewer images than shots), builds a BRAND NEW project replaying the measured structure with the new media and exports it. REPLACES the current project — checkpoints it first as 'before-rebuild-from-analysis' and restores it after, success or failure, so the rebuilt project itself is gone once this returns UNLESS `savePath` is given, in which case it's also saved to that .sefx file (pretty JSON) before the restore, so you can open it later without disturbing whatever project was live when you called this. This is where analyze_reference's raw output, your own match_transition calls, and your own read of the reference's on-screen text all get assembled together — this tool doesn't do that assembly, you do, then hand it the finished object.",
           inputSchema: {
             type: "object",
             properties: {
               analysis: { type: "object", description: "a TemplateAnalysis object: {durationMs,width,height,fps,shots[],transitions[],textBeats[]} — see the tool description" },
               newMedia: { type: "array", items: { type: "string" }, minItems: 1, description: "absolute image paths, one per shot (cycles if shorter)" },
               outPath: { type: "string", description: "absolute path to write the rebuilt .mp4 to" },
+              savePath: { type: "string", description: "optional absolute path to also save the rebuilt PROJECT (.sefx) to, before it's restored away - omit to leave no saved project file, matching the tool's older behaviour" },
             },
             required: ["analysis", "newMedia", "outPath"],
             additionalProperties: false,
@@ -894,15 +977,18 @@ export const TOOLS: ToolDef[] = [
           handler: async (a: Record<string, unknown>, ctx: AgentCtx) => {
             const newMedia = Array.isArray(a.newMedia) ? a.newMedia.filter((x): x is string => typeof x === "string" && x.length > 0) : [];
             const outPath = str(a.outPath);
+            const savePath = typeof a.savePath === "string" && a.savePath.length > 0 ? a.savePath : undefined;
             if (!a.analysis || typeof a.analysis !== "object") return err("analysis (object) is required");
             if (!newMedia.length) return err("newMedia must be a non-empty array of absolute image paths");
             if (!outPath) return err("outPath is required");
             await ctx.checkpoint("before-rebuild-from-analysis");
             try {
               const result = await rebuildFromAnalysis(a.analysis as RebuildTemplateAnalysis, newMedia, ctx, outPath);
+              if (savePath) await saveProjectFile(savePath);
               const audit = await auditExport(result.videoPath, false).catch((e) => ({ error: e instanceof Error ? e.message : String(e) }));
               return ok(JSON.stringify({
                 videoPath: result.videoPath,
+                projectPath: savePath ?? null,
                 shots: (a.analysis as RebuildTemplateAnalysis).shots.length,
                 audit: "suspects" in audit ? { totalFrames: audit.totalFrames, suspects: audit.suspects.length } : audit,
               }));
@@ -910,6 +996,155 @@ export const TOOLS: ToolDef[] = [
               return err(`rebuild_from_analysis failed: ${e instanceof Error ? e.message : String(e)}`);
             } finally {
               await ctx.restore("before-rebuild-from-analysis");
+            }
+          },
+        },
+        {
+          name: "open_project_file",
+          description: "DEV ONLY. Open a .sefx project file by absolute path, REPLACING the currently live project (no checkpoint/restore - unlike rebuild_from_analysis, this is a permanent swap). Use render_preview/contact_sheet right after to inspect what actually loaded.",
+          inputSchema: {
+            type: "object",
+            properties: { path: { type: "string", description: "absolute path to a .sefx file" } },
+            required: ["path"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>, ctx: AgentCtx) => {
+            const path = str(a.path);
+            if (!path) return err("path is required");
+            try {
+              const p = await openProjectFile(path);
+              await ctx.commit(p);
+              return ok(JSON.stringify({ layers: p.layers.length, durationMs: p.durationMs, width: p.width, height: p.height }));
+            } catch (e) {
+              return err(`open_project_file failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
+        },
+        {
+          name: "start_sam_service",
+          description: "DEV ONLY (template decomposition, roadmap item 2). Starts sam/sam_service.py (SAM3 concept detection + SAM2 bidirectional tracking + mask-shape fit, as a persistent localhost HTTP service — model loading alone costs ~7s, so it's started once and reused). Blocks until the service answers its own /health endpoint or 60s elapses, so a successful return means segment_concepts/refine_element are ready to call immediately. Safe to call again if already running (no-op). Default port 8799 — pass the same port to segment_concepts/refine_element if overridden here.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              pythonPath: { type: "string", description: "absolute path to the venv's python.exe, e.g. .../sam/.venv/Scripts/python.exe" },
+              scriptPath: { type: "string", description: "absolute path to sam/sam_service.py" },
+              port: { type: "integer", description: "default 8799" },
+            },
+            required: ["pythonPath", "scriptPath"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>) => {
+            const pythonPath = str(a.pythonPath);
+            const scriptPath = str(a.scriptPath);
+            if (!pythonPath) return err("pythonPath is required");
+            if (!scriptPath) return err("scriptPath is required");
+            const port = int(a.port, 8799);
+            try {
+              await startSamService(pythonPath, scriptPath, port);
+              const deadline = Date.now() + 60_000;
+              while (Date.now() < deadline) {
+                try {
+                  const res = await fetch(`http://127.0.0.1:${port}/health`);
+                  if (res.ok) return ok(JSON.stringify({ port, status: "ready" }));
+                } catch {
+                  // not listening yet - keep polling
+                }
+                await new Promise((r) => setTimeout(r, 500));
+              }
+              return err(`sam_service did not become healthy on port ${port} within 60s — check it's still running (sam_service_status) and the paths are correct`);
+            } catch (e) {
+              return err(`start_sam_service failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
+        },
+        {
+          name: "sam_service_status",
+          description: "DEV ONLY (template decomposition, roadmap item 2). Whether a spawned sam_service process is still alive (NOT whether it's finished loading models — a freshly-spawned process answers true here immediately but won't answer /health, and therefore segment_concepts/refine_element, until model loading finishes).",
+          inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          handler: async () => {
+            try {
+              return ok(JSON.stringify({ running: await samServiceStatus() }));
+            } catch (e) {
+              return err(`sam_service_status failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
+        },
+        {
+          name: "stop_sam_service",
+          description: "DEV ONLY (template decomposition, roadmap item 2). Kill the running sam_service process, if any (releases its GPU memory). No-op if nothing is running.",
+          inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          handler: async () => {
+            try {
+              await stopSamService();
+              return ok(JSON.stringify({ stopped: true }));
+            } catch (e) {
+              return err(`stop_sam_service failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
+        },
+        {
+          name: "segment_concepts",
+          description: "DEV ONLY (template decomposition, roadmap item 2). SAM3 image-mode concept detection at one frame: given an image path and a list of text phrasings, returns the boxes SAM3 matched, deduped by box IoU within this one frame. Same detection this tool's own sam/phase3_core.py already does — now callable live from the app instead of a separate dev-session script. Requires start_sam_service to have succeeded first.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              imagePath: { type: "string", description: "absolute path to the frame image" },
+              concepts: { type: "array", items: { type: "string" }, minItems: 1 },
+              port: { type: "integer", description: "default 8799 — must match start_sam_service's own port" },
+            },
+            required: ["imagePath", "concepts"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>) => {
+            const imagePath = str(a.imagePath);
+            if (!imagePath) return err("imagePath is required");
+            if (!Array.isArray(a.concepts) || !a.concepts.length) return err("concepts must be a non-empty array");
+            const port = int(a.port, 8799);
+            try {
+              const res = await fetch(`http://127.0.0.1:${port}/segment_concepts`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ imagePath, concepts: a.concepts }),
+              });
+              const body = await res.json();
+              if (!res.ok) return err(`segment_concepts failed: ${body.error ?? res.statusText}`);
+              return ok(JSON.stringify(body));
+            } catch (e) {
+              return err(`segment_concepts failed: ${e instanceof Error ? e.message : String(e)} — is start_sam_service running?`);
+            }
+          },
+        },
+        {
+          name: "refine_element",
+          description: "DEV ONLY (template decomposition, roadmap item 2). Bidirectional SAM2 tracking of one element from its own seed box/frame across a whole shot clip, then fit_elements.py's own mask-shape motion fit. Returns refBbox/refCentroid (the reference frame's own box and exact pivot centroid) and samples (AlignSample[] — RAW per-frame scale/rotationDeg/tx/ty, NOT yet keyed down; pass them to this app's own fit_background tool for that step, same as sam/phase3_core.py already does — this service never calls back into the app itself). refBbox/refCentroid/samples are all null if SAM2 couldn't track anything from that seed. Requires start_sam_service to have succeeded first.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              videoPath: { type: "string", description: "absolute path to the shot's own clip" },
+              seedFrameIdx: { type: "integer", description: "frame index (within this clip) to seed tracking from" },
+              box: { type: "array", items: { type: "number" }, minItems: 4, maxItems: 4, description: "[x0,y0,x1,y1] pixel box at seedFrameIdx" },
+              port: { type: "integer", description: "default 8799 — must match start_sam_service's own port" },
+            },
+            required: ["videoPath", "seedFrameIdx", "box"],
+            additionalProperties: false,
+          },
+          handler: async (a: Record<string, unknown>) => {
+            const videoPath = str(a.videoPath);
+            if (!videoPath) return err("videoPath is required");
+            if (typeof a.seedFrameIdx !== "number") return err("seedFrameIdx is required");
+            if (!Array.isArray(a.box) || a.box.length !== 4) return err("box must be a 4-element array");
+            const port = int(a.port, 8799);
+            try {
+              const res = await fetch(`http://127.0.0.1:${port}/refine_element`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ videoPath, seedFrameIdx: int(a.seedFrameIdx), box: a.box }),
+              });
+              const body = await res.json();
+              if (!res.ok) return err(`refine_element failed: ${body.error ?? res.statusText}`);
+              return ok(JSON.stringify(body));
+            } catch (e) {
+              return err(`refine_element failed: ${e instanceof Error ? e.message : String(e)} — is start_sam_service running?`);
             }
           },
         },

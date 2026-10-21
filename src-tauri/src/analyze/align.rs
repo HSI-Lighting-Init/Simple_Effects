@@ -193,11 +193,42 @@ const CONVERGE_EPS: f32 = 1e-4;
 const HUBER_MAD_MULT: f32 = 6.0;
 const MIN_VALID_PIXELS: usize = 16;
 
+/// A solved transform plus how well it actually explains the image — the
+/// iteration can converge (or just exhaust its budget) on a numerically
+/// stable but semantically degenerate warp (found live: `align_pyramidal`
+/// returning `Some` for a scale collapsing to ~0 or a rotation flipping
+/// between ±180°, still read as `solved: true` by every caller —
+/// docs/STATUS-phase2-fitter-scoring.md). `residual`/`inlier_frac` let a
+/// caller reject that case instead of trusting convergence alone.
+#[derive(Clone, Copy, Debug)]
+pub struct AlignFit {
+    pub params: SimParams,
+    /// Mean absolute grayscale residual (0..255 units) at the final `params`,
+    /// recomputed once after the loop ends (not reused from mid-loop, which
+    /// reflects the PREVIOUS iterate's params).
+    pub residual: f32,
+    /// Fraction of in-bounds points within the final iteration's own
+    /// Huber threshold — how internally consistent the fit is, independent
+    /// of `residual`'s absolute scale.
+    pub inlier_frac: f32,
+}
+
+/// A fit is trusted only if its transform is physically plausible for
+/// within-shot background motion AND it actually explains the image well.
+/// `max_rotation_deg` is a parameter, not a constant, because an element
+/// layer (once Phase 3 fits those too) may legitimately spin further than
+/// a background ever should.
+pub fn plausible(fit: &AlignFit, max_rotation_deg: f32) -> bool {
+    let scale = fit.params.scale();
+    let rotation = fit.params.rotation_rad().to_degrees().abs();
+    scale >= 0.3 && scale <= 3.0 && rotation <= max_rotation_deg && fit.inlier_frac >= 0.5 && fit.residual <= 30.0
+}
+
 /// One pyramid level of inverse-compositional LK. `template` and `image` must
 /// be the same size. `init` seeds the search. `None` if there's too little
 /// texture/overlap to solve (a near-singular Hessian, or too few in-bounds
 /// samples — both signal "don't trust this", not "assume identity").
-fn align_level(template: &GrayBuf, image: &GrayBuf, init: SimParams) -> Option<SimParams> {
+fn align_level(template: &GrayBuf, image: &GrayBuf, init: SimParams) -> Option<AlignFit> {
     let cx = template.w as i32 / 2;
     let cy = template.h as i32 / 2;
 
@@ -267,7 +298,28 @@ fn align_level(template: &GrayBuf, image: &GrayBuf, init: SimParams) -> Option<S
             break;
         }
     }
-    Some(p)
+
+    // Recompute residuals against the FINAL p (the loop's own `errs` reflect
+    // the iterate BEFORE the last update) — this is the quality signal a
+    // caller actually needs: how well does the settled transform explain the
+    // image, not how well the second-to-last guess did.
+    let mut final_errs: Vec<f32> = Vec::with_capacity(pts.len());
+    for pt in &pts {
+        let (wx, wy) = p.apply(pt.x, pt.y);
+        if let Some(v) = image.sample_centered(wx, wy) {
+            final_errs.push((v - pt.t).abs());
+        }
+    }
+    if final_errs.len() < MIN_VALID_PIXELS {
+        return None;
+    }
+    let mut abs_sorted = final_errs.clone();
+    abs_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mad = abs_sorted[abs_sorted.len() / 2].max(0.5);
+    let thresh = HUBER_MAD_MULT * mad;
+    let residual = final_errs.iter().sum::<f32>() / final_errs.len() as f32;
+    let inlier_frac = final_errs.iter().filter(|e| **e <= thresh).count() as f32 / final_errs.len() as f32;
+    Some(AlignFit { params: p, residual, inlier_frac })
 }
 
 /// Coarse-to-fine IC-LK: builds a `levels`-deep pyramid of both images
@@ -276,19 +328,22 @@ fn align_level(template: &GrayBuf, image: &GrayBuf, init: SimParams) -> Option<S
 /// rotation are resolution-independent; pixel translation isn't). Handles
 /// motion too large for a single fine-resolution pass to converge to —
 /// exactly the risk Gate A exists to test on real, compressed footage.
-pub fn align_pyramidal(template: &GrayImage, image: &GrayImage, init: SimParams, levels: usize) -> Option<SimParams> {
+pub fn align_pyramidal(template: &GrayImage, image: &GrayImage, init: SimParams, levels: usize) -> Option<AlignFit> {
     let levels = levels.max(1);
     let t_pyr = build_pyramid(GrayBuf::from_image(template), levels);
     let i_pyr = build_pyramid(GrayBuf::from_image(image), levels);
     let mut p = init;
+    let mut fit = None;
     for level in (0..levels).rev() {
-        p = align_level(&t_pyr[level], &i_pyr[level], p)?;
+        let level_fit = align_level(&t_pyr[level], &i_pyr[level], p)?;
+        p = level_fit.params;
         if level > 0 {
             p.tx *= 2.0;
             p.ty *= 2.0;
         }
+        fit = Some(level_fit); // last iteration is level 0 (finest) — its own quality signal, not a coarser level's
     }
-    Some(p)
+    fit
 }
 
 #[cfg(test)]
@@ -345,7 +400,7 @@ mod tests {
         let src = test_pattern(256, 256);
         let truth = SimParams { re: 1.06, im: 0.0, tx: 4.0, ty: -3.0 }; // 6% zoom, small pan
         let target = synth_target(&src, truth);
-        let recovered = align_pyramidal(&src, &target, SimParams::IDENTITY, 3).expect("should converge");
+        let recovered = align_pyramidal(&src, &target, SimParams::IDENTITY, 3).expect("should converge").params;
         assert_close(recovered, truth, 1.0, 0.3, 2.0);
     }
 
@@ -355,7 +410,7 @@ mod tests {
         let angle = 4.0_f32.to_radians();
         let truth = SimParams { re: angle.cos() * 1.02, im: angle.sin() * 1.02, tx: 1.0, ty: 2.0 };
         let target = synth_target(&src, truth);
-        let recovered = align_pyramidal(&src, &target, SimParams::IDENTITY, 3).expect("should converge");
+        let recovered = align_pyramidal(&src, &target, SimParams::IDENTITY, 3).expect("should converge").params;
         assert_close(recovered, truth, 1.0, 0.3, 2.0);
     }
 
@@ -367,7 +422,7 @@ mod tests {
         // exactly what the pyramid exists to handle.
         let truth = SimParams { re: 1.35, im: 0.0, tx: -8.0, ty: 6.0 };
         let target = synth_target(&src, truth);
-        let recovered = align_pyramidal(&src, &target, SimParams::IDENTITY, 4).expect("pyramid should converge");
+        let recovered = align_pyramidal(&src, &target, SimParams::IDENTITY, 4).expect("pyramid should converge").params;
         assert_close(recovered, truth, 1.0, 0.3, 2.0);
     }
 
@@ -380,7 +435,7 @@ mod tests {
         let prev = SimParams { re: 1.20, im: 0.0, tx: -5.0, ty: 4.0 };
         let truth = SimParams { re: 1.28, im: 0.0, tx: -6.0, ty: 5.0 };
         let target = synth_target(&src, truth);
-        let recovered = align_pyramidal(&src, &target, prev, 3).expect("should converge");
+        let recovered = align_pyramidal(&src, &target, prev, 3).expect("should converge").params;
         assert_close(recovered, truth, 1.0, 0.3, 2.0);
     }
 
@@ -398,15 +453,56 @@ mod tests {
                 target.put_pixel(x, y, Luma([20]));
             }
         }
-        let recovered = align_pyramidal(&src, &target, SimParams::IDENTITY, 3).expect("should still converge");
+        let recovered = align_pyramidal(&src, &target, SimParams::IDENTITY, 3).expect("should still converge").params;
         assert_close(recovered, truth, 1.5, 0.5, 3.0); // slightly looser — real occlusion, not a clean signal
     }
 
     #[test]
     fn identity_stays_identity() {
         let src = test_pattern(256, 256);
-        let recovered = align_pyramidal(&src, &src, SimParams::IDENTITY, 3).expect("should converge");
+        let recovered = align_pyramidal(&src, &src, SimParams::IDENTITY, 3).expect("should converge").params;
         assert_close(recovered, SimParams::IDENTITY, 0.2, 0.1, 0.5);
     }
 
+    #[test]
+    fn a_clean_real_fit_is_plausible() {
+        let src = test_pattern(256, 256);
+        let truth = SimParams { re: 1.08, im: 0.0, tx: 3.0, ty: -2.0 };
+        let target = synth_target(&src, truth);
+        let fit = align_pyramidal(&src, &target, SimParams::IDENTITY, 3).expect("should converge");
+        assert!(plausible(&fit, 45.0), "a genuinely clean fit should pass the gate: {fit:?}");
+    }
+
+    fn fit(re: f32, im: f32, residual: f32, inlier_frac: f32) -> AlignFit {
+        AlignFit { params: SimParams { re, im, tx: 0.0, ty: 0.0 }, residual, inlier_frac }
+    }
+
+    #[test]
+    fn plausible_rejects_a_degenerate_near_zero_scale() {
+        // synthetic-6.mp4 shot 5's live divergence: scale collapsed to ~0.0006
+        // while still reporting a low-ish residual on whatever few points
+        // happened to line up by coincidence.
+        assert!(!plausible(&fit(0.0006, 0.0, 5.0, 0.9), 45.0));
+    }
+
+    #[test]
+    fn plausible_rejects_a_rotation_flip_beyond_the_background_bound() {
+        // synthetic-6.mp4 shot 5 also reported rotation flipping between
+        // roughly +-180 degrees — nothing a background pan/zoom should do.
+        let flipped = SimParams { re: (170f32).to_radians().cos(), im: (170f32).to_radians().sin(), tx: 0.0, ty: 0.0 };
+        assert!(!plausible(&AlignFit { params: flipped, residual: 5.0, inlier_frac: 0.9 }, 45.0));
+    }
+
+    #[test]
+    fn plausible_rejects_a_large_residual_even_with_a_plausible_transform() {
+        // synthetic-7.mp4 shot 1's divergence: scale/rotation drifted but
+        // stayed numerically "reasonable" while the fit itself stopped
+        // actually explaining the image.
+        assert!(!plausible(&fit(1.05, 0.0, 60.0, 0.4), 45.0));
+    }
+
+    #[test]
+    fn plausible_accepts_a_normal_fit() {
+        assert!(plausible(&fit(1.05, 0.02, 2.0, 0.95), 45.0));
+    }
 }

@@ -10,6 +10,7 @@ import type { Layer } from "../bindings/Layer";
 import type { Rgba } from "../bindings/Rgba";
 import type { Track } from "../bindings/Track";
 import type { TextStyle } from "../bindings/TextStyle";
+import type { FittedMotion } from "../bindings/FittedMotion";
 import {
   newProject,
   setCompSize,
@@ -55,6 +56,10 @@ export interface ShotAnalysis {
    *  instead of the usual single full-frame layer. Absent or a single region
    *  means "no layout detected", the plain single-photo path. */
   layout?: ShotLayout;
+  /** Gate C's per-element decomposition (see ElementLayer's own doc) -
+   *  present and non-empty means this shot is built element-by-element
+   *  instead of the single cover-fit/regions path above. */
+  elements?: ElementLayer[];
 }
 
 export interface RegionMotionSample { tMs: number; scale: number; rotationDeg: number; tx: number; ty: number }
@@ -72,6 +77,39 @@ export interface ElementRegion {
 export interface ShotLayout {
   kind: "single" | "grid" | "multiMotion";
   regions: ElementRegion[];
+}
+
+/** Gate C (roadmap item 4, piece 4): one Phase 3 decomposition element
+ *  (`sam/phase3_core.py`'s own `objects[]`/`textObjects[]`) as its own
+ *  layer, instead of the single cover-fit layer the `layout`/`regions` path
+ *  above builds. A shot carrying `elements` takes this path entirely (see
+ *  `rebuildFromAnalysis`'s own dispatch) - layout/regions and elements are
+ *  different detectors (Rust `analyze::layout` vs this Python SAM pipeline)
+ *  and never both apply to the same shot.
+ *  - "stillCard": `mediaIndex` is the element's own sprite PNG.
+ *  - "footageCard": `mediaIndex` is the ORIGINAL shot clip (no per-layer
+ *    crop/matte exists in this engine yet - this shows the clip's WHOLE
+ *    frame scaled into the card's own small box, visibly wrong content
+ *    though correctly positioned/timed; an intentional, honest gap for
+ *    Gate C's own error metric to surface, not a bug to route around here.
+ *    See `fit_elements.py`'s own module doc for why content can't just be
+ *    aligned directly - the cards play real footage, not a static photo.
+ *  - "text": `content` instead of `mediaIndex` - a plain `addTextLayer`.
+ *  `fittedMotion` is ALREADY fitted (phase3_core.py ran `fit_background`
+ *  itself, unlike `ShotAnalysis.motion`'s raw samples) - absent means
+ *  static (box-kind text, or a card `fit_element_mask_motion` couldn't fit
+ *  at all): placed once at `refBbox`'s own pose, never keyed. `refCentroid`
+ *  is the EXACT point `fittedMotion`'s keyframes pivot around - see
+ *  `composeElementPose`'s own doc for the verified composition formula. */
+export interface ElementLayer {
+  kind: "stillCard" | "footageCard" | "text";
+  mediaIndex?: number;
+  content?: string;
+  startMs: number; // shot-relative (0 = shot start), matching ShotAnalysis.motion's own convention
+  endMs: number;
+  refBbox?: [number, number, number, number]; // x0,y0,x1,y1, comp-pixel coords at the reference pose
+  refCentroid?: [number, number];
+  fittedMotion?: FittedMotion;
 }
 
 export interface TransitionAnalysis {
@@ -222,35 +260,161 @@ async function placeRegion(layerId: number, shot: ShotAnalysis, region: ElementR
   return editKeyframes(layerId, shot.endMs, { x: cx, y: cy, scaleX: baseline * ratio, scaleY: baseline * ratio, easing: "linear" }, false);
 }
 
+/** `align_shot`'s decode resolution (mod.rs, lib.rs's `align_reference` — both
+ *  hardcode this too, no shared constant to import across the Rust/TS
+ *  boundary; update together if it ever changes). Needed to undo the ffmpeg
+ *  downscale: `align_shot`'s tx/ty are in this decode's pixel grid, not the
+ *  comp's. */
+const MOTION_ANALYSIS_SHORT_SIDE = 256;
+
 /** Ken Burns from the shot's measured motion, via the 2.5 fitter
  *  (`fit_background`) rather than a crude first/last-sample straight line —
- *  a multi-segment scale curve with real recovered easing (including
- *  overshoot), scaled onto `baseline` (the layer's OWN current scale, read
- *  from `p` — the cover-fit the caller already applied via
- *  replaceLayerMedia before calling this, not a guess) so the result covers
- *  the frame at every keyframe, not just at time zero. Scale only for now —
- *  the fitter also recovers rotation/pan, but those are in `align_shot`'s
- *  relative analysis-pixel space and need the anchor/centre composition
- *  into this engine's absolute comp-space transform (documented, not yet
- *  built — see STATUS-gateA-aligner.md's "Not done"), so applying them here
- *  would be a guess, not a measurement. Returns undefined when there's
- *  nothing to key (not still, or too few samples), so the caller leaves the
- *  layer at its flat cover-fit scale. */
-async function animateMotion(layerId: number, shot: ShotAnalysis, p: Project): Promise<Project | undefined> {
+ *  a multi-segment curve per channel with real recovered easing (including
+ *  overshoot). The anchor/centre composition (`STATUS-gateA-aligner.md`'s
+ *  "not done", now done): `align_shot`'s scale/rotation/tx/ty are RELATIVE to
+ *  the shot's reference frame in analysis-pixel units, not this engine's
+ *  absolute comp-space transform — composed onto the layer's own current
+ *  (cover-fit) x/y/scale/rotation as the reference anchor, translation
+ *  rescaled by `k = compW / MOTION_ANALYSIS_SHORT_SIDE` to undo the ffmpeg
+ *  downscale (valid because the analysis decode preserves the source
+ *  video's aspect ratio, same as the comp's — a uniform k works for both
+ *  axes; see `align_shot`'s own doc for the derivation).
+ *
+ *  ponytail: scale's own fitted easing is applied to the WHOLE compound key
+ *  (x/y/scale/rotation together) rather than each channel's independently -
+ *  fitted shape — `editKeyframes` only takes one easing per call, so honoring
+ *  all four would mean up to 4 calls per key-time instead of 1. Scale is
+ *  usually the perceptually dominant parameter in a Ken Burns move; upgrade
+ *  to per-channel calls if rotation/pan easing fidelity turns out to matter.
+ *
+ *  Returns undefined when there's nothing to key (not still, or too few
+ *  samples), so the caller leaves the layer at its flat cover-fit pose. */
+async function animateMotion(layerId: number, shot: ShotAnalysis, compW: number, p: Project): Promise<Project | undefined> {
   if (!shot.isStill || !shot.motion || shot.motion.length < 2) return undefined;
   const layer = p.layers.find((l) => l.id === layerId);
-  const baseline = layer?.transform.scaleX.default ?? 1.0;
+  const refScale = layer?.transform.scaleX.default ?? 1.0;
+  const refRotation = layer?.transform.rotation.default ?? 0;
+  const refX = layer?.transform.x.default ?? compW / 2;
+  const refY = layer?.transform.y.default ?? 0;
+  const k = compW / MOTION_ANALYSIS_SHORT_SIDE;
+
   const samples = shot.motion.map((m) => ({ ...m, solved: m.solved ?? true }));
   const spanMs = shot.endMs - shot.startMs;
   const fitted = await fitBackground(samples, 0, spanMs);
   if (fitted.scale.length < 2) return undefined;
-  for (const [i, key] of fitted.scale.entries()) {
+  for (const [i, scaleKey] of fitted.scale.entries()) {
+    const rot = fitted.rotationDeg[i]?.value ?? 0;
+    const tx = fitted.tx[i]?.value ?? 0;
+    const ty = fitted.ty[i]?.value ?? 0;
     p = await editKeyframes(
       layerId,
-      shot.startMs + key.timeMs,
-      { scaleX: baseline * key.value, scaleY: baseline * key.value, easing: key.easing },
+      shot.startMs + scaleKey.timeMs,
+      {
+        scaleX: refScale * scaleKey.value,
+        scaleY: refScale * scaleKey.value,
+        rotation: refRotation + rot,
+        x: refX + k * tx,
+        y: refY + k * ty,
+        easing: scaleKey.easing,
+      },
       i === 0
     );
+  }
+  return p;
+}
+
+/** Key an ALREADY-FITTED FittedMotion (Gate C's `ElementLayer.fittedMotion` -
+ *  `fit_background` already ran in Python, unlike `animateMotion`'s raw
+ *  samples) onto a layer, composing each keyframe's (scale,rotationDeg,tx,ty)
+ *  onto `refCentroid` - NOT a simple additive offset like `animateMotion`'s
+ *  own `refX + k*tx` (valid there only because `align_shot`'s samples are
+ *  already a tracked point's own translation). `fit_elements.py`'s tx/ty are
+ *  a raw similarity-matrix translation column instead: apply
+ *  [[a,-b,tx],[b,a,ty]] to the reference frame's own centroid to get its
+ *  position at this keyframe. Verified empirically (not assumed) against a
+ *  track's own known per-frame centroids before trusting it here - see
+ *  fit_elements.py's `fit_element_mask_motion` doc for the numbers. No `k`
+ *  rescaling either: fit_elements.py fits on the shot's native-resolution
+ *  frames directly, not align_shot's downscaled 256px analysis grid, so
+ *  comp pixels and fitted pixels are already the same units (Gate C's comp
+ *  size matches the source reel's own native resolution). */
+async function applyElementFittedMotion(layerId: number, fitted: FittedMotion, refCentroid: [number, number], baselineScaleX: number, baselineScaleY: number, shotStartMs: number, p: Project): Promise<Project> {
+  const [rcx, rcy] = refCentroid;
+  for (const [i, scaleKey] of fitted.scale.entries()) {
+    const rot = fitted.rotationDeg[i]?.value ?? 0;
+    const tx = fitted.tx[i]?.value ?? 0;
+    const ty = fitted.ty[i]?.value ?? 0;
+    const theta = (rot * Math.PI) / 180;
+    const a = scaleKey.value * Math.cos(theta);
+    const b = scaleKey.value * Math.sin(theta);
+    const cx = a * rcx - b * rcy + tx;
+    const cy = b * rcx + a * rcy + ty;
+    p = await editKeyframes(
+      layerId,
+      shotStartMs + scaleKey.timeMs,
+      { x: cx, y: cy, scaleX: baselineScaleX * scaleKey.value, scaleY: baselineScaleY * scaleKey.value, rotation: rot, easing: scaleKey.easing },
+      i === 0
+    );
+  }
+  return p;
+}
+
+/** Gate C: build one layer per Phase 3 element instead of the shot's usual
+ *  single cover-fit layer - see `ElementLayer`'s own doc for the three
+ *  kinds and the footageCard gap. Each element gets its own
+ *  [shot.startMs+el.startMs, shot.startMs+el.endMs] range (its own observed
+ *  presence span, not necessarily the whole shot), placed at `refBbox`'s
+ *  own pose and, when `fittedMotion` is present, animated via
+ *  `applyElementFittedMotion`; static (no fittedMotion) elements are placed
+ *  once and left flat. Returns the fresh project; caller threads it through
+ *  like every other builder here. */
+async function buildShotElements(shot: ShotAnalysis, io: RebuildIO, p: Project): Promise<Project> {
+  for (const el of shot.elements ?? []) {
+    const elStartMs = shot.startMs + el.startMs;
+    const elEndMs = shot.startMs + el.endMs;
+
+    if (el.kind === "text") {
+      const sizePx = el.refBbox ? Math.max(12, el.refBbox[3] - el.refBbox[1]) : 90;
+      p = await addTextLayer(el.content ?? "", sizePx);
+      const layerId = p.layers[p.layers.length - 1].id;
+      p = await setLayerRange(layerId, elStartMs, elEndMs);
+      if (el.refCentroid) {
+        const [cx, cy] = el.refCentroid;
+        p = await editKeyframes(layerId, elStartMs, { x: cx, y: cy, scaleX: 1, scaleY: 1, easing: "linear" }, true);
+      }
+      if (el.fittedMotion && el.refCentroid) {
+        p = await applyElementFittedMotion(layerId, el.fittedMotion, el.refCentroid, 1, 1, shot.startMs, p);
+      }
+      continue;
+    }
+
+    if (el.mediaIndex === undefined || !el.refBbox) continue; // no usable placement data - a flagged gap, not silently faked
+    const layerId = await io.addMedia(el.mediaIndex); // self-commits
+    if (layerId < 0) throw new Error(`addMedia failed for a Gate C element (mediaIndex ${el.mediaIndex})`);
+    p = io.project();
+    p = await setLayerRange(layerId, elStartMs, elEndMs);
+
+    const layer = p.layers.find((l) => l.id === layerId);
+    const native = layer ? nativeSize(layer) : null;
+    const [bx0, by0, bx1, by1] = el.refBbox;
+    const bboxW = bx1 - bx0;
+    const bboxH = by1 - by0;
+    // Stretch-fit, not contain-fit (placeRegion's own choice): a sprite is
+    // stored as a fixed 128x128 crop regardless of the card's own aspect
+    // ratio, so matching width AND height independently is what actually
+    // reproduces it at its original aspect - a uniform contain-fit would
+    // letterbox it. A footageCard's full source frame has no "correct"
+    // aspect to preserve here either way (see ElementLayer's own doc on
+    // that gap), so the same stretch-fit is used for both kinds.
+    const baselineScaleX = native && native.w > 0 ? bboxW / native.w : 1;
+    const baselineScaleY = native && native.h > 0 ? bboxH / native.h : 1;
+    const cx = el.refCentroid ? el.refCentroid[0] : (bx0 + bx1) / 2;
+    const cy = el.refCentroid ? el.refCentroid[1] : (by0 + by1) / 2;
+    p = await editKeyframes(layerId, elStartMs, { x: cx, y: cy, scaleX: baselineScaleX, scaleY: baselineScaleY, rotation: 0, easing: "linear" }, true);
+
+    if (el.fittedMotion && el.refCentroid) {
+      p = await applyElementFittedMotion(layerId, el.fittedMotion, el.refCentroid, baselineScaleX, baselineScaleY, shot.startMs, p);
+    }
   }
   return p;
 }
@@ -404,6 +568,15 @@ export async function rebuildFromAnalysis(
   const nextMediaIndex = () => mediaCursor++ % newMedia.length; // a running cursor, not i % newMedia.length — a 4-cell grid shot must not reuse one image 4x while others sit unused
 
   for (const [i, shot] of analysis.shots.entries()) {
+    if (shot.elements && shot.elements.length > 0) {
+      // Gate C's own path - a different detector from layout/regions below
+      // (Rust analyze::layout vs this Python SAM pipeline), never combined
+      // with it on the same shot. No cover-fit base layer, no nextMediaIndex
+      // cycling - each element names its own newMedia index directly.
+      p = await buildShotElements(shot, io, p);
+      continue;
+    }
+
     const regions = shot.layout && shot.layout.regions.length > 1 ? shot.layout.regions : null;
 
     if (regions) {
@@ -431,7 +604,7 @@ export async function rebuildFromAnalysis(
 
     p = await setLayerRange(layerId, shot.startMs, shot.endMs);
 
-    const motioned = await animateMotion(layerId, shot, p);
+    const motioned = await animateMotion(layerId, shot, analysis.width, p);
     if (motioned) p = motioned;
 
     p = await applyFades(layerId, shot, p);

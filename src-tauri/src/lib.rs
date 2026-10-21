@@ -7,6 +7,7 @@
 mod analyze;
 mod eval;
 mod mcp_bridge;
+mod sam_service;
 mod model;
 mod surface;
 mod text;
@@ -913,6 +914,27 @@ fn mcp_bridge_reply(req_id: u64, result: String) {
     mcp_bridge::reply(req_id, result);
 }
 
+/// DEV ONLY. Start (or confirm already running) the SAM3/SAM2 service
+/// `sam_service.py` backs `segment_concepts`/`refine_element`. Does not wait
+/// for model loading - poll the service's own `/health` endpoint.
+#[tauri::command]
+fn start_sam_service(python_path: String, script_path: String, port: u16) -> Result<(), String> {
+    sam_service::start(python_path, script_path, port)
+}
+
+/// DEV ONLY. Whether a spawned sam_service process is still alive (not
+/// whether it's finished loading models - poll `/health` for that).
+#[tauri::command]
+fn sam_service_status() -> bool {
+    sam_service::is_running()
+}
+
+/// DEV ONLY. Kill the running sam_service process, if any.
+#[tauri::command]
+fn stop_sam_service() -> Result<(), String> {
+    sam_service::stop()
+}
+
 /// True when launched with `--mcp-bridge` — an explicit opt-in so automation that
 /// relaunches the app (e.g. after an update) can bring the bridge straight back.
 #[tauri::command]
@@ -1447,6 +1469,48 @@ fn save_project_file(state: State<AppState>, path: String) -> Result<(), String>
     std::fs::write(&path, json).map_err(|e| format!("write {path}: {e}"))
 }
 
+/// Append one line (newline added) to a text file at `path`, creating the
+/// file and its parent directories if needed. First use: a durable audit
+/// trail of the app's own template-extraction submissions (generate_
+/// phrasings/read_text_lines) — a plain JSONL append, not a database, since
+/// the only consumer so far is "tail the file".
+#[tauri::command]
+fn append_text_file(path: String, line: String) -> Result<(), String> {
+    use std::io::Write;
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| format!("open {path}: {e}"))?;
+    f.write_all(line.as_bytes()).map_err(|e| format!("write {path}: {e}"))?;
+    f.write_all(b"\n").map_err(|e| format!("write {path}: {e}"))
+}
+
+/// Read a text file at `path`, or `None` if it doesn't exist yet. Paired
+/// with `write_text_file` for a read-merge-write pattern (building up e.g.
+/// generate_phrasings' own output file one shot at a time, across many
+/// calls) — not a generic file-read: errors other than "not found" (bad
+/// permissions, a directory, etc) still surface rather than also mapping to
+/// `None`, so a caller can't mistake a real problem for "start fresh".
+#[tauri::command]
+fn read_text_file(path: String) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read {path}: {e}")),
+    }
+}
+
+/// Write (overwrite) a text file at `path`, creating its parent directories
+/// if needed. See `read_text_file`'s own doc for the read-merge-write
+/// pattern this pairs with.
+#[tauri::command]
+fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(&path, contents).map_err(|e| format!("write {path}: {e}"))
+}
+
 /// Return (and clear) any `.sefx` path the app was launched with (e.g. the OS
 /// opening an associated file by double-click). The frontend calls this once on
 /// startup and, if present, opens that project instead of the blank default.
@@ -1523,6 +1587,10 @@ fn open_project_file(state: State<AppState>, path: String) -> Result<Project, St
     let mut shaped = state.shaped.lock().unwrap();
     reshape_all(&loaded, &mut shaped);
     *current = loaded;
+    // Group-nav frames hold the OLD project's parent layers. Left in place, the
+    // next `exit_group` (e.g. Save's pop-to-root) would swap them back in and
+    // nest the freshly opened project inside the old one.
+    state.nav.lock().unwrap().clear();
     Ok(current.clone())
 }
 
@@ -5275,16 +5343,60 @@ fn bitrate_for_level(level: u8) -> u32 {
     mbps * 1_000_000
 }
 
-/// Save the exported video. `webm_base64` is the recorded (video-only) WebM.
+/// Where the frontend streams the encoded WebM before `export_video` muxes it.
+/// One export runs at a time (the UI gates it), so a per-process name is enough.
+fn export_upload_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("simple_effects_export_{}.webm", std::process::id()))
+}
+
+/// Write `bytes` at `offset` in `path` (created if missing). `reset` truncates
+/// first — set on an export's first chunk so a stale file from a crashed run
+/// can't leave a tail behind. Offsets, not appends, because the WebM muxer
+/// goes back to patch earlier header fields when it finalizes.
+fn write_chunk_at(path: &std::path::Path, offset: u64, reset: bool, bytes: &[u8]) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(reset)
+        .open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    f.seek(SeekFrom::Start(offset)).map_err(|e| format!("seek: {e}"))?;
+    f.write_all(bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Receive one raw slice of the encoded WebM (binary IPC body — no base64, no
+/// JSON, so a multi-GB render never has to exist as one JS string) at the byte
+/// offset in the `x-offset` header; `x-reset: 1` marks the export's first chunk.
+/// The old path base64'd the whole file into one string, which silently came
+/// back EMPTY for WebMs over ~384 MB (V8's string cap) — ffmpeg then failed with
+/// "Error opening input files: Invalid data found when processing input".
+#[tauri::command]
+fn export_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("export_upload_chunk expects a binary body".into());
+    };
+    let header = |name: &str| request.headers().get(name).and_then(|v| v.to_str().ok());
+    let offset: u64 = header("x-offset")
+        .and_then(|v| v.parse().ok())
+        .ok_or("export_upload_chunk: missing or invalid x-offset header")?;
+    write_chunk_at(&export_upload_path(), offset, header("x-reset") == Some("1"), bytes)
+}
+
+/// Save the exported video from the WebM uploaded via `export_upload_chunk`
+/// (`webm_len` bytes — checked, so a short or empty upload fails loudly here
+/// instead of as a confusing ffmpeg error). The uploaded WebM is video-only.
 /// `format` "webm" writes it as-is when there's no audio, else remuxes with an
 /// Opus track; "mp4" transcodes to H.264 (+ AAC audio). `rate_mode` picks the
 /// H.264 rate control (always constrained ABR so size is predictable): "bitrate"
 /// targets `bitrate` bits/s; "quality" targets the 1..5 `level`'s preset bitrate.
 /// Either way output size ≈ target × duration, matching the dialog's estimate.
 /// `audio` are the comp's audio clips to mix in; muxing needs ffmpeg.
-#[tauri::command]
+/// `async` so the (minutes-long, for heavy renders) ffmpeg run happens off the
+/// main thread — a plain sync command blocks the whole window while it runs.
+#[tauri::command(async)]
 fn export_video(
-    webm_base64: String,
+    webm_len: u64,
     path: String,
     format: String,
     rate_mode: String,
@@ -5293,30 +5405,45 @@ fn export_video(
     audio: Vec<AudioTrack>,
     duration_ms: u32,
 ) -> Result<(), String> {
-    let bytes = STANDARD
-        .decode(webm_base64.as_bytes())
-        .map_err(|e| format!("decode: {e}"))?;
+    let tmp = export_upload_path();
+    let result = export_video_from(&tmp, webm_len, &path, &format, &rate_mode, level, bitrate, &audio, duration_ms);
+    let _ = std::fs::remove_file(&tmp); // success or not, never leave GBs in %TEMP%
+    result
+}
+
+fn export_video_from(
+    tmp: &std::path::Path,
+    webm_len: u64,
+    path: &str,
+    format: &str,
+    rate_mode: &str,
+    level: u8,
+    bitrate: u32,
+    audio: &[AudioTrack],
+    duration_ms: u32,
+) -> Result<(), String> {
+    let got = std::fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
+    if webm_len == 0 || got != webm_len {
+        return Err(format!("the rendered video didn't reach the exporter intact (expected {webm_len} bytes, got {got})"));
+    }
 
     let ffmpeg = find_ffmpeg();
-    let filter = audio_filter_complex(&audio, duration_ms);
+    let filter = audio_filter_complex(audio, duration_ms);
     let has_audio = filter.is_some() && ffmpeg.is_some();
 
-    // Fast path: WebM with no audio to mux → write the recorded bytes as-is.
+    // Fast path: WebM with no audio to mux → keep the recorded file as-is.
     if format == "webm" && !has_audio {
         if filter.is_some() && ffmpeg.is_none() {
             // There WAS audio but we can't mux it — save video-only rather than fail.
             eprintln!("export: ffmpeg not found; saving WebM without its audio track");
         }
-        return std::fs::write(&path, &bytes).map_err(|e| format!("write {path}: {e}"));
+        return std::fs::copy(tmp, path).map(|_| ()).map_err(|e| format!("write {path}: {e}"));
     }
 
     let ffmpeg = ffmpeg.ok_or(
         "MP4 (and audio) need ffmpeg, which isn't installed. Install it from the export \
          dialog, or choose WebM.",
     )?;
-
-    let tmp = std::env::temp_dir().join(format!("simple_effects_export_{}.webm", std::process::id()));
-    std::fs::write(&tmp, &bytes).map_err(|e| format!("temp write: {e}"))?;
 
     // Both export modes target a bitrate so the output size is predictable and
     // matches the dialog's estimate (size ≈ bitrate × duration):
@@ -5335,9 +5462,9 @@ fn export_video(
     let bufsize = target.to_string();
 
     let mut cmd = quiet_command(&ffmpeg);
-    cmd.args(["-y", "-i"]).arg(&tmp);
+    cmd.args(["-y", "-i"]).arg(tmp);
     // Audio inputs (1..=N).
-    for a in &audio {
+    for a in audio {
         cmd.args(["-i"]).arg(&a.path);
     }
     if let Some(fc) = &filter {
@@ -5365,18 +5492,103 @@ fn export_video(
             cmd.args(["-c:a", "aac", "-b:a", "192k"]);
         }
     }
-    let result = cmd.arg(&path).output();
-
-    let _ = std::fs::remove_file(&tmp);
-    let out = result.map_err(|e| format!("run ffmpeg: {e}"))?;
+    let out = cmd.arg(path).output().map_err(|e| format!("run ffmpeg: {e}"))?;
     if !out.status.success() {
+        // The last line alone ("Error opening input files: …") never says WHICH
+        // input failed — the line before it does — so keep the last few.
         let err = String::from_utf8_lossy(&out.stderr);
+        let tail: Vec<&str> = err.lines().rev().filter(|l| !l.trim().is_empty()).take(4).collect();
         return Err(format!(
             "ffmpeg failed: {}",
-            err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error")
+            if tail.is_empty() { "unknown error".to_string() } else { tail.into_iter().rev().collect::<Vec<_>>().join(" | ") }
         ));
     }
     Ok(())
+}
+
+/// Phase 7 ("drop a video" flow): extract [start_ms, end_ms) of `source_path`
+/// into a standalone file at `out_path` — the SAM pipeline's own per-shot
+/// tools (sam_service.py's /detect_keyframes, /process_shot, etc, same as
+/// the dev-session's own sam/shots/shot_NN.mp4 convention) all expect one
+/// file per shot, frame 0 = the shot's own start, not an offset into a
+/// bigger reference video. RE-ENCODES rather than stream-copies
+/// (`export_video`'s own WebM fast path uses `-c:v copy`, fine there since
+/// that never trims mid-GOP) — a stream copy can only cut at a keyframe, so
+/// a shot boundary landing between keyframes would silently start the
+/// extracted clip early/late, exactly the kind of mismatch that corrupted
+/// an entire scoring run before (see AlignSample's own doc on absolute vs
+/// shot-relative time). A few hundred ms of encode cost per shot is cheap
+/// next to that risk.
+#[tauri::command]
+fn extract_shot_clip(source_path: String, start_ms: u32, end_ms: u32, out_path: String) -> Result<(), String> {
+    if end_ms <= start_ms {
+        return Err(format!("end_ms ({end_ms}) must be after start_ms ({start_ms})"));
+    }
+    let ffmpeg = find_ffmpeg().ok_or("ffmpeg is required to split a reference video into shots and isn't installed")?;
+    if let Some(dir) = std::path::Path::new(&out_path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let start_s = start_ms as f64 / 1000.0;
+    let dur_s = (end_ms - start_ms) as f64 / 1000.0;
+    let out = quiet_command(&ffmpeg)
+        .args(["-y", "-ss"])
+        .arg(format!("{start_s:.3}"))
+        .arg("-i")
+        .arg(&source_path)
+        .args(["-t"])
+        .arg(format!("{dur_s:.3}"))
+        .args(["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p", "-an"])
+        .arg(&out_path)
+        .output()
+        .map_err(|e| format!("run ffmpeg: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("ffmpeg failed: {}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error")));
+    }
+    Ok(())
+}
+
+/// A short-GOP copy of the video at `path`, used only by the frame-accurate
+/// export. That export seeks every video once per frame, and a browser seek
+/// decodes forward from the previous keyframe. AI-generated clips often have one
+/// keyframe for the whole clip, so seek cost climbs through it (measured in Edge:
+/// 9 ms at 0 s → 79 ms at 7 s on a fast PC); slower PCs blew the old 250 ms seek
+/// cap and froze the video in the render. A keyframe every 15 frames caps each
+/// seek at a few frames' decode. Same size/fps, video only. Cached in the temp
+/// dir by (path, size, mtime), so each source is converted once.
+/// ponytail: re-encodes every clip, even ones whose keyframes are already dense;
+/// probe the keyframe spacing first if the one-off conversion time matters.
+#[tauri::command(async)]
+fn make_seek_proxy(path: String) -> Result<String, String> {
+    use std::hash::{Hash, Hasher};
+    let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (&path, meta.len(), meta.modified().ok()).hash(&mut h);
+    let dir = std::env::temp_dir().join("simple_effects_seek_proxies");
+    let out = dir.join(format!("{:016x}.mp4", h.finish()));
+    if out.exists() {
+        return Ok(out.to_string_lossy().into_owned());
+    }
+    let ffmpeg = find_ffmpeg().ok_or("ffmpeg isn't installed")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // Encode under a temp name, then rename: an interrupted run must never leave a
+    // truncated file that the next export would trust.
+    let part = out.with_extension("part.mp4");
+    let res = quiet_command(&ffmpeg)
+        .args(["-y", "-i"])
+        .arg(&path)
+        .args(["-map", "0:v:0", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-g", "15"])
+        .args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
+        .arg(&part)
+        .output()
+        .map_err(|e| format!("run ffmpeg: {e}"))?;
+    if !res.status.success() {
+        let _ = std::fs::remove_file(&part);
+        let err = String::from_utf8_lossy(&res.stderr);
+        return Err(format!("ffmpeg failed: {}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error")));
+    }
+    std::fs::rename(&part, &out).map_err(|e| format!("{}: {e}", out.display()))?;
+    Ok(out.to_string_lossy().into_owned())
 }
 
 /// The checker built *before* attempting the handoff §11.1 fix (template-
@@ -5396,6 +5608,15 @@ fn audit_export(
 /// Gate A spike: align a shot's frames against a reference frame — see
 /// `analyze::align_shot`'s doc for exactly what's returned and how to compose
 /// it into this engine's own transform values.
+///
+/// Every `t_ms` is shot-relative (0 at `start_ms`), matching `analyze_reference`'s
+/// own convention (`ShotAnalysis.motion`) — `align_shot` itself returns absolute
+/// video time; converting here, once, keeps every caller of this API on one
+/// consistent convention instead of each one needing to remember to subtract
+/// `start_ms` itself. Found live: a bridge script that forgot to convert fed
+/// `fit_background` absolute times against a relative span, corrupting an
+/// entire scoring run for every shot except the one starting at t=0
+/// (docs/STATUS-phase2-fitter-scoring.md) — exactly the bug this prevents.
 #[tauri::command]
 fn align_reference(
     path: String,
@@ -5404,7 +5625,14 @@ fn align_reference(
     ref_ms: Option<u32>,
     sample_every_ms: Option<u32>,
 ) -> Result<Vec<analyze::AlignSample>, String> {
-    analyze::align_shot(&path, start_ms, end_ms, ref_ms.unwrap_or(start_ms), sample_every_ms.unwrap_or(250), 256)
+    let samples = analyze::align_shot(&path, start_ms, end_ms, ref_ms.unwrap_or(start_ms), sample_every_ms.unwrap_or(250), 256)?;
+    Ok(samples
+        .into_iter()
+        .map(|mut s| {
+            s.t_ms = s.t_ms.saturating_sub(start_ms);
+            s
+        })
+        .collect())
 }
 
 /// Phase 2.5: key down `align_reference`'s (or a shot's `motion` field's)
@@ -5420,7 +5648,7 @@ fn fit_background(samples: Vec<analyze::AlignSample>, start_ms: u32, end_ms: u32
 /// aligner, which needs the boundaries already known).
 #[tauri::command]
 fn detect_cuts(path: String) -> Result<Vec<analyze::shots::Cut>, String> {
-    analyze::shots::detect_cuts(&path, 8.0, 128, &analyze::shots::CutParams::default())
+    analyze::detect_cuts_native(&path, &analyze::shots::CutParams::default())
 }
 
 /// The inverse-render entry point: cuts + per-shot motion/look/text-region
@@ -5796,6 +6024,9 @@ pub fn run() {
             set_audio_volume,
             set_audio_fade,
             mcp_bridge_start,
+            start_sam_service,
+            sam_service_status,
+            stop_sam_service,
             mcp_bridge_reply,
             mcp_bridge_requested,
             set_layer_hidden,
@@ -5884,10 +6115,16 @@ pub fn run() {
             split_layer,
             reorder_layers,
             save_project_file,
+            append_text_file,
+            read_text_file,
+            write_text_file,
+            extract_shot_clip,
             open_project_file,
             ffmpeg_status,
             install_ffmpeg,
+            export_upload_chunk,
             export_video,
+            make_seek_proxy,
             audit_export,
             align_reference,
             fit_background,
@@ -5952,5 +6189,64 @@ mod mixed_tests {
         let end = v_plain_segment(&c, &imgs(3), 0, 3 * 1500, 800, &mut next, &mut layers, &mut caps);
         assert!(end > 0);
         assert!(layers.len() >= 3);
+    }
+
+    /// Regression for the bug documented on `align_reference` itself: for a
+    /// shot that doesn't start at absolute t=0, its first sample must come
+    /// back as `t_ms == 0` (shot-relative), not the shot's absolute start
+    /// time. `analyze::align_shot` itself returns absolute video time — this
+    /// only holds because the command converts before returning. Depends on
+    /// a file outside the repo — run once with `cargo test --lib
+    /// mixed_tests::align_reference_returns_shot_relative_time -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn align_reference_returns_shot_relative_time() {
+        let path = "C:/Users/hsili/Desktop/SE-test-assets/synthetic/synthetic-1.mp4".to_string();
+        // Shot 4 per truth.json / recheck_against_synthetic_1's own cut list:
+        // starts at 5734ms, well past t=0.
+        let samples = align_reference(path, 5734, 9670, None, Some(250)).expect("align_reference");
+        assert!(!samples.is_empty());
+        assert_eq!(samples[0].t_ms, 0, "first sample of a non-zero-start shot must be shot-relative, got t_ms={}", samples[0].t_ms);
+    }
+}
+
+#[cfg(test)]
+mod export_upload_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("sefx_upload_test_{}_{name}", std::process::id()))
+    }
+
+    #[test]
+    fn chunks_written_out_of_order_assemble_like_the_muxers_header_patch() {
+        let p = scratch("assemble.webm");
+        write_chunk_at(&p, 0, true, b"HEADER-----").unwrap(); // muxer's first write
+        write_chunk_at(&p, 11, false, b"clusters").unwrap();
+        write_chunk_at(&p, 6, false, b"PATCH").unwrap(); // finalize() patches an earlier field
+        assert_eq!(std::fs::read(&p).unwrap(), b"HEADERPATCHclusters");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn reset_drops_a_stale_longer_file() {
+        let p = scratch("stale.webm");
+        write_chunk_at(&p, 0, true, &[9u8; 100]).unwrap(); // a crashed earlier export
+        write_chunk_at(&p, 0, true, b"new").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"new");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn empty_or_short_upload_fails_loudly_not_as_an_ffmpeg_error() {
+        // The pre-fix failure: base64 came back "" for a big WebM → 0-byte file.
+        let p = scratch("empty.webm");
+        std::fs::write(&p, b"").unwrap();
+        let e = export_video_from(&p, 0, "out.mp4", "mp4", "quality", 2, 0, &[], 1000).unwrap_err();
+        assert!(e.contains("intact"), "{e}");
+        std::fs::write(&p, b"12345").unwrap();
+        let e = export_video_from(&p, 9, "out.mp4", "mp4", "quality", 2, 0, &[], 1000).unwrap_err();
+        assert!(e.contains("expected 9 bytes, got 5"), "{e}");
+        let _ = std::fs::remove_file(&p);
     }
 }

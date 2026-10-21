@@ -165,6 +165,15 @@ pub(crate) fn extract_frames(
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct AlignSample {
+    /// Shot-relative (0 at the shot's own `start_ms`) in every externally-
+    /// visible use of this struct (the `align_reference` command, `analyze_
+    /// reference`'s `ShotAnalysis.motion`) — `align_shot` itself internally
+    /// works in absolute video time and each of those callers converts
+    /// before handing samples out, so nothing outside this module ever sees
+    /// absolute time here. Keep it that way: a caller that mixed the two
+    /// once fed `fit_background` absolute times against a relative span and
+    /// silently corrupted an entire scoring run (docs/STATUS-phase2-fitter-
+    /// scoring.md) — the bug wasn't obvious from the data alone.
     pub t_ms: u32,
     pub scale: f32,
     pub rotation_deg: f32,
@@ -225,12 +234,42 @@ pub(crate) fn align_shot(path: &str, start_ms: u32, end_ms: u32, ref_ms: u32, sa
     let mut out = vec![AlignSample { t_ms: 0, scale: 0.0, rotation_deg: 0.0, tx: 0.0, ty: 0.0, solved: false }; decoded.len()];
     out[ref_idx] = AlignSample { t_ms: decoded[ref_idx].0, scale: 1.0, rotation_deg: 0.0, tx: 0.0, ty: 0.0, solved: true };
 
+    // Background motion only — an element layer (Phase 3) may legitimately
+    // spin further than a shot's own background ever should.
+    const MAX_ROTATION_DEG: f32 = 45.0;
+
     let mut walk = |range: Box<dyn Iterator<Item = usize>>| {
         let mut prev = SimParams::IDENTITY;
         for i in range {
             let (t, frame) = &decoded[i];
-            let solved = align::align_pyramidal(reference, frame, prev, 4);
-            let p = solved.unwrap_or(prev);
+            // Previous-frame init converges faster and tracks smooth motion
+            // well, but once ONE frame fails, every frame after it was
+            // inheriting the SAME stale `prev` forever — a cascading
+            // failure (found live: solve rate falls from 84% near the
+            // reference frame to near 0% past 12s, docs/STATUS-phase2-
+            // fitter-scoring.md). Race BOTH a prev-seeded and an
+            // identity-seeded attempt against the ORIGINAL reference frame
+            // and keep whichever fits better (lower residual) — a second
+            // attempt from identity gives every frame an independent chance
+            // to recover, rather than being permanently stuck behind one bad
+            // estimate.
+            let from_prev = align::align_pyramidal(reference, frame, prev, 4);
+            let from_identity = align::align_pyramidal(reference, frame, SimParams::IDENTITY, 4);
+            let best = match (from_prev, from_identity) {
+                (Some(a), Some(b)) => Some(if a.residual <= b.residual { a } else { b }),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            // The race above only asks "which fits better" — a numerically
+            // converged but degenerate warp (scale collapsing toward 0, or a
+            // residual that never actually shrank) can still win that race
+            // against an equally-bad alternative. Gate the winner itself
+            // before trusting it (found live: `align_pyramidal` returning
+            // `Some` for exactly this, still read as `solved: true` by every
+            // caller, docs/STATUS-phase2-fitter-scoring.md).
+            let solved = best.filter(|f| align::plausible(f, MAX_ROTATION_DEG));
+            let p = solved.map(|f| f.params).unwrap_or(prev);
             out[i] = AlignSample { t_ms: *t, scale: p.scale(), rotation_deg: p.rotation_rad().to_degrees(), tx: p.tx, ty: p.ty, solved: solved.is_some() };
             prev = p; // carry the last estimate forward even on failure — still closer than identity
         }
@@ -321,6 +360,18 @@ fn probe_fps(path: &str, ffmpeg: &std::path::Path) -> f32 {
         }
     }
     30.0
+}
+
+/// 2.2: cut detection at the video's own native frame rate, not a fixed
+/// low one — the roadmap's ±1 frame cut-timing target can't be met at a
+/// coarser sampling rate than the source actually has. Cheap at 96px
+/// grayscale even at full fps; `align_shot`/`look::analyze_look` stay on
+/// their own lower, more expensive (colour, larger) sampling rates — only
+/// cut SCORING needs every frame.
+pub(crate) fn detect_cuts_native(path: &str, params: &shots::CutParams) -> Result<Vec<shots::Cut>, String> {
+    let ffmpeg = find_ffmpeg().ok_or("ffmpeg not found — install it to use shot detection")?;
+    let fps = probe_fps(path, &ffmpeg);
+    shots::detect_cuts(path, fps, 96, params)
 }
 
 /// Grayscale frames for `regions::detect_text_regions`, decoded directly
@@ -436,7 +487,7 @@ pub(crate) fn analyze_reference(path: &str) -> Result<TemplateAnalysis, String> 
         .map(|im| (im.width(), im.height()))
         .unwrap_or((0, 0));
 
-    let cuts = shots::detect_cuts(path, 8.0, 128, &shots::CutParams::default())?;
+    let cuts = shots::detect_cuts(path, fps, 96, &shots::CutParams::default())?;
 
     let mut boundaries: Vec<u32> = cuts.iter().map(|c| c.t_ms).collect();
     boundaries.push(0);
@@ -460,7 +511,11 @@ pub(crate) fn analyze_reference(path: &str) -> Result<TemplateAnalysis, String> 
         });
         let text_regions = detect_regions_for_shot(path, start_ms, end_ms).unwrap_or_default();
         let (is_still, motion) = if end_ms - start_ms >= MIN_MOTION_SHOT_MS {
-            match align_shot(path, start_ms, end_ms, start_ms, 250, 256) {
+            // 2.4's own "skip transition windows": align only the shot's
+            // clean interior (past any in/out transition), so neither the
+            // reference frame nor any walked sample is a blend of two shots.
+            let (core_start, core_end) = shots::clean_core(start_ms, end_ms, &cuts);
+            match align_shot(path, core_start, core_end, core_start, 250, 256) {
                 Ok(samples) if !samples.is_empty() => {
                     let solved = samples.iter().filter(|s| s.solved).count() as f32 / samples.len() as f32;
                     let relative: Vec<AlignSample> = samples

@@ -221,3 +221,78 @@ class DeepSeekProvider implements AgentProvider {
 export function makeProvider(id: ProviderId, apiKey: string, model: string): AgentProvider {
   return id === "deepseek" ? new DeepSeekProvider(apiKey, model) : new AnthropicProvider(apiKey, model);
 }
+
+export interface VisionExtraction<T> {
+  result: T;
+  usage?: Usage;
+}
+
+/** One-shot vision call: a system prompt + N images (data URLs), forced to
+ *  answer via a single tool call matching `responseSchema` (Anthropic's own
+ *  reliable structured-output pattern - `tool_choice` pinned to one tool -
+ *  rather than hoping free text happens to come back as valid JSON). No
+ *  AgentTurn, no tool loop: single-turn "look at these frames, return this
+ *  shape" extraction. Anthropic only - DeepSeek has no vision support worth
+ *  wiring here.
+ *
+ *  This exists specifically for the AUTONOMOUS "drop a video" flow
+ *  (templateExtractor.ts), where there's no external AI agent driving the
+ *  app to supply vision analysis the way the dev-session MCP tools
+ *  (generate_phrasings/read_text_lines in extraction.ts) expect - a normal
+ *  end user running that flow has no Claude Code session attached. Built
+ *  once already, deleted, rebuilt: the first attempt added this for the
+ *  WRONG use case (the MCP-driven dev tools), and the user corrected it
+ *  directly - "there is no anthropic key just use the mcp bridge" - because
+ *  in THAT context an external agent (e.g. this very session) already has
+ *  its own vision access and should supply the analysis itself, not have
+ *  the app re-spend a separate billed call. Here the situation is reversed:
+ *  there IS no external agent, so the app's own BYOK key (the same one
+ *  ScenarioPanel already uses) is the only vision access available. */
+export async function extractFromImages<T>(
+  apiKey: string,
+  model: string,
+  system: string,
+  userText: string,
+  images: string[],
+  responseSchema: Record<string, unknown>,
+  signal?: AbortSignal
+): Promise<VisionExtraction<T>> {
+  const content: unknown[] = [];
+  if (userText) content.push({ type: "text", text: userText });
+  for (const img of images) {
+    const { mime, data } = splitDataUrl(img);
+    content.push({ type: "image", source: { type: "base64", media_type: mime, data } });
+  }
+  const TOOL_NAME = "return_result";
+  const res = await fetchWithRetry(
+    "https://api.anthropic.com/v1/messages",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+      body: JSON.stringify({
+        model,
+        max_tokens: 8000,
+        system,
+        messages: [{ role: "user", content }],
+        tools: [{ name: TOOL_NAME, description: "Return the extracted result.", input_schema: responseSchema }],
+        tool_choice: { type: "tool", name: TOOL_NAME },
+      }),
+    },
+    signal
+  );
+  if (!res.ok) throw new Error(`Anthropic ${res.status}: ${(await res.text().catch(() => "")).slice(0, 300)}`);
+  const data = (await res.json()) as {
+    content: { type: string; input?: unknown }[];
+    usage?: { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number; output_tokens?: number };
+  };
+  const toolUse = data.content.find((b) => b.type === "tool_use" && b.input !== undefined);
+  if (!toolUse) throw new Error("vision extraction returned no structured result");
+  const u = data.usage;
+  const usage: Usage | undefined = u && {
+    inputTokens: u.input_tokens ?? 0,
+    cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
+    cacheReadTokens: u.cache_read_input_tokens ?? 0,
+    outputTokens: u.output_tokens ?? 0,
+  };
+  return { result: toolUse.input as T, usage };
+}

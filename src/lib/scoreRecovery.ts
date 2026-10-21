@@ -6,6 +6,8 @@
 // (Phase 2+) eventually looks like.
 import type { Project } from "../bindings/Project";
 import type { Layer } from "../bindings/Layer";
+import type { Keyframe } from "../bindings/Keyframe";
+import type { Easing } from "../bindings/Easing";
 import { sampleTrack } from "./track";
 
 /** How many times across the matched overlap to sample each track — errors are
@@ -157,5 +159,87 @@ export function scoreRecovery(truth: Project, recovered: Project): ScoreReport {
     meanOpacityError: mean((l) => l.opacityError),
     meanStartMsError: mean((l) => Math.abs(l.startMsError)),
     meanEndMsError: mean((l) => Math.abs(l.endMsError)),
+  };
+}
+
+/** 2.5's own "done when" scoring: how well does a FITTED keyframe track (e.g.
+ *  from `fit_background`, already composed into this channel's absolute
+ *  units by the caller — px for x/y, a scale factor for scaleX/scaleY,
+ *  degrees for rotation) reproduce the TRUTH track's own keyframes? Matches
+ *  each truth key to its nearest fitted key by time (keyframes are points,
+ *  not intervals — no IoU here) within `matchToleranceMs`; a truth key with
+ *  nothing fitted inside that window counts as missed. Phase 2's actual
+ *  done-when numbers (scale ≤1%, position ≤2px@1080p, rotation ≤0.3°, key
+ *  times ±2 frames, easing correct ≥80%) are read off this, not eyeballed. */
+export interface KeyframeMatch {
+  truthTimeMs: number;
+  truthValue: number;
+  truthEasing: Easing;
+  /** The truth track's own last key never starts a segment, so its easing
+   *  is unused/don't-care in this engine's model — excluded from
+   *  `easingAccuracy` (still scored on time/value). */
+  isLastKey: boolean;
+  matchedTimeMs: number | null;
+  timeErrorMs: number | null;
+  valueError: number | null;
+  easingCorrect: boolean | null;
+}
+
+export interface KeyframeFitReport {
+  matches: KeyframeMatch[];
+  missed: number;
+  meanTimeErrorMs: number | null;
+  meanValueError: number | null;
+  /** Fraction of non-last, matched keys whose fitted easing KIND (linear/
+   *  easeIn/easeOut/easeInOut/hold/bezier) matches truth's — bezier control
+   *  points aren't compared, only the shape family, matching how the
+   *  roadmap states this criterion ("easing correct"). */
+  easingAccuracy: number | null;
+}
+
+function easingKind(e: Easing): string {
+  return typeof e === "string" ? e : "bezier";
+}
+
+export function scoreKeyframeFit(truthKeys: Keyframe[], fittedKeys: Keyframe[], matchToleranceMs: number): KeyframeFitReport {
+  const lastTruthMs = truthKeys.length ? Math.max(...truthKeys.map((k) => k.timeMs)) : null;
+
+  const matches: KeyframeMatch[] = truthKeys.map((t) => {
+    let best: Keyframe | null = null;
+    let bestDist = Infinity;
+    for (const f of fittedKeys) {
+      const d = Math.abs(f.timeMs - t.timeMs);
+      if (d < bestDist) {
+        bestDist = d;
+        best = f;
+      }
+    }
+    const isLastKey = t.timeMs === lastTruthMs;
+    if (!best || bestDist > matchToleranceMs) {
+      return { truthTimeMs: t.timeMs, truthValue: t.value, truthEasing: t.easing, isLastKey, matchedTimeMs: null, timeErrorMs: null, valueError: null, easingCorrect: null };
+    }
+    return {
+      truthTimeMs: t.timeMs,
+      truthValue: t.value,
+      truthEasing: t.easing,
+      isLastKey,
+      matchedTimeMs: best.timeMs,
+      timeErrorMs: best.timeMs - t.timeMs,
+      valueError: best.value - t.value,
+      easingCorrect: isLastKey ? null : easingKind(best.easing) === easingKind(t.easing),
+    };
+  });
+
+  const found = matches.filter((m) => m.matchedTimeMs != null);
+  const mean = (f: (m: KeyframeMatch) => number): number | null =>
+    found.length ? found.reduce((s, m) => s + f(m), 0) / found.length : null;
+  const easingRated = found.filter((m) => m.easingCorrect != null);
+
+  return {
+    matches,
+    missed: matches.length - found.length,
+    meanTimeErrorMs: mean((m) => Math.abs(m.timeErrorMs!)),
+    meanValueError: mean((m) => Math.abs(m.valueError!)),
+    easingAccuracy: easingRated.length ? easingRated.filter((m) => m.easingCorrect).length / easingRated.length : null,
   };
 }

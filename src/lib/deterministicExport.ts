@@ -12,7 +12,7 @@
 // Encoded as VP9 into a WebM (muxed in-browser); MP4 is produced by transcoding
 // that WebM through the existing ffmpeg path.
 
-import { Muxer, ArrayBufferTarget } from "webm-muxer";
+import { Muxer, StreamTarget } from "webm-muxer";
 
 /** Bitrate (bits/s) for compression level 1..5 (1 = best quality / largest). */
 export function bitrateForLevel(level: number): number {
@@ -26,6 +26,56 @@ export function isDeterministicSupported(): boolean {
 
 const VP9_CODEC = "vp09.00.10.08"; // profile 0, level 1.0, 8-bit
 
+/** Muxer writes are batched into slices of this size before being handed off. */
+const UPLOAD_CHUNK = 8 * 1024 * 1024;
+/** Stop rendering while this much encoded data is still waiting to be uploaded. */
+const MAX_PENDING_BYTES = 64 * 1024 * 1024;
+
+/**
+ * A webm-muxer target that streams the WebM out instead of accumulating it.
+ * `onData(bytes, position)` is called IN ORDER, one at a time (the muxer also
+ * writes at earlier positions when it patches headers on finalize, so the sink
+ * must write at `position`, not append). Memory stays flat however long or
+ * high-bitrate the render is — the old `ArrayBufferTarget` + base64 route threw
+ * "Array buffer allocation failed" at ~1 GiB and silently produced an empty
+ * upload at ~384 MB.
+ */
+export function createUploadTarget(onData: (data: Uint8Array, position: number) => Promise<void>) {
+  let queue: Promise<void> = Promise.resolve();
+  let failure: unknown = null;
+  let pending = 0;
+  let size = 0;
+  const target = new StreamTarget({
+    chunked: true,
+    chunkSize: UPLOAD_CHUNK,
+    onData: (data, position) => {
+      const copy = data.slice(); // the muxer may reuse its buffer after we return
+      size = Math.max(size, position + copy.byteLength);
+      pending += copy.byteLength;
+      queue = queue
+        .then(() => (failure ? undefined : onData(copy, position)))
+        .catch((e) => {
+          failure ??= e;
+        })
+        .then(() => {
+          pending -= copy.byteLength;
+        });
+    },
+  });
+  return {
+    target,
+    /** Total WebM length so far (final once the muxer is finalized). */
+    get size() {
+      return size;
+    },
+    /** Surface a failed upload; with `all`, or when too much is buffered, wait for the queue first. */
+    async settle(all = false) {
+      if (all || pending > MAX_PENDING_BYTES) await queue;
+      if (failure) throw failure;
+    },
+  };
+}
+
 export interface DeterministicOpts {
   canvas: HTMLCanvasElement;
   width: number;
@@ -35,6 +85,8 @@ export interface DeterministicOpts {
   bitrate: number;
   /** Render the comp at `tMs` and resolve once the canvas has painted it. */
   renderFrame: (tMs: number, frameIndex: number) => Promise<void>;
+  /** Receives the WebM as it's muxed — see `createUploadTarget`. */
+  onData: (data: Uint8Array, position: number) => Promise<void>;
   /** Called after each frame is rendered (for the live preview probe trace). */
   onFrameRendered?: (tMs: number, frameIndex: number) => void;
   /** 0..1 progress for the UI. */
@@ -46,10 +98,11 @@ export interface DeterministicOpts {
 }
 
 /**
- * Render every frame and encode to a WebM (VP9). Returns the WebM bytes.
+ * Render every frame and encode to a WebM (VP9), streamed through `onData`.
+ * Returns the WebM's total length in bytes.
  * Throws if WebCodecs / the VP9 config isn't supported (caller should fall back).
  */
-export async function encodeDeterministicWebm(opts: DeterministicOpts): Promise<Uint8Array> {
+export async function encodeDeterministicWebm(opts: DeterministicOpts): Promise<number> {
   const { canvas, width, height, fps, durationMs, bitrate, renderFrame } = opts;
   if (!isDeterministicSupported()) throw new Error("WebCodecs not available");
 
@@ -65,8 +118,9 @@ export async function encodeDeterministicWebm(opts: DeterministicOpts): Promise<
       throw new Error("VP9 encode config not supported");
   }
 
+  const upload = createUploadTarget(opts.onData);
   const muxer = new Muxer({
-    target: new ArrayBufferTarget(),
+    target: upload.target,
     video: { codec: "V_VP9", width, height, frameRate: fps },
     firstTimestampBehavior: "offset",
   });
@@ -88,6 +142,7 @@ export async function encodeDeterministicWebm(opts: DeterministicOpts): Promise<
     for (let f = 0; f < frameCount; f++) {
       if (opts.shouldAbort?.()) throw new Error("export aborted");
       if (encodeError) throw encodeError;
+      await upload.settle();
       const tMs = Math.round((f * 1000) / fps);
       await renderFrame(tMs, f);
       opts.onFrameRendered?.(tMs, f);
@@ -112,7 +167,8 @@ export async function encodeDeterministicWebm(opts: DeterministicOpts): Promise<
     await encoder.flush();
     if (encodeError) throw encodeError;
     muxer.finalize();
-    return new Uint8Array(muxer.target.buffer);
+    await upload.settle(true);
+    return upload.size;
   } finally {
     try {
       encoder.close();

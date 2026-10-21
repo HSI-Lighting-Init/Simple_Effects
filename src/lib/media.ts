@@ -7,6 +7,7 @@
 // video frame onto a canvas never taints it — which keeps the WebCodecs export
 // working.
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { record } from "./recorder";
 
 export type MediaKind = "image" | "video" | "audio";
 
@@ -131,6 +132,27 @@ export interface PooledVideo {
 }
 const videoPool = new Map<number, PooledVideo>();
 
+// Export-only short-GOP stand-ins (original path → proxy path; see makeSeekProxy).
+// loadVideo resolves through this, so swapping it rebuilds every pooled element.
+let seekProxies = new Map<string, string>();
+
+/** Install (or with null, remove) the export's seek proxies. */
+export function setSeekProxies(next: Map<string, string> | null) {
+  // Release the old proxies' blobs: they're only needed while exporting.
+  for (const proxy of seekProxies.values()) {
+    const url = urlCache.get(proxy);
+    if (url) URL.revokeObjectURL(url);
+    urlCache.delete(proxy);
+  }
+  seekProxies = next ?? new Map();
+  slowSeeksLogged = 0;
+}
+
+/** The file a video layer's element actually loads (its proxy while exporting). */
+export function videoSrc(src: string): string {
+  return seekProxies.get(src) ?? src;
+}
+
 /** Source time (s) a video layer shows at its first frame. */
 export function videoStartSec(
   inMs: number,
@@ -145,6 +167,7 @@ export function videoStartSec(
 
 /** The layer's pooled element (created + loading if new). Idempotent per (layer, src). */
 export function loadVideo(layerId: number, src: string, startSec = 0): PooledVideo {
+  src = videoSrc(src);
   const hit = videoPool.get(layerId);
   if (hit && hit.src === src) return hit;
   dropVideo(layerId);
@@ -187,41 +210,66 @@ export function dropVideo(layerId: number) {
   e.el.load();
 }
 
-// --- Live <video> element registry (used by the export to seek per frame) ---
-const videoEls = new Map<number, HTMLVideoElement>();
+// --- Per-frame seeking for the deterministic export ---
+/** Only a hung decoder hits this. The old 250 ms cap was hit by merely SLOW ones:
+ *  the frame was captured before the seek landed, so on slower PCs video froze in
+ *  the render wherever seeks were expensive (late in long-GOP clips). */
+const SEEK_TIMEOUT_MS = 10_000;
+const SLOW_SEEK_MS = 250;
+let slowSeeksLogged = 0;
 
-/** VideoNode registers its element so the export can seek it (null = remove). */
-export function registerVideoEl(layerId: number, el: HTMLVideoElement | null) {
-  if (el) videoEls.set(layerId, el);
-  else videoEls.delete(layerId);
+export interface VideoSeekTarget {
+  layerId: number;
+  src: string;
+  /** The layer's first-frame source time (for loadVideo's initial park). */
+  startSec: number;
+  timeSec: number;
 }
 
-/** Seek every listed video to its target source-time and await the seek to land
- *  (so the export captures the correct frame). */
-export async function seekVideosForFrame(
-  targets: { layerId: number; timeSec: number }[]
-): Promise<void> {
+/** Bring each on-screen video's pooled element to its target source-time and wait
+ *  for that frame to decode, however long it takes — a slow PC makes the export
+ *  slower, never wrong. Loads the element first if it isn't warm yet. */
+export async function seekVideosForFrame(targets: VideoSeekTarget[]): Promise<void> {
   await Promise.all(
-    targets.map(({ layerId, timeSec }) => {
-      const v = videoEls.get(layerId);
-      if (!v || v.readyState < 1) return Promise.resolve();
-      if (Math.abs(v.currentTime - timeSec) < 0.001) return Promise.resolve();
-      return new Promise<void>((resolve) => {
-        let settled = false;
-        const done = () => {
-          if (settled) return;
-          settled = true;
-          v.removeEventListener("seeked", done);
-          resolve();
-        };
-        v.addEventListener("seeked", done);
-        try {
-          v.currentTime = timeSec;
-        } catch {
-          done();
-        }
-        setTimeout(done, 250); // safety: never hang the export
-      });
+    targets.map(async ({ layerId, src, startSec, timeSec }) => {
+      const t0 = performance.now();
+      let timedOut = false;
+      const timeout = async <T>(p: Promise<T>) => {
+        let timer = 0;
+        await Promise.race([
+          p,
+          new Promise<void>((r) => {
+            timer = window.setTimeout(() => {
+              timedOut = true;
+              r();
+            }, SEEK_TIMEOUT_MS);
+          }),
+        ]);
+        clearTimeout(timer);
+      };
+      const entry = loadVideo(layerId, src, startSec);
+      await timeout(entry.whenReady);
+      const v = entry.el;
+      // Same end clamp as VideoNode, so its sync effect doesn't re-seek after us.
+      const t = Number.isFinite(v.duration) ? Math.min(timeSec, Math.max(0, v.duration - 0.05)) : timeSec;
+      if (entry.ready && Math.abs(v.currentTime - t) >= 0.001) {
+        let onSeeked = () => {};
+        await timeout(
+          new Promise<void>((resolve) => {
+            onSeeked = resolve;
+            v.addEventListener("seeked", onSeeked, { once: true });
+            try {
+              v.currentTime = t;
+            } catch {
+              resolve();
+            }
+          })
+        );
+        v.removeEventListener("seeked", onSeeked);
+      }
+      const ms = performance.now() - t0;
+      if ((ms > SLOW_SEEK_MS || timedOut) && slowSeeksLogged++ < 300)
+        record("slow_seek", { layerId, timeSec: +t.toFixed(3), ms: Math.round(ms), timedOut, proxy: entry.src !== src });
     })
   );
 }

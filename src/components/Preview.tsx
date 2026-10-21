@@ -33,7 +33,7 @@ import type { Texture } from "../lib/surface3d";
 import { applyEffects, buildFilter } from "../lib/effects";
 import { renderShine } from "../lib/shinyClouds";
 import { renderGpuFx, gpuFxIsOverlay } from "../lib/gpuFx";
-import { dropVideo, loadVideo, registerVideoEl, videoStartSec } from "../lib/media";
+import { dropVideo, loadVideo, videoStartSec } from "../lib/media";
 import { isRecording, record } from "../lib/recorder";
 import { createTransition, getTransitionMeta } from "../lib/transitions";
 import type { Clip } from "../lib/transitions";
@@ -1143,35 +1143,33 @@ function VideoNode({
   // Usually already warm (see loadVideo in media.ts), so the first frame draws
   // immediately instead of after a fetch + load + seek.
   const startSec = videoStartSec(inMs, speed, reverse, layerStartMs, layerEndMs);
-  const [vid, setVid] = useState<HTMLVideoElement | null>(() => {
-    const p = loadVideo(layerId, src, startSec);
-    return p.ready ? p.el : null;
-  });
+  // Look the pooled element up every render (idempotent map lookup): when the
+  // export swaps in seek proxies (setSeekProxies) the entry changes, and this
+  // draws the new element instead of holding on to the dropped one.
+  const pooled = loadVideo(layerId, src, startSec);
+  const vid = pooled.ready ? pooled.el : null;
+  const [, setReady] = useState(0);
   const imgRef = useRef<Konva.Node | null>(null);
   const bRef = useRef<HTMLCanvasElement | null>(null);
   const offRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Pick up the pooled element once per source (blob URL is canvas-safe for export).
+  // Redraw once the pooled element has its first frame (blob URL is canvas-safe for export).
   useEffect(() => {
     let alive = true;
-    const p = loadVideo(layerId, src, startSec);
-    p.whenReady.then((v) => {
+    pooled.whenReady.then((v) => {
       if (!alive) return;
-      registerVideoEl(layerId, v);
       v.onseeked = () => imgRef.current?.getLayer()?.batchDraw();
-      setVid(v);
+      setReady((n) => n + 1);
       imgRef.current?.getLayer()?.batchDraw();
     });
     return () => {
       alive = false;
-      registerVideoEl(layerId, null);
       // Park it, don't destroy: the warm-up effect in Preview drops it once the
       // layer is out of range, and a quick remount reuses it.
-      p.el.onseeked = null;
-      p.el.pause();
+      pooled.el.onseeked = null;
+      pooled.el.pause();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [src, layerId]);
+  }, [pooled]);
 
   // Sync the source time / play state to the playhead, honouring speed & reverse.
   useEffect(() => {

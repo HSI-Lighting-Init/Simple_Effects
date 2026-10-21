@@ -260,6 +260,39 @@ export const renameLayer = (layerId: number, name: string) =>
 export const saveProjectFile = (path: string) =>
   invoke<void>("save_project_file", { path });
 
+/** Append one line to a text file, creating it (and its parent dirs) if
+ *  needed. First use: a durable JSONL audit trail for the template-
+ *  extraction submission tools (generate_phrasings/read_text_lines). */
+export const appendTextFile = (path: string, line: string) =>
+  invoke<void>("append_text_file", { path, line });
+
+/** Read a text file, or null if it doesn't exist yet. Pairs with
+ *  writeTextFile for a read-merge-write pattern. */
+export const readTextFile = (path: string) =>
+  invoke<string | null>("read_text_file", { path });
+
+/** Write (overwrite) a text file, creating its parent dirs if needed. */
+export const writeTextFile = (path: string, contents: string) =>
+  invoke<void>("write_text_file", { path, contents });
+
+/** DEV ONLY. Start (or confirm already running) the SAM3/SAM2 service
+ *  backing segment_concepts/refine_element. Does not wait for model
+ *  loading — poll the service's own /health endpoint after calling this. */
+export const startSamService = (pythonPath: string, scriptPath: string, port: number) =>
+  invoke<void>("start_sam_service", { pythonPath, scriptPath, port });
+
+/** DEV ONLY. Whether a spawned sam_service process is still alive. */
+export const samServiceStatus = () => invoke<boolean>("sam_service_status");
+
+/** DEV ONLY. Kill the running sam_service process, if any. */
+export const stopSamService = () => invoke<void>("stop_sam_service");
+
+/** Extract [startMs, endMs) of sourcePath into a standalone file at outPath
+ *  (re-encoded, frame-accurate — not a stream copy). The SAM pipeline's own
+ *  per-shot tools expect one file per shot, frame 0 = the shot's own start. */
+export const extractShotClip = (sourcePath: string, startMs: number, endMs: number, outPath: string) =>
+  invoke<void>("extract_shot_clip", { sourcePath, startMs, endMs, outPath });
+
 /** Open a .sefx project file, replacing the current project. */
 export const openProjectFile = (path: string) =>
   invoke<Project>("open_project_file", { path });
@@ -801,8 +834,21 @@ export interface AudioTrackSpec {
   fadeOutMs?: number;
 }
 
+/** Stream one slice of the encoded WebM to Rust as a raw binary IPC body (no
+ *  base64 / JSON string — those silently broke past ~384 MB). `offset` is the
+ *  slice's byte position in the file; `reset` marks the export's first slice. */
+export const exportUploadChunk = (data: Uint8Array, offset: number, reset: boolean) =>
+  invoke<void>("export_upload_chunk", data, {
+    headers: reset ? { "x-offset": String(offset), "x-reset": "1" } : { "x-offset": String(offset) },
+  });
+
+/** Path of a cached short-GOP copy of a video, so the export's per-frame seeks
+ *  stay cheap (see `make_seek_proxy`). Rejects if ffmpeg is missing or fails. */
+export const makeSeekProxy = (path: string) => invoke<string>("make_seek_proxy", { path });
+
+/** Mux/transcode the WebM uploaded via `exportUploadChunk` (`webmLen` bytes). */
 export const exportVideo = (
-  base64: string,
+  webmLen: number,
   path: string,
   format: "mp4" | "webm",
   rateMode: "quality" | "bitrate",
@@ -812,7 +858,7 @@ export const exportVideo = (
   durationMs: number
 ) =>
   invoke<void>("export_video", {
-    webmBase64: base64,
+    webmLen,
     path,
     format,
     rateMode,
