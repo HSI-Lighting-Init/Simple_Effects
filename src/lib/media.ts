@@ -115,6 +115,78 @@ export async function getVideoPoster(path: string): Promise<string> {
   });
 }
 
+// --- Warm <video> pool, keyed by layer ---
+// A VideoNode mounts only when its layer's range starts. Building the element then
+// (fetch blob → load → first frame → seek to the clip's in-point) left the layer
+// drawing NOTHING for the first frames of every video clip: a flash of background
+// at each cut in the live preview, worst between split clips that hard-cut straight
+// into the next element. Export never showed it because it waits for each frame.
+// Preview now warms elements ahead of time and parks them paused on their first
+// frame, already seeked to the in-point; VideoNode just picks them up.
+export interface PooledVideo {
+  src: string;
+  el: HTMLVideoElement;
+  ready: boolean;
+  whenReady: Promise<HTMLVideoElement>;
+}
+const videoPool = new Map<number, PooledVideo>();
+
+/** Source time (s) a video layer shows at its first frame. */
+export function videoStartSec(
+  inMs: number,
+  speed: number,
+  reverse: boolean,
+  startMs: number,
+  endMs: number
+): number {
+  const spd = speed > 0 ? speed : 1;
+  return inMs / 1000 + (reverse ? Math.max(0, endMs - startMs) / 1000 * spd : 0);
+}
+
+/** The layer's pooled element (created + loading if new). Idempotent per (layer, src). */
+export function loadVideo(layerId: number, src: string, startSec = 0): PooledVideo {
+  const hit = videoPool.get(layerId);
+  if (hit && hit.src === src) return hit;
+  dropVideo(layerId);
+  const el = document.createElement("video");
+  el.playsInline = true;
+  el.preload = "auto";
+  // Always silent: sound comes from the layer's separate audio layer, so deleting
+  // or hiding that layer removes it and preview matches export.
+  el.muted = true;
+  const entry: PooledVideo = { src, el, ready: false, whenReady: null as never };
+  entry.whenReady = getMediaUrl(src).then(
+    (url) =>
+      new Promise<HTMLVideoElement>((resolve) => {
+        const done = () => {
+          entry.ready = true;
+          resolve(el);
+        };
+        el.onloadeddata = () => {
+          const t = Math.min(startSec, Math.max(0, (el.duration || 0) - 0.05));
+          if (t > 0.02) {
+            el.addEventListener("seeked", done, { once: true });
+            el.currentTime = t;
+            setTimeout(done, 1500); // never leave the layer blank if the seek event is lost
+          } else done();
+        };
+        el.src = url;
+      })
+  );
+  videoPool.set(layerId, entry);
+  return entry;
+}
+
+/** Tear down a layer's pooled element (layer far from the playhead / replaced). */
+export function dropVideo(layerId: number) {
+  const e = videoPool.get(layerId);
+  if (!e) return;
+  videoPool.delete(layerId);
+  e.el.pause();
+  e.el.removeAttribute("src");
+  e.el.load();
+}
+
 // --- Live <video> element registry (used by the export to seek per frame) ---
 const videoEls = new Map<number, HTMLVideoElement>();
 

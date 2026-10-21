@@ -478,7 +478,9 @@ function recProject(p: Project | null) {
     return {
       timeMs: Math.round(timeRef.current),
       selectedId: selectedIdRef.current,
-      layers: p.layers.map((l) => {
+      // Only layers on screen (+ the selected one): an off-range layer is 40+ rows of
+      // noise per event and pushed pasted recordings over the 50k-char limit.
+      layers: p.layers.filter((l) => res[l.id]?.visible || l.id === selectedIdRef.current).map((l) => {
         const r = res[l.id];
         const base: Record<string, unknown> = {
           id: l.id,

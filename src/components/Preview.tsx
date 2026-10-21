@@ -33,7 +33,7 @@ import type { Texture } from "../lib/surface3d";
 import { applyEffects, buildFilter } from "../lib/effects";
 import { renderShine } from "../lib/shinyClouds";
 import { renderGpuFx, gpuFxIsOverlay } from "../lib/gpuFx";
-import { getMediaUrl, registerVideoEl } from "../lib/media";
+import { dropVideo, loadVideo, registerVideoEl, videoStartSec } from "../lib/media";
 import { isRecording, record } from "../lib/recorder";
 import { createTransition, getTransitionMeta } from "../lib/transitions";
 import type { Clip } from "../lib/transitions";
@@ -1140,42 +1140,37 @@ function VideoNode({
   interaction: Interaction;
   registerRef: NodeRef;
 }) {
-  const [vid, setVid] = useState<HTMLVideoElement | null>(null);
+  // Usually already warm (see loadVideo in media.ts), so the first frame draws
+  // immediately instead of after a fetch + load + seek.
+  const startSec = videoStartSec(inMs, speed, reverse, layerStartMs, layerEndMs);
+  const [vid, setVid] = useState<HTMLVideoElement | null>(() => {
+    const p = loadVideo(layerId, src, startSec);
+    return p.ready ? p.el : null;
+  });
   const imgRef = useRef<Konva.Node | null>(null);
   const bRef = useRef<HTMLCanvasElement | null>(null);
   const offRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Create the element once per source (blob URL is canvas-safe for export).
+  // Pick up the pooled element once per source (blob URL is canvas-safe for export).
   useEffect(() => {
     let alive = true;
-    let el: HTMLVideoElement | null = null;
-    getMediaUrl(src).then((url) => {
+    const p = loadVideo(layerId, src, startSec);
+    p.whenReady.then((v) => {
       if (!alive) return;
-      const v = document.createElement("video");
-      v.playsInline = true;
-      v.preload = "auto";
-      // The video is always silent; its sound is driven by its separate audio
-      // layer (created on import) via AudioLayerPlayer. That way deleting/hiding
-      // the audio layer actually removes the sound, and preview matches export.
-      v.muted = true;
-      v.src = url;
-      v.onloadeddata = () => {
-        registerVideoEl(layerId, v);
-        setVid(v);
-        imgRef.current?.getLayer()?.batchDraw();
-      };
+      registerVideoEl(layerId, v);
       v.onseeked = () => imgRef.current?.getLayer()?.batchDraw();
-      el = v;
+      setVid(v);
+      imgRef.current?.getLayer()?.batchDraw();
     });
     return () => {
       alive = false;
       registerVideoEl(layerId, null);
-      if (el) {
-        el.pause();
-        el.removeAttribute("src");
-        el.load();
-      }
+      // Park it, don't destroy: the warm-up effect in Preview drops it once the
+      // layer is out of range, and a quick remount reuses it.
+      p.el.onseeked = null;
+      p.el.pause();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src, layerId]);
 
   // Sync the source time / play state to the playhead, honouring speed & reverse.
@@ -2654,6 +2649,21 @@ export default function Preview({
   useEffect(() => {
     Object.values(images).forEach((s) => void loadImage(s));
   }, [images]);
+  // Keep a <video> element loaded and parked on its in-point for every clip that
+  // starts within 3s (and drop the ones well past), so a clip is ready the frame its
+  // layer mounts. ponytail: top-level layers only; a clip inside a group falls back
+  // to loading on mount. Re-evaluated twice a second, not every frame.
+  const warmTick = Math.floor(timeMs / 500);
+  useEffect(() => {
+    for (const l of project.layers) {
+      const k = l.kind;
+      if (k.kind !== "video") continue;
+      if (timeMs >= l.startMs - 3000 && timeMs <= l.endMs + 500)
+        loadVideo(l.id, k.src, videoStartSec(k.inMs ?? 0, k.speed ?? 1, k.reverse ?? false, l.startMs, l.endMs));
+      else dropVideo(l.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project, warmTick]);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   // User zoom (1 = fit-to-window) and pan offset (px), driven by the scroll wheel.
@@ -2672,7 +2682,7 @@ export default function Preview({
   useEffect(() => {
     if (!isRecording()) return;
     const byId = new Map(project.layers.map((l) => [l.id, l]));
-    const rows = Object.values(resolved).map((r) => {
+    const rows = Object.values(resolved).filter((r) => r.visible).map((r) => {
       const l = byId.get(r.id);
       const k = l?.kind.kind;
       return {
