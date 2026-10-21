@@ -34,6 +34,7 @@ import { applyEffects, buildFilter } from "../lib/effects";
 import { renderShine } from "../lib/shinyClouds";
 import { renderGpuFx, gpuFxIsOverlay } from "../lib/gpuFx";
 import { getMediaUrl, registerVideoEl } from "../lib/media";
+import { isRecording, record } from "../lib/recorder";
 import { createTransition, getTransitionMeta } from "../lib/transitions";
 import type { Clip } from "../lib/transitions";
 import type { Project } from "../bindings/Project";
@@ -2662,6 +2663,62 @@ export default function Preview({
   const [panX, setPanX] = useState(0);
   const [panY, setPanY] = useState(0);
   const nodeRefs = useRef<Record<number, Konva.Node>>({});
+  // Flash probe (session recorder only). After each committed frame, log (a) layers
+  // the evaluator says are on screen but have no node mounted — a node that isn't
+  // ready renders null, i.e. nothing — and (b) a 16x16 brightness sample of the
+  // stage; a sudden jump is a "frame" event naming the layers mid-transition then.
+  // A flash shows as two jumps (down, then up) with `missing`/factors explaining it.
+  const probe = useRef({ cv: null as HTMLCanvasElement | null, lum: -1, miss: "", n: 0 });
+  useEffect(() => {
+    if (!isRecording()) return;
+    const byId = new Map(project.layers.map((l) => [l.id, l]));
+    const rows = Object.values(resolved).map((r) => {
+      const l = byId.get(r.id);
+      const k = l?.kind.kind;
+      return {
+        id: r.id,
+        name: l?.name,
+        kind: k,
+        op: +r.opacity.toFixed(2),
+        f: r.transition ? +r.transition.factor.toFixed(2) : null,
+        missing: (k === "image" || k === "video") && !nodeRefs.current[r.id],
+      };
+    });
+    const miss = rows.filter((x) => x.missing).map((x) => x.id).join(",");
+    const t = Math.round(timeMs);
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        const p = probe.current;
+        const src = wrapRef.current?.querySelector("canvas");
+        let lum = -1;
+        if (src) {
+          const cv = (p.cv ??= document.createElement("canvas"));
+          cv.width = cv.height = 16;
+          const c = cv.getContext("2d", { willReadFrequently: true });
+          if (c) {
+            c.drawImage(src, 0, 0, 16, 16);
+            const d = c.getImageData(0, 0, 16, 16).data;
+            let s = 0;
+            for (let i = 0; i < d.length; i += 4) s += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+            lum = Math.round(s / 256);
+          }
+        }
+        const jump = p.lum >= 0 && Math.abs(lum - p.lum) > 25;
+        if ((jump || miss !== p.miss) && p.n < 600) {
+          p.n++;
+          record("frame", {
+            t,
+            lum,
+            prevLum: p.lum,
+            missing: miss,
+            layers: rows.filter((x) => x.f != null || x.missing),
+          });
+        }
+        p.lum = lum;
+        p.miss = miss;
+      })
+    );
+  }, [resolved, project, timeMs]);
   const trRef = useRef<Konva.Transformer>(null);
   // Anchor position pinned during a transform so a custom-anchor layer pivots
   // scale/rotation about its anchor instead of the transformer's box corner.

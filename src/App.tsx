@@ -329,6 +329,24 @@ export default function App() {
   const imagesRef = useRef(images);
   imagesRef.current = images;
   const [fonts, setFonts] = useState<string[]>([]);
+// One text row per layer instead of the whole project JSON (the .sefx has that):
+// a full dump alone is ~48k chars and pushed the events past the 50k chat-paste
+// limit, so every pasted recording lost its tail.
+function recProject(p: Project | null) {
+  if (!p) return null;
+  const tr = (l: Project["layers"][number]["transitionIn"], k: string) =>
+    l ? ` ${k}:${l.engine ?? l.kind}/${l.durMs}` : "";
+  return {
+    size: `${p.width}x${p.height}@${p.fps} ${p.durationMs}ms`,
+    layers: p.layers.map(
+      (l) =>
+        `${l.id} ${l.name} [${l.kind.kind}] ${l.startMs}-${l.endMs}${l.hidden ? " HIDDEN" : ""}` +
+        tr(l.transitionIn, "in") +
+        tr(l.transitionOut, "out")
+    ),
+  };
+}
+
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   // Resizable panels: media-bin width, inspector width, timeline height, and the
@@ -3477,13 +3495,13 @@ export default function App() {
           }
         : null,
     });
-    record("start", { project: p, scene: sceneSnapshot() });
+    record("start", { project: recProject(p), scene: sceneSnapshot() });
     setRecording(true);
     setRecCount(eventCount());
   }, [sceneSnapshot]);
 
   const stopRec = useCallback(() => {
-    if (isRecording()) record("stop", { project: projectRef.current, scene: sceneSnapshot() });
+    if (isRecording()) record("stop", { project: recProject(projectRef.current), scene: sceneSnapshot() });
     stopRecording();
     setRecording(false);
     setRecCount(eventCount());
