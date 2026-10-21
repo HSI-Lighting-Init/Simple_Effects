@@ -209,28 +209,49 @@ function cappedTexture(img: HTMLImageElement, max = 1280): HTMLImageElement | HT
  *  bug). `decode()` can reject in a few real engines even when `load` would
  *  have fired (some GIF/animated cases); fall back to `load` rather than never
  *  resolving. */
+// Decoded images are cached by src. A layer's node component swaps type at every
+// transition window edge (ImageNode ↔ TransitionImageNode ↔ EffectImageNode), which
+// remounts it; without the cache each remount restarted `decode()` and drew NOTHING
+// for a few frames — the white/black flash around a transition in the preview (export
+// is frame-accurate so it never showed). With the cache a remount renders the same
+// frame synchronously. ponytail: unbounded for the session, evict if memory matters.
+const imgCache = new Map<string, HTMLImageElement>();
+const imgLoading = new Map<string, Promise<HTMLImageElement>>();
+function loadImage(src: string): Promise<HTMLImageElement> {
+  let p = imgLoading.get(src);
+  if (!p) {
+    const im = new window.Image();
+    im.src = src;
+    p = im
+      .decode()
+      .catch(() => new Promise<void>((res) => (im.complete ? res() : (im.onload = () => res()))))
+      .then(() => {
+        imgCache.set(src, im);
+        return im;
+      });
+    imgLoading.set(src, p);
+  }
+  return p;
+}
+
 function useImage(src?: string): HTMLImageElement | null {
-  const [img, setImg] = useState<HTMLImageElement | null>(null);
+  const [img, setImg] = useState<HTMLImageElement | null>(() => (src && imgCache.get(src)) || null);
   useEffect(() => {
     if (!src) {
       setImg(null);
       return;
     }
+    const hit = imgCache.get(src);
+    if (hit) {
+      setImg(hit);
+      return;
+    }
     let cancelled = false;
-    const im = new window.Image();
-    im.src = src;
-    im.decode()
-      .then(() => {
-        if (!cancelled) setImg(im);
-      })
-      .catch(() => {
-        im.onload = () => {
-          if (!cancelled) setImg(im);
-        };
-      });
+    loadImage(src).then((im) => {
+      if (!cancelled) setImg(im);
+    });
     return () => {
       cancelled = true;
-      im.onload = null;
     };
   }, [src]);
   return img;
@@ -2627,6 +2648,11 @@ export default function Preview({
   // Longest-side cap for drawn textures. Export always renders at full fidelity;
   // in the editor a cap keeps heavy (multi-megapixel) images cheap to redraw.
   const maxTex = exporting ? Infinity : PREVIEW_QUALITY_CAP[previewQuality];
+  // Warm the decode cache for every project image up front, so a clip is ready the
+  // frame its layer first mounts (not decoding mid-transition).
+  useEffect(() => {
+    Object.values(images).forEach((s) => void loadImage(s));
+  }, [images]);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   // User zoom (1 = fit-to-window) and pan offset (px), driven by the scroll wheel.
