@@ -39,12 +39,18 @@ export function getMediaUrl(path: string): Promise<string> {
   if (pending) return pending;
   const p = (async () => {
     const res = await fetch(convertFileSrc(path));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     urlCache.set(path, url);
     urlPending.delete(path);
     return url;
-  })();
+  })().catch((e) => {
+    // Name the file (a bare "TypeError: Failed to fetch" reached the export
+    // dialog), and don't cache the failure, so the next caller retries.
+    urlPending.delete(path);
+    throw new Error(`Couldn't load ${path}: ${e}`);
+  });
   urlPending.set(path, p);
   return p;
 }
@@ -180,11 +186,13 @@ export function loadVideo(layerId: number, src: string, startSec = 0): PooledVid
   const entry: PooledVideo = { src, el, ready: false, whenReady: null as never };
   entry.whenReady = getMediaUrl(src).then(
     (url) =>
-      new Promise<HTMLVideoElement>((resolve) => {
+      new Promise<HTMLVideoElement>((resolve, reject) => {
         const done = () => {
           entry.ready = true;
           resolve(el);
         };
+        // Without this a file the browser can't decode left whenReady pending forever.
+        el.onerror = () => reject(new Error(`Couldn't decode ${src}: ${el.error?.message || "unsupported video"}`));
         el.onloadeddata = () => {
           const t = Math.min(startSec, Math.max(0, (el.duration || 0) - 0.05));
           if (t > 0.02) {
@@ -196,6 +204,7 @@ export function loadVideo(layerId: number, src: string, startSec = 0): PooledVid
         el.src = url;
       })
   );
+  entry.whenReady.catch(() => {}); // Preview's warm-up never awaits it; real waiters still see the error
   videoPool.set(layerId, entry);
   return entry;
 }

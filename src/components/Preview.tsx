@@ -1156,12 +1156,15 @@ function VideoNode({
   // Redraw once the pooled element has its first frame (blob URL is canvas-safe for export).
   useEffect(() => {
     let alive = true;
-    pooled.whenReady.then((v) => {
-      if (!alive) return;
-      v.onseeked = () => imgRef.current?.getLayer()?.batchDraw();
-      setReady((n) => n + 1);
-      imgRef.current?.getLayer()?.batchDraw();
-    });
+    pooled.whenReady.then(
+      (v) => {
+        if (!alive) return;
+        v.onseeked = () => imgRef.current?.getLayer()?.batchDraw();
+        setReady((n) => n + 1);
+        imgRef.current?.getLayer()?.batchDraw();
+      },
+      (e) => console.warn("video", e) // unloadable: the layer stays blank here; export reports it
+    );
     return () => {
       alive = false;
       // Park it, don't destroy: the warm-up effect in Preview drops it once the

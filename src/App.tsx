@@ -3134,8 +3134,11 @@ export default function App() {
                 setTime(tMs);
                 // Seek every on-screen video layer to this exact source-time and wait
                 // for the decode, so the captured frame shows the right video content.
+                // `.visible`, not mere presence: evaluateAt returns EVERY layer, so this
+                // used to load + await all of the comp's videos on every frame — one
+                // unloadable clip anywhere stalled each frame by SEEK_TIMEOUT_MS.
                 const videoTargets = p.layers
-                  .filter((l) => l.kind.kind === "video" && map[l.id])
+                  .filter((l) => l.kind.kind === "video" && map[l.id]?.visible)
                   .map((l) => {
                     const k = l.kind.kind === "video" ? l.kind : null;
                     const durMs = k?.durationMs ?? 0;
