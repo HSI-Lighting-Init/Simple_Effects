@@ -556,8 +556,11 @@ export default function Timeline({
     const mk = layer.kind.kind === "video" || layer.kind.kind === "audio" ? layer.kind : null;
     const srcDur = mk?.durationMs ?? 0;
     const curIn = mk?.inMs ?? 0;
-    const minStart = mk && srcDur > 0 ? Math.max(0, layer.startMs - curIn) : 0;
-    const maxEnd = mk && srcDur > 0 ? layer.startMs + (srcDur - curIn) : dur;
+    // Source ms are `spd` per timeline ms, so source-side limits shrink/stretch
+    // on the timeline by 1/spd (a 2× clip covers its source in half the time).
+    const spd = mk?.speed && mk.speed > 0 ? mk.speed : 1;
+    const minStart = mk && srcDur > 0 ? Math.max(0, layer.startMs - curIn / spd) : 0;
+    const maxEnd = mk && srcDur > 0 ? layer.startMs + (srcDur - curIn) / spd : dur;
 
     // The layers that move together, and their ranges at drag start.
     const groupIds = inGroup ? selectedIds.slice() : [layer.id];
@@ -651,7 +654,12 @@ export default function Timeline({
           // same amount, so the media under the new start is where it was cut to.
           const newIn =
             mk && mode === "start"
-              ? Math.max(0, Math.min(srcDur - (next.endMs - next.startMs), curIn + (next.startMs - layer.startMs)))
+              ? Math.round(
+                  Math.max(
+                    0,
+                    Math.min(srcDur - (next.endMs - next.startMs) * spd, curIn + (next.startMs - layer.startMs) * spd)
+                  )
+                )
               : undefined;
           onSetLayerRange(next.id, next.startMs, next.endMs, newIn);
         }

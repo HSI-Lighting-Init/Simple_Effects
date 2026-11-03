@@ -37,12 +37,44 @@ fn default_new_layer_end(duration_ms: u32) -> u32 {
     (duration_ms / 4).max(MIN_SPAN_MS).min(duration_ms.max(MIN_SPAN_MS))
 }
 
+/// Longest composition the app allows (matches `set_comp_duration`).
+const MAX_COMP_MS: u32 = 3_600_000;
+
+/// Latest end time across the top-level layers (0 when there are none).
+fn layers_end(p: &Project) -> u32 {
+    p.layers.iter().map(|l| l.end_ms).max().unwrap_or(0)
+}
+
+/// True while the comp length is "fit to its content": nothing on the timeline
+/// yet, or the comp ends exactly where the last layer does. A length the user
+/// set by hand (longer or shorter than the content) is NOT fit, and is left alone.
+fn comp_is_fit(p: &Project) -> bool {
+    p.layers.is_empty() || p.duration_ms == layers_end(p)
+}
+
+/// Re-fit the comp length after content changed. `was_fit` (computed BEFORE the
+/// change) means follow the content both ways (grow and shrink); otherwise the
+/// comp only grows, so a layer is never left hanging past the end.
+fn refit_comp(p: &mut Project, was_fit: bool) {
+    let end = layers_end(p).min(MAX_COMP_MS);
+    if end == 0 {
+        return;
+    }
+    if was_fit {
+        p.duration_ms = end.max(MIN_SPAN_MS);
+    } else if end > p.duration_ms {
+        p.duration_ms = end;
+    }
+}
+
 /// Undo/redo stacks of whole-project snapshots. Each user-level mutation pushes
 /// the pre-change project onto `undo`.
 #[derive(Default)]
 struct History {
     undo: Vec<Project>,
     redo: Vec<Project>,
+    /// Key + time of the last coalescable edit (see `snapshot_coalesced`).
+    last: Option<(String, std::time::Instant)>,
 }
 
 /// One level of "inside a group" navigation: the parent scope's layers (with the
@@ -79,6 +111,27 @@ impl AppState {
             h.undo.drain(0..excess);
         }
         h.redo.clear();
+        h.last = None;
+    }
+
+    /// Like `snapshot`, for slider-driven edits that fire one command per tick:
+    /// repeated calls with the same `key` within `COALESCE_MS` of each other
+    /// share ONE undo step (the state before the first tick), instead of
+    /// pushing a snapshot per tick — which made a single drag take dozens of
+    /// undos and flushed real history out of the 200-step cap.
+    fn snapshot_coalesced(&self, current: &Project, key: &str) {
+        const COALESCE_MS: u128 = 1000;
+        let now = std::time::Instant::now();
+        {
+            let mut h = self.history.lock().unwrap();
+            let same = matches!(&h.last, Some((k, t)) if k == key && now.duration_since(*t).as_millis() < COALESCE_MS);
+            if same && !h.undo.is_empty() {
+                h.last = Some((key.to_string(), now)); // the drag is still going
+                return;
+            }
+        }
+        self.snapshot(current);
+        self.history.lock().unwrap().last = Some((key.to_string(), now));
     }
 }
 
@@ -179,6 +232,7 @@ fn undo(state: State<AppState>) -> Option<Project> {
     let mut project = state.project.lock().unwrap();
     let mut h = state.history.lock().unwrap();
     let prev = h.undo.pop()?;
+    h.last = None;
     h.redo.push(project.clone());
     *project = prev;
     let mut shaped = state.shaped.lock().unwrap();
@@ -192,6 +246,7 @@ fn redo(state: State<AppState>) -> Option<Project> {
     let mut project = state.project.lock().unwrap();
     let mut h = state.history.lock().unwrap();
     let next = h.redo.pop()?;
+    h.last = None;
     h.undo.push(project.clone());
     *project = next;
     let mut shaped = state.shaped.lock().unwrap();
@@ -757,9 +812,11 @@ fn add_video_layer(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Video".into());
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
-    // Trim to the video's own length when known, else the standard 25% default.
+    let was_fit = comp_is_fit(&project);
+    // The clip keeps its own full length when known (the comp stretches to fit
+    // it below), else the standard 25% default.
     let end_ms = if duration_ms > 0 {
-        duration_ms.clamp(MIN_SPAN_MS, project.duration_ms.max(MIN_SPAN_MS))
+        duration_ms.clamp(MIN_SPAN_MS, MAX_COMP_MS)
     } else {
         default_new_layer_end(project.duration_ms)
     };
@@ -781,6 +838,9 @@ fn add_video_layer(
         transition_in: None,
         transition_out: None,
     });
+    if duration_ms > 0 {
+        refit_comp(&mut project, was_fit);
+    }
     project.clone()
 }
 
@@ -795,8 +855,9 @@ fn add_audio_layer(state: State<AppState>, path: String, duration_ms: u32) -> Pr
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Audio".into());
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
+    let was_fit = comp_is_fit(&project);
     let end_ms = if duration_ms > 0 {
-        duration_ms.clamp(MIN_SPAN_MS, project.duration_ms.max(MIN_SPAN_MS))
+        duration_ms.clamp(MIN_SPAN_MS, MAX_COMP_MS)
     } else {
         default_new_layer_end(project.duration_ms)
     };
@@ -813,26 +874,75 @@ fn add_audio_layer(state: State<AppState>, path: String, duration_ms: u32) -> Pr
         transition_in: None,
         transition_out: None,
     });
+    if duration_ms > 0 {
+        refit_comp(&mut project, was_fit);
+    }
     project.clone()
 }
 
+/// (is_video, src, in_ms, speed) of a video/audio layer; None for other kinds.
+fn av_info(l: &Layer) -> Option<(bool, &str, u32, f32)> {
+    match &l.kind {
+        LayerKind::Video { src, in_ms, speed, .. } => Some((true, src.as_str(), *in_ms, *speed)),
+        LayerKind::Audio { src, in_ms, speed, .. } => Some((false, src.as_str(), *in_ms, *speed)),
+        _ => None,
+    }
+}
+
 /// Set an audio/video clip's playback speed multiplier (0.1..8, 1 = normal).
-/// Undoable.
+///
+/// The clip's length on the timeline follows the speed: it keeps showing the
+/// same stretch of source, so 2× halves its length and 0.5× doubles it (start
+/// stays put; there's no black tail after the media ends). A video's own audio
+/// layer (same file, same range — what "add to timeline" creates) is retimed
+/// with it so picture and sound stay in sync. The comp length follows when it
+/// was fit to the content, and otherwise only grows. Undoable (one step per
+/// slider drag).
 #[tauri::command]
 fn set_clip_speed(state: State<AppState>, layer_id: u32, speed: f32) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
-    state.snapshot(&project);
-    let layer = project
+    let (main_is_video, src, in_ms, old_speed) = {
+        let l = project.layers.iter().find(|l| l.id == layer_id).ok_or("layer not found")?;
+        let (v, s, i, sp) = av_info(l).ok_or("not an audio/video layer")?;
+        (v, s.to_string(), i, sp)
+    };
+    state.snapshot_coalesced(&project, &format!("clip_speed:{layer_id}")); // slider drag = one undo
+    let new_speed = speed.clamp(0.1, 8.0);
+    let (start, end) = {
+        let l = project.layers.iter().find(|l| l.id == layer_id).unwrap();
+        (l.start_ms, l.end_ms)
+    };
+    // The layer plus its linked partner(s): opposite kind, same file / in-point /
+    // speed / range.
+    let ids: Vec<u32> = project
         .layers
-        .iter_mut()
-        .find(|l| l.id == layer_id)
-        .ok_or("layer not found")?;
-    let s = speed.clamp(0.1, 8.0);
-    match &mut layer.kind {
-        LayerKind::Video { speed, .. } => *speed = s,
-        LayerKind::Audio { speed, .. } => *speed = s,
-        _ => return Err("not an audio/video layer".into()),
+        .iter()
+        .filter(|l| {
+            l.id == layer_id
+                || av_info(l).is_some_and(|(v, s, i, sp)| {
+                    v != main_is_video
+                        && s == src
+                        && i == in_ms
+                        && (sp - old_speed).abs() < 1e-4
+                        && l.start_ms == start
+                        && l.end_ms == end
+                })
+        })
+        .map(|l| l.id)
+        .collect();
+    let was_fit = comp_is_fit(&project);
+    for l in project.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        let Some((_, _, _, cur)) = av_info(l) else { continue };
+        let span = l.end_ms.saturating_sub(l.start_ms);
+        // Same source stretch (span × old speed) played at the new speed.
+        let new_span = ((span as f64 * cur as f64 / new_speed as f64).round() as u32).max(MIN_SPAN_MS);
+        l.end_ms = (l.start_ms + new_span).min(MAX_COMP_MS);
+        match &mut l.kind {
+            LayerKind::Video { speed, .. } | LayerKind::Audio { speed, .. } => *speed = new_speed,
+            _ => {}
+        }
     }
+    refit_comp(&mut project, was_fit);
     Ok(project.clone())
 }
 
@@ -860,7 +970,7 @@ fn set_clip_reverse(state: State<AppState>, layer_id: u32, reverse: bool) -> Res
 #[tauri::command]
 fn set_audio_volume(state: State<AppState>, layer_id: u32, volume: f32) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
-    state.snapshot(&project);
+    state.snapshot_coalesced(&project, &format!("audio_volume:{layer_id}")); // slider drag = one undo
     let layer = project
         .layers
         .iter_mut()
@@ -884,7 +994,7 @@ fn set_audio_fade(
     fade_out_ms: u32,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
-    state.snapshot(&project);
+    state.snapshot_coalesced(&project, &format!("audio_fade:{layer_id}")); // slider drag = one undo
     let layer = project
         .layers
         .iter_mut()
@@ -1167,10 +1277,12 @@ fn set_layer_range(
     // Clamp so it stays within the source and leaves the trimmed span playable.
     if let (
         Some(new_in),
-        LayerKind::Video { duration_ms, in_ms, .. } | LayerKind::Audio { duration_ms, in_ms, .. },
+        LayerKind::Video { duration_ms, in_ms, speed, .. } | LayerKind::Audio { duration_ms, in_ms, speed, .. },
     ) = (in_ms, &mut layer.kind)
     {
-        let span = e.saturating_sub(s);
+        // The visible span consumes span × speed of source.
+        let spd = if *speed > 0.0 { *speed as f64 } else { 1.0 };
+        let span = (e.saturating_sub(s) as f64 * spd).round() as u32;
         let max_in = duration_ms.saturating_sub(span);
         *in_ms = new_in.min(max_in);
     }
@@ -1288,8 +1400,20 @@ fn place_layer(
     layer_id: u32,
     start_ms: u32,
     above_id: Option<u32>,
+    grow: Option<bool>,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
+    // `grow`: media being added to the timeline keeps its full length — the comp
+    // stretches to hold it instead of the clip being cut off at the comp end.
+    if grow.unwrap_or(false) {
+        if let Some(l) = project.layers.iter().find(|l| l.id == layer_id) {
+            let span = l.end_ms.saturating_sub(l.start_ms).max(MIN_SPAN_MS);
+            let end = start_ms.saturating_add(span).min(MAX_COMP_MS);
+            if end > project.duration_ms {
+                project.duration_ms = end;
+            }
+        }
+    }
     let dur = project.duration_ms.max(MIN_SPAN_MS);
     // Re-time: start at the playhead, keep the span, clamp to the comp end.
     {
@@ -5278,13 +5402,19 @@ fn atempo_chain(speed: f32) -> String {
 /// stream capped at the comp duration. Audio inputs are ffmpeg inputs 1..=N (0 is
 /// the video). Returns None if there are no usable tracks.
 fn audio_filter_complex(audio: &[AudioTrack], duration_ms: u32) -> Option<String> {
+    audio_filter_complex_at(audio, duration_ms, 1)
+}
+
+/// `audio_filter_complex` with the first audio input at ffmpeg input index
+/// `first_input` (the merge graph has several video inputs before its audio).
+fn audio_filter_complex_at(audio: &[AudioTrack], duration_ms: u32, first_input: usize) -> Option<String> {
     if audio.is_empty() {
         return None;
     }
     let dur = duration_ms as f64 / 1000.0;
     let mut fc = String::new();
     for (i, a) in audio.iter().enumerate() {
-        let inp = i + 1; // input 0 is the video
+        let inp = first_input + i;
         let src_in = a.source_in_ms as f64 / 1000.0;
         let play = a.play_ms as f64 / 1000.0;
         let speed = if a.speed > 0.0 { a.speed as f64 } else { 1.0 };
@@ -5404,9 +5534,14 @@ fn export_video(
     bitrate: u32,
     audio: Vec<AudioTrack>,
     duration_ms: u32,
+    fast: Option<bool>,
+    direct_mp4: Option<bool>,
 ) -> Result<(), String> {
     let tmp = export_upload_path();
-    let result = export_video_from(&tmp, webm_len, &path, &format, &rate_mode, level, bitrate, &audio, duration_ms);
+    let result = export_video_from(
+        &tmp, webm_len, &path, &format, &rate_mode, level, bitrate, &audio, duration_ms,
+        fast.unwrap_or(false), direct_mp4.unwrap_or(false),
+    );
     let _ = std::fs::remove_file(&tmp); // success or not, never leave GBs in %TEMP%
     result
 }
@@ -5421,6 +5556,8 @@ fn export_video_from(
     bitrate: u32,
     audio: &[AudioTrack],
     duration_ms: u32,
+    fast: bool,
+    direct_mp4: bool,
 ) -> Result<(), String> {
     let got = std::fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
     if webm_len == 0 || got != webm_len {
@@ -5438,6 +5575,32 @@ fn export_video_from(
             eprintln!("export: ffmpeg not found; saving WebM without its audio track");
         }
         return std::fs::copy(tmp, path).map(|_| ()).map_err(|e| format!("write {path}: {e}"));
+    }
+
+    // Direct MP4: the frontend already encoded H.264 (GPU, WebCodecs) into an MP4,
+    // so nothing is re-encoded. ffmpeg only mixes in the audio and moves the index
+    // to the front (+faststart) — seconds, not minutes. Without audio and without
+    // ffmpeg the file is valid as it is.
+    if direct_mp4 && format == "mp4" {
+        let Some(ffmpeg) = ffmpeg else {
+            if filter.is_some() {
+                return Err("Audio needs ffmpeg, which isn't installed.".into());
+            }
+            return std::fs::copy(tmp, path).map(|_| ()).map_err(|e| format!("write {path}: {e}"));
+        };
+        let mut cmd = quiet_command(&ffmpeg);
+        // (the temp file is named .webm; ffmpeg sniffs the real container)
+        cmd.args(["-y", "-i"]).arg(tmp);
+        for a in audio {
+            cmd.args(["-i"]).arg(&a.path);
+        }
+        if let Some(fc) = &filter {
+            cmd.args(["-filter_complex", fc, "-map", "0:v:0", "-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]);
+        } else {
+            cmd.args(["-map", "0:v:0"]);
+        }
+        cmd.args(["-c:v", "copy", "-movflags", "+faststart"]);
+        return run_ffmpeg(cmd, path);
     }
 
     let ffmpeg = ffmpeg.ok_or(
@@ -5461,37 +5624,69 @@ fn export_video_from(
     // 1-second VBV buffer → tight CBR that lands on the predicted size.
     let bufsize = target.to_string();
 
-    let mut cmd = quiet_command(&ffmpeg);
-    cmd.args(["-y", "-i"]).arg(tmp);
-    // Audio inputs (1..=N).
-    for a in audio {
-        cmd.args(["-i"]).arg(&a.path);
-    }
-    if let Some(fc) = &filter {
-        cmd.args(["-filter_complex", fc, "-map", "0:v:0", "-map", "[aout]"]);
-    } else {
-        cmd.args(["-map", "0:v:0"]);
-    }
+    // One ffmpeg invocation with the given video-codec args (audio inputs, the
+    // filter graph and the audio codec are the same for every attempt).
+    let build = |video_args: &[&str]| {
+        let mut cmd = quiet_command(&ffmpeg);
+        cmd.args(["-y", "-i"]).arg(tmp);
+        // Audio inputs (1..=N).
+        for a in audio {
+            cmd.args(["-i"]).arg(&a.path);
+        }
+        if let Some(fc) = &filter {
+            cmd.args(["-filter_complex", fc, "-map", "0:v:0", "-map", "[aout]"]);
+        } else {
+            cmd.args(["-map", "0:v:0"]);
+        }
+        cmd.args(video_args);
+        if filter.is_some() {
+            if format == "webm" {
+                cmd.args(["-c:a", "libopus", "-b:a", "192k"]);
+            } else {
+                cmd.args(["-c:a", "aac", "-b:a", "192k"]);
+            }
+        }
+        cmd
+    };
+
     // Video codec: keep VP9 for WebM (fast copy), transcode to H.264 for MP4.
     if format == "webm" {
-        cmd.args(["-c:v", "copy"]);
-        if filter.is_some() {
-            cmd.args(["-c:a", "libopus", "-b:a", "192k"]);
+        return run_ffmpeg(build(&["-c:v", "copy"]), path);
+    }
+    // Fast: the GPU encoder (NVENC) when this ffmpeg/PC has one, else x264
+    // `veryfast`. Same CBR targeting, so the file size still matches the estimate;
+    // only the compression efficiency is a little lower than `medium`.
+    if fast {
+        let nvenc = run_ffmpeg(
+            build(&[
+                "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "cbr",
+                "-b:v", bv.as_str(), "-maxrate", bv.as_str(), "-bufsize", bufsize.as_str(),
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            ]),
+            path,
+        );
+        if nvenc.is_ok() {
+            return nvenc;
         }
-    } else {
-        cmd.args([
+        eprintln!("export: NVENC unavailable ({}), using x264 veryfast", nvenc.unwrap_err());
+    }
+    run_ffmpeg(
+        build(&[
             "-c:v", "libx264",
             "-b:v", bv.as_str(), "-minrate", bv.as_str(), "-maxrate", bv.as_str(),
             "-bufsize", bufsize.as_str(),
             // Force strict CBR so the file actually reaches the target bitrate.
             "-x264-params", "nal-hrd=cbr:force-cfr=1",
-            "-preset", "medium", "-pix_fmt", "yuv420p",
+            "-preset", if fast { "veryfast" } else { "medium" }, "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
-        ]);
-        if filter.is_some() {
-            cmd.args(["-c:a", "aac", "-b:a", "192k"]);
-        }
-    }
+        ]),
+        path,
+    )
+}
+
+/// Run a prepared ffmpeg command (output path appended here) and turn a failure
+/// into a readable error.
+fn run_ffmpeg(mut cmd: std::process::Command, path: &str) -> Result<(), String> {
     let out = cmd.arg(path).output().map_err(|e| format!("run ffmpeg: {e}"))?;
     if !out.status.success() {
         // The last line alone ("Error opening input files: …") never says WHICH
@@ -5559,11 +5754,13 @@ fn extract_shot_clip(source_path: String, start_ms: u32, end_ms: u32, out_path: 
 /// ponytail: re-encodes every clip, even ones whose keyframes are already dense;
 /// probe the keyframe spacing first if the one-off conversion time matters.
 #[tauri::command(async)]
-fn make_seek_proxy(path: String) -> Result<String, String> {
+fn make_seek_proxy(path: String, fast: Option<bool>) -> Result<String, String> {
     use std::hash::{Hash, Hasher};
+    let fast = fast.unwrap_or(false);
     let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (&path, meta.len(), meta.modified().ok()).hash(&mut h);
+    // Fast proxies are lower quality, so they're cached separately.
+    (&path, meta.len(), meta.modified().ok(), fast).hash(&mut h);
     let dir = std::env::temp_dir().join("simple_effects_seek_proxies");
     let out = dir.join(format!("{:016x}.mp4", h.finish()));
     if out.exists() {
@@ -5574,14 +5771,30 @@ fn make_seek_proxy(path: String) -> Result<String, String> {
     // Encode under a temp name, then rename: an interrupted run must never leave a
     // truncated file that the next export would trust.
     let part = out.with_extension("part.mp4");
-    let res = quiet_command(&ffmpeg)
-        .args(["-y", "-i"])
-        .arg(&path)
-        .args(["-map", "0:v:0", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-g", "15"])
-        .args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
-        .arg(&part)
-        .output()
-        .map_err(|e| format!("run ffmpeg: {e}"))?;
+    let encode = |video_args: &[&str]| {
+        quiet_command(&ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&path)
+            .args(["-map", "0:v:0", "-an"])
+            .args(video_args)
+            .args(["-g", "15", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
+            .arg(&part)
+            .output()
+            .map_err(|e| format!("run ffmpeg: {e}"))
+    };
+    // Fast: try the GPU encoder first (seconds instead of a CPU transcode), then
+    // x264 `ultrafast`. Exact: x264 `veryfast` at near-lossless quality.
+    let mut res = None;
+    if fast {
+        res = encode(&["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "20", "-b:v", "0", "-bf", "0"])
+            .ok()
+            .filter(|r| r.status.success());
+    }
+    let res = match res {
+        Some(r) => r,
+        None if fast => encode(&["-c:v", "libx264", "-preset", "ultrafast", "-crf", "20"])?,
+        None => encode(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"])?,
+    };
     if !res.status.success() {
         let _ = std::fs::remove_file(&part);
         let err = String::from_utf8_lossy(&res.stderr);
@@ -5867,12 +6080,34 @@ fn split_layer(state: State<AppState>, layer_id: u32, t_ms: u32) -> Result<Proje
     reassign_ids(&mut second, &mut next); // fresh ids for it + any nested children
     second.start_ms = t_ms;
     second.transition_in = None; // it now starts mid-clip
-    // A video/audio second piece continues from the cut, not from the source
-    // start — advance its in-point by how far into the layer the cut fell.
-    if let LayerKind::Video { duration_ms, in_ms, .. }
-    | LayerKind::Audio { duration_ms, in_ms, .. } = &mut second.kind
-    {
-        *in_ms = (*in_ms + (t_ms - orig_start)).min(*duration_ms);
+    // A video/audio piece must keep showing the same source frames it showed
+    // before the cut, so move the in-point by SOURCE time. One timeline ms is
+    // `speed` source ms (see VideoNode / audio_filter_complex: forward source
+    // time = in + elapsed*speed; reverse = in + (len - elapsed)*speed), so the
+    // timeline offset has to be scaled by speed — using it raw jumps the clip
+    // whenever speed != 1.
+    let orig_end = project.layers[idx].end_ms;
+    let shift_in = |kind: &mut LayerKind, timeline_ms: u32| {
+        if let LayerKind::Video { duration_ms, in_ms, speed, .. }
+        | LayerKind::Audio { duration_ms, in_ms, speed, .. } = kind
+        {
+            let spd = if *speed > 0.0 { *speed as f64 } else { 1.0 };
+            let src_ms = (timeline_ms as f64 * spd).round() as u32;
+            *in_ms = (*in_ms).saturating_add(src_ms).min(*duration_ms);
+        }
+    };
+    let reversed = matches!(
+        &second.kind,
+        LayerKind::Video { reverse: true, .. } | LayerKind::Audio { reverse: true, .. }
+    );
+    if reversed {
+        // Reverse plays from the far end of the window down to `in`, so the
+        // FIRST piece (the earlier timeline part) starts at the high source
+        // time: it needs the advanced in-point; the second piece keeps `in`.
+        shift_in(&mut project.layers[idx].kind, orig_end - t_ms);
+    } else {
+        // Forward: the second piece continues from the cut.
+        shift_in(&mut second.kind, t_ms - orig_start);
     }
     project.layers[idx].end_ms = t_ms;
     project.layers[idx].transition_out = None; // it now ends at the cut
@@ -5901,6 +6136,314 @@ fn delete_layer(state: State<AppState>, layer_id: u32) -> Project {
     project.layers.retain(|l| l.id != layer_id);
     state.shaped.lock().unwrap().remove(&layer_id);
     project.clone()
+}
+
+/// Delete several layers as ONE undo step (used by Merge). Shapes detach any
+/// layers pinned to them, like `delete_layer`.
+#[tauri::command]
+fn delete_layers(state: State<AppState>, layer_ids: Vec<u32>) -> Project {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    for layer_id in &layer_ids {
+        let is_shape = project
+            .layers
+            .iter()
+            .any(|l| l.id == *layer_id && matches!(l.kind, LayerKind::Shape3D { .. }));
+        if is_shape {
+            for l in &mut project.layers {
+                if l.attach.as_ref().map_or(false, |d| d.shape_id == *layer_id) {
+                    l.attach = None;
+                }
+            }
+        }
+    }
+    project.layers.retain(|l| !layer_ids.contains(&l.id));
+    let mut shaped = state.shaped.lock().unwrap();
+    for id in &layer_ids {
+        shaped.remove(id);
+    }
+    project.clone()
+}
+
+// ---------------------------------------------------------------------------
+// Fast merge: render a few simple clips into one video with ONE ffmpeg command
+// (sequential decode + GPU encode) instead of the canvas pipeline's per-frame
+// seek/paint/encode. Only used when the result is provably the same as what the
+// preview shows; anything else is refused with an "ineligible: …" error and the
+// caller falls back to the exact canvas render.
+// ---------------------------------------------------------------------------
+
+/// One video layer prepared for the ffmpeg overlay graph. Times are relative to
+/// the start of the merged range.
+#[derive(Debug, Clone, PartialEq)]
+struct MergeVideoClip {
+    path: String,
+    /// Where it appears in the merged video (ms).
+    start_ms: u32,
+    end_ms: u32,
+    /// Source offset / length to read (ms), speed already applied.
+    src_in_ms: u32,
+    src_len_ms: u32,
+    speed: f64,
+    /// Displayed size and top-left position in comp px.
+    w: u32,
+    h: u32,
+    x: i32,
+    y: i32,
+    opacity: f32,
+}
+
+#[derive(Debug)]
+struct MergePlan {
+    width: u32,
+    height: u32,
+    fps: f32,
+    duration_ms: u32,
+    videos: Vec<MergeVideoClip>,
+    audio: Vec<AudioTrack>,
+}
+
+fn ineligible(why: &str) -> String {
+    format!("ineligible: {why}")
+}
+
+/// Static (un-keyframed) value of a track, or None if it animates.
+fn static_value(t: &Track) -> Option<f32> {
+    if t.keys.is_empty() { Some(t.default) } else { None }
+}
+
+/// Decide whether `ids` (within [in_ms, out_ms]) can be merged by ffmpeg alone,
+/// and if so describe it. Everything the ffmpeg graph can't reproduce exactly —
+/// effects, transitions, keyframes, rotation, reverse, non-video layers — is a
+/// refusal, never an approximation.
+fn plan_fast_merge(project: &Project, ids: &[u32], in_ms: u32, out_ms: u32) -> Result<MergePlan, String> {
+    if out_ms <= in_ms {
+        return Err(ineligible("empty range"));
+    }
+    if project.width % 2 != 0 || project.height % 2 != 0 {
+        return Err(ineligible("comp size isn't even"));
+    }
+    let mut videos = Vec::new();
+    let mut audio = Vec::new();
+    for l in project.layers.iter().filter(|l| ids.contains(&l.id)) {
+        if l.hidden || l.end_ms <= in_ms || l.start_ms >= out_ms {
+            continue;
+        }
+        let cs = l.start_ms.max(in_ms);
+        let ce = l.end_ms.min(out_ms);
+        match &l.kind {
+            LayerKind::Video { src, width, height, duration_ms, in_ms: src_in, speed, reverse } => {
+                if *reverse {
+                    return Err(ineligible("a clip is reversed"));
+                }
+                if !l.effects.is_empty() {
+                    return Err(ineligible("a clip has effects"));
+                }
+                if l.transition_in.is_some() || l.transition_out.is_some() {
+                    return Err(ineligible("a clip has a transition"));
+                }
+                if l.attach.is_some() {
+                    return Err(ineligible("a clip is pinned to a shape"));
+                }
+                let t = &l.transform;
+                let (Some(x), Some(y), Some(sx), Some(sy), Some(rot), Some(op)) = (
+                    static_value(&t.x),
+                    static_value(&t.y),
+                    static_value(&t.scale_x),
+                    static_value(&t.scale_y),
+                    static_value(&t.rotation),
+                    static_value(&t.opacity),
+                ) else {
+                    return Err(ineligible("a clip is keyframed"));
+                };
+                if rot.abs() > 0.01 {
+                    return Err(ineligible("a clip is rotated"));
+                }
+                if sx <= 0.0 || sy <= 0.0 || *width == 0 || *height == 0 {
+                    return Err(ineligible("a clip is flipped or has no size"));
+                }
+                if !(0.0..=1.0).contains(&op) {
+                    return Err(ineligible("odd opacity"));
+                }
+                let spd = if *speed > 0.0 { *speed as f64 } else { 1.0 };
+                let w = ((*width as f32 * sx).round() as u32).max(2);
+                let h = ((*height as f32 * sy).round() as u32).max(2);
+                let src_start = *src_in as f64 + (cs - l.start_ms) as f64 * spd;
+                let mut src_len = (ce - cs) as f64 * spd;
+                // Never read past the media (the canvas path holds its last frame there).
+                if *duration_ms > 0 {
+                    src_len = src_len.min((*duration_ms as f64 - src_start).max(0.0));
+                }
+                if src_len <= 0.0 {
+                    return Err(ineligible("a clip starts past the end of its media"));
+                }
+                videos.push(MergeVideoClip {
+                    path: src.clone(),
+                    start_ms: cs - in_ms,
+                    end_ms: ce - in_ms,
+                    src_in_ms: src_start.round() as u32,
+                    src_len_ms: src_len.round().max(1.0) as u32,
+                    speed: spd,
+                    w,
+                    h,
+                    x: (x - t.anchor_x * w as f32).round() as i32,
+                    y: (y - t.anchor_y * h as f32).round() as i32,
+                    opacity: op,
+                });
+            }
+            LayerKind::Audio { src, duration_ms, in_ms: src_in, volume, speed, reverse, fade_in_ms, fade_out_ms } => {
+                let spd = if *speed > 0.0 { *speed } else { 1.0 };
+                let source_in = (*src_in as f64 + (cs - l.start_ms) as f64 * spd as f64).round() as u32;
+                let mut play = ce - cs;
+                if *duration_ms > 0 {
+                    play = play.min(((*duration_ms as f64 - source_in as f64) / spd as f64).floor().max(0.0) as u32);
+                }
+                if play == 0 || src.is_empty() {
+                    continue;
+                }
+                audio.push(AudioTrack {
+                    path: src.clone(),
+                    start_ms: cs - in_ms,
+                    play_ms: play,
+                    source_in_ms: source_in,
+                    volume: *volume,
+                    speed: spd,
+                    reverse: *reverse,
+                    fade_in_ms: *fade_in_ms,
+                    fade_out_ms: *fade_out_ms,
+                });
+            }
+            _ => return Err(ineligible("only video and audio clips")),
+        }
+    }
+    if videos.is_empty() {
+        return Err(ineligible("no video clip in range"));
+    }
+    Ok(MergePlan {
+        width: project.width,
+        height: project.height,
+        fps: project.fps.clamp(1.0, 240.0),
+        duration_ms: out_ms - in_ms,
+        videos,
+        audio,
+    })
+}
+
+/// The ffmpeg arguments (inputs + `-filter_complex` + maps, no encoder, no output
+/// path) for a plan: a black canvas, each clip trimmed at INPUT (`-ss/-t`),
+/// retimed for speed, placed at its start time, scaled to its on-screen size and
+/// overlaid bottom-to-top; audio mixed by the same graph the exporter uses.
+fn merge_ffmpeg_args(plan: &MergePlan) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    for v in &plan.videos {
+        args.extend([
+            "-ss".into(),
+            format!("{:.3}", v.src_in_ms as f64 / 1000.0),
+            "-t".into(),
+            format!("{:.3}", v.src_len_ms as f64 / 1000.0),
+            "-i".into(),
+            v.path.clone(),
+        ]);
+    }
+    for a in &plan.audio {
+        args.extend(["-i".into(), a.path.clone()]);
+    }
+    let dur = plan.duration_ms as f64 / 1000.0;
+    let fps = plan.fps;
+    let mut fc = format!(
+        "color=c=black:s={}x{}:r={fps}:d={dur:.3}[bg0];",
+        plan.width, plan.height
+    );
+    for (i, v) in plan.videos.iter().enumerate() {
+        let st = v.start_ms as f64 / 1000.0;
+        let et = v.end_ms as f64 / 1000.0;
+        let mut chain = format!(
+            "[{i}:v]setpts=(PTS-STARTPTS)/{spd:.6}+{st:.3}/TB,fps={fps}",
+            spd = v.speed
+        );
+        chain.push_str(&format!(",scale={}:{}:flags=bicubic", v.w, v.h));
+        if v.opacity < 0.999 {
+            chain.push_str(&format!(",format=yuva420p,colorchannelmixer=aa={:.4}", v.opacity));
+        }
+        chain.push_str(&format!("[v{i}];"));
+        fc.push_str(&chain);
+        fc.push_str(&format!(
+            "[bg{i}][v{i}]overlay=x={}:y={}:enable='between(t,{st:.3},{et:.3})'[bg{}];",
+            v.x,
+            v.y,
+            i + 1
+        ));
+    }
+    fc.push_str(&format!("[bg{}]format=yuv420p[vout]", plan.videos.len()));
+    let audio_fc = audio_filter_complex_at(&plan.audio, plan.duration_ms, plan.videos.len());
+    if let Some(a) = &audio_fc {
+        fc.push(';');
+        fc.push_str(a);
+    }
+    args.extend(["-filter_complex".into(), fc, "-map".into(), "[vout]".into()]);
+    if audio_fc.is_some() {
+        args.extend(["-map".into(), "[aout]".into(), "-c:a".into(), "aac".into(), "-b:a".into(), "192k".into()]);
+    }
+    args.extend(["-t".into(), format!("{dur:.3}")]);
+    args
+}
+
+/// Run the fast merge for `plan` into `out_path`: NVENC if this PC has it, else
+/// x264 `veryfast`. Short keyframe interval so the result seeks cheaply.
+fn run_fast_merge(plan: &MergePlan, out_path: &str) -> Result<(), String> {
+    let ffmpeg = find_ffmpeg().ok_or("ffmpeg isn't installed")?;
+    let base = merge_ffmpeg_args(plan);
+    let attempt = |enc: &[&str]| {
+        let mut cmd = quiet_command(&ffmpeg);
+        cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
+        cmd.args(&base);
+        cmd.args(enc);
+        cmd.args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
+        run_ffmpeg(cmd, out_path)
+    };
+    let gpu = attempt(&[
+        "-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "18", "-b:v", "0",
+        "-maxrate", "60M", "-bufsize", "120M", "-g", "30",
+    ]);
+    if gpu.is_ok() {
+        return gpu;
+    }
+    eprintln!("merge: NVENC unavailable ({}), using x264", gpu.unwrap_err());
+    attempt(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "17", "-g", "30"])
+}
+
+/// Merge the given layers over [in_ms, out_ms] into `out_path` with ffmpeg alone.
+/// Errors starting with "ineligible:" mean "use the canvas render instead".
+#[tauri::command(async)]
+fn merge_fast(
+    state: State<AppState>,
+    layer_ids: Vec<u32>,
+    in_ms: u32,
+    out_ms: u32,
+    out_path: String,
+) -> Result<(), String> {
+    // Snapshot the project and release the lock: ffmpeg can run for a while.
+    let project = state.project.lock().unwrap().clone();
+    let plan = plan_fast_merge(&project, &layer_ids, in_ms, out_ms)?;
+    run_fast_merge(&plan, &out_path)
+}
+
+/// A fresh, unique path for a merged clip: `<app data>/merged/merge-<ms>.mp4`
+/// (the folder is created). Merged videos are real project media, so they live
+/// in the app's data folder rather than %TEMP%, which the OS may clean up.
+#[tauri::command]
+fn merge_output_path() -> Result<String, String> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .map(|p| p.join("Simple Effects"))
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("merged");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    Ok(dir.join(format!("merge-{ms}.mp4")).to_string_lossy().into_owned())
 }
 
 /// Remove every keyframe at exactly `t_ms` across all of a layer's tracks
@@ -6113,6 +6656,9 @@ pub fn run() {
             set_layer_transition,
             duplicate_layer,
             split_layer,
+            delete_layers,
+            merge_output_path,
+            merge_fast,
             reorder_layers,
             save_project_file,
             append_text_file,
@@ -6242,11 +6788,181 @@ mod export_upload_tests {
         // The pre-fix failure: base64 came back "" for a big WebM → 0-byte file.
         let p = scratch("empty.webm");
         std::fs::write(&p, b"").unwrap();
-        let e = export_video_from(&p, 0, "out.mp4", "mp4", "quality", 2, 0, &[], 1000).unwrap_err();
+        let e = export_video_from(&p, 0, "out.mp4", "mp4", "quality", 2, 0, &[], 1000, false, false).unwrap_err();
         assert!(e.contains("intact"), "{e}");
         std::fs::write(&p, b"12345").unwrap();
-        let e = export_video_from(&p, 9, "out.mp4", "mp4", "quality", 2, 0, &[], 1000).unwrap_err();
+        let e = export_video_from(&p, 9, "out.mp4", "mp4", "quality", 2, 0, &[], 1000, true, true).unwrap_err();
         assert!(e.contains("expected 9 bytes, got 5"), "{e}");
         let _ = std::fs::remove_file(&p);
+    }
+}
+
+#[cfg(test)]
+mod fast_merge_tests {
+    use super::*;
+
+    fn video(id: u32, start: u32, end: u32, speed: f32) -> Layer {
+        Layer {
+            id,
+            name: format!("v{id}"),
+            start_ms: start,
+            end_ms: end,
+            kind: LayerKind::Video {
+                src: format!("clip{id}.mp4"),
+                width: 1080,
+                height: 1920,
+                duration_ms: 10_000,
+                in_ms: 1000,
+                speed,
+                reverse: false,
+            },
+            transform: Transform::at(540.0, 960.0),
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            transition_in: None,
+            transition_out: None,
+        }
+    }
+
+    fn proj(layers: Vec<Layer>) -> Project {
+        let mut p = Project::empty();
+        p.layers = layers;
+        p
+    }
+
+    #[test]
+    fn two_plain_clips_plan_with_speed_and_trim_applied() {
+        let p = proj(vec![video(1, 0, 2000, 1.0), video(2, 2000, 3000, 2.0)]);
+        let plan = plan_fast_merge(&p, &[1, 2], 0, 3000).unwrap();
+        assert_eq!(plan.duration_ms, 3000);
+        let (a, b) = (&plan.videos[0], &plan.videos[1]);
+        assert_eq!((a.start_ms, a.end_ms, a.src_in_ms, a.src_len_ms), (0, 2000, 1000, 2000));
+        // 2× over 1 s of timeline = 2 s of source, starting at the clip's in-point.
+        assert_eq!((b.start_ms, b.end_ms, b.src_in_ms, b.src_len_ms), (2000, 3000, 1000, 2000));
+        assert_eq!((a.w, a.h, a.x, a.y), (1080, 1920, 0, 0));
+    }
+
+    #[test]
+    fn a_range_that_starts_mid_clip_offsets_the_source_by_speed() {
+        let p = proj(vec![video(1, 0, 4000, 2.0)]);
+        let plan = plan_fast_merge(&p, &[1], 1000, 4000).unwrap();
+        let v = &plan.videos[0];
+        assert_eq!(v.start_ms, 0);
+        assert_eq!(v.src_in_ms, 1000 + 2000); // 1 s into the layer × 2
+        assert_eq!(v.src_len_ms, 6000);
+    }
+
+    #[test]
+    fn scale_and_anchor_place_the_top_left() {
+        let mut l = video(1, 0, 1000, 1.0);
+        l.transform.scale_x.default = 0.5;
+        l.transform.scale_y.default = 0.5;
+        l.transform.x.default = 300.0;
+        l.transform.y.default = 400.0;
+        let plan = plan_fast_merge(&proj(vec![l]), &[1], 0, 1000).unwrap();
+        let v = &plan.videos[0];
+        assert_eq!((v.w, v.h), (540, 960));
+        assert_eq!((v.x, v.y), (300 - 270, 400 - 480));
+    }
+
+    #[test]
+    fn anything_it_cannot_reproduce_is_refused_not_approximated() {
+        let base = || video(1, 0, 1000, 1.0);
+        let refused = |l: Layer| plan_fast_merge(&proj(vec![l]), &[1], 0, 1000).unwrap_err();
+        let mut l = base();
+        l.effects = vec![Effect::Grayscale { amount: Track { keys: vec![], default: 1.0 } }];
+        assert!(refused(l).starts_with("ineligible"));
+        let mut l = base();
+        l.transition_in = Some(Transition { kind: TransitionKind::Dissolve, dur_ms: 300, direction: 0, engine: None, params: None });
+        assert!(refused(l).contains("transition"));
+        let mut l = base();
+        l.transform.x.keys.push(Keyframe { time_ms: 0, value: 1.0, easing: Easing::Linear });
+        assert!(refused(l).contains("keyframed"));
+        let mut l = base();
+        l.transform.rotation.default = 5.0;
+        assert!(refused(l).contains("rotated"));
+        let mut l = base();
+        if let LayerKind::Video { reverse, .. } = &mut l.kind {
+            *reverse = true;
+        }
+        assert!(refused(l).contains("reversed"));
+        let mut l = base();
+        l.kind = LayerKind::Image { src: "a.png".into(), width: 10, height: 10, crop: None };
+        assert!(refused(l).contains("only video"));
+        let mut odd = proj(vec![base()]);
+        odd.width = 1081;
+        assert!(plan_fast_merge(&odd, &[1], 0, 1000).unwrap_err().contains("even"));
+    }
+
+    #[test]
+    fn graph_has_one_overlay_per_clip_and_audio_inputs_follow_the_videos() {
+        let mut p = proj(vec![video(1, 0, 2000, 1.0), video(2, 2000, 3000, 2.0)]);
+        p.layers.push(Layer {
+            id: 3,
+            name: "a".into(),
+            start_ms: 0,
+            end_ms: 3000,
+            kind: LayerKind::Audio {
+                src: "song.mp3".into(),
+                duration_ms: 10_000,
+                in_ms: 0,
+                volume: 0.5,
+                speed: 1.0,
+                reverse: false,
+                fade_in_ms: 0,
+                fade_out_ms: 0,
+            },
+            transform: Transform::at(0.0, 0.0),
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            transition_in: None,
+            transition_out: None,
+        });
+        let plan = plan_fast_merge(&p, &[1, 2, 3], 0, 3000).unwrap();
+        let args = merge_ffmpeg_args(&plan);
+        let fc = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert_eq!(fc.matches("overlay=").count(), 2);
+        assert!(fc.contains("[2:a]atrim"), "audio is input 2 (after 2 videos): {fc}");
+        assert!(fc.contains("setpts=(PTS-STARTPTS)/2.000000+2.000/TB"), "{fc}");
+        assert_eq!(args.iter().filter(|a| *a == "-i").count(), 3);
+    }
+
+    /// Real ffmpeg run (needs ffmpeg): two generated clips, one at 2×, merged and
+    /// checked with ffprobe. `cargo test --lib fast_merge_runs_ffmpeg -- --ignored`.
+    #[test]
+    #[ignore]
+    fn fast_merge_runs_ffmpeg() {
+        let ff = find_ffmpeg().expect("ffmpeg");
+        let dir = std::env::temp_dir().join("sefx_fast_merge_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mk = |name: &str, src: &str| {
+            let out = dir.join(name);
+            let s = quiet_command(&ff)
+                .args(["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", src])
+                .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .arg(&out)
+                .status()
+                .unwrap();
+            assert!(s.success());
+            out.to_string_lossy().into_owned()
+        };
+        let a = mk("a.mp4", "testsrc2=size=1080x1920:rate=30:duration=6");
+        let b = mk("b.mp4", "smptebars=size=1080x1920:rate=30:duration=6");
+        let mut l1 = video(1, 0, 2000, 1.0);
+        let mut l2 = video(2, 2000, 3000, 2.0);
+        for (l, src) in [(&mut l1, &a), (&mut l2, &b)] {
+            if let LayerKind::Video { src: s, .. } = &mut l.kind {
+                *s = src.clone();
+            }
+        }
+        let plan = plan_fast_merge(&proj(vec![l1, l2]), &[1, 2], 0, 3000).unwrap();
+        let out = dir.join("merged.mp4").to_string_lossy().into_owned();
+        let t = std::time::Instant::now();
+        run_fast_merge(&plan, &out).unwrap();
+        eprintln!("fast merge took {:?}", t.elapsed());
+        let size = std::fs::metadata(&out).unwrap().len();
+        assert!(size > 10_000, "output is {size} bytes");
     }
 }

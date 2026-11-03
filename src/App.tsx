@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import Konva from "konva";
 import { open, save, ask } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -128,6 +128,9 @@ import {
   setAudioFade,
   moveKeyframesAt,
   deleteLayer,
+  deleteLayers,
+  mergeOutputPath,
+  mergeFast,
   duplicateLayer,
   splitLayer,
   dropImageOnShape,
@@ -194,6 +197,10 @@ import {
   encodeDeterministicWebm,
   isDeterministicSupported,
   bitrateForLevel,
+  getExportSpeed,
+  type ExportCodec,
+  type ExportSpeed,
+  type ExportStats,
 } from "./lib/deterministicExport";
 import type { Project } from "./bindings/Project";
 import type { ResolvedLayer } from "./bindings/ResolvedLayer";
@@ -367,6 +374,17 @@ export default function App() {
   imagesRef.current = images;
   const [fonts, setFonts] = useState<string[]>([]);
   const [time, setTime] = useState(0);
+  // Fast export: resolved when React (and react-konva's drain, which runs in the
+  // Stage's layout effect — a CHILD of App) has committed the latest frame state.
+  // App's own layout effect runs after all of its children's, so by the time it
+  // fires the Konva nodes hold this frame and only `stage.draw()` is left.
+  const commitWaitersRef = useRef<(() => void)[]>([]);
+  useLayoutEffect(() => {
+    const waiters = commitWaitersRef.current;
+    if (!waiters.length) return;
+    commitWaitersRef.current = [];
+    for (const w of waiters) w();
+  }, [resolved, time]);
   const [playing, setPlaying] = useState(false);
   // Resizable panels: media-bin width, inspector width, timeline height, and the
   // timeline's layers-column width (px). Dragged live via splitters; the default
@@ -423,6 +441,9 @@ export default function App() {
   >(null);
   const [exporting, setExporting] = useState(false);
   const [exportMsg, setExportMsg] = useState("");
+  // Set while a fast (ffmpeg-only) merge runs; shows a small busy card.
+  const [merging, setMerging] = useState<string | null>(null);
+  const mergingRef = useRef(false);
   const exportingRef = useRef(false);
   const [showCompSettings, setShowCompSettings] = useState(false);
   const [fxEditorId, setFxEditorId] = useState<number | null>(null);
@@ -1046,11 +1067,11 @@ export default function App() {
     if (paths.length) await addMediaPaths(paths);
   }, [addMediaPaths]);
 
-  const onAddMediaToTimeline = useCallback(async (path: string) => {
+  const onAddMediaToTimeline = useCallback(async (path: string, atMs?: number) => {
     const kind = mediaKind(path);
     // Capture the layer selected at add-time — the new one slots just above it.
     const above = selectedIdRef.current;
-    const at = Math.round(timeRef.current);
+    const at = atMs ?? Math.round(timeRef.current);
     let p: Project;
     let videoDurationMs = 0;
     if (kind === "video") {
@@ -1067,7 +1088,8 @@ export default function App() {
     const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
     // Drop it at the playhead and directly above the previously selected layer.
     if (newId != null) {
-      p = await placeLayer(newId, at, above);
+      // grow: the clip keeps its full length and the comp stretches to hold it.
+      p = await placeLayer(newId, at, above, true);
       setSelectedId(newId);
     }
     // A video with an audio track gets its own editable audio layer, aligned to
@@ -1077,7 +1099,7 @@ export default function App() {
     if (kind === "video" && newId != null && (await hasAudio(path).catch(() => false))) {
       let pa = await addAudioLayer(path, videoDurationMs);
       const audId = pa.layers.length ? pa.layers[pa.layers.length - 1].id : null;
-      if (audId != null) pa = await placeLayer(audId, at, newId);
+      if (audId != null) pa = await placeLayer(audId, at, newId, true);
       p = pa;
     }
     setProject(p);
@@ -2848,8 +2870,15 @@ export default function App() {
       rateMode: "quality" | "bitrate",
       outPath?: string,
       silent?: boolean,
+      // Merge: render only these layers over this range instead of the whole comp.
+      // `speed`: "fast" (default = the user's saved choice) or "exact" (slow, conservative).
+      opts?: { range?: { inMs: number; outMs: number }; onlyIds?: number[]; speed?: ExportSpeed }
     ) => {
       if (exportingRef.current) return;
+      const only = opts?.onlyIds ? new Set(opts.onlyIds) : null;
+      const fast = (opts?.speed ?? getExportSpeed()) === "fast";
+      const exportStartedAt = performance.now();
+      const timing: Record<string, number> = {};
       // The bitrate the frame encoder targets: the user's value in bitrate mode,
       // or one derived from the compression level in quality mode (WebCodecs has
       // no CRF, so quality mode still needs a generous target for the WebM pass).
@@ -2922,7 +2951,7 @@ export default function App() {
         // whole comp). Frames are rendered at the ABSOLUTE comp time `inMs + tMs`,
         // but the encoded video timeline starts at 0 — so `duration` here is the
         // range LENGTH, and audio clips are shifted by `inMs` below.
-        const range = exportRangeRef.current;
+        const range = opts?.range ?? exportRangeRef.current;
         const inMs = range ? Math.max(0, Math.min(range.inMs, p.durationMs)) : 0;
         const outMs = range ? Math.max(inMs + 1, Math.min(range.outMs, p.durationMs)) : p.durationMs;
         const duration = outMs - inMs;
@@ -2934,19 +2963,29 @@ export default function App() {
         const clipSrcs = [
           ...new Set(
             p.layers.flatMap((l) =>
-              l.kind.kind === "video" && !l.hidden && l.endMs > inMs && l.startMs < outMs ? [l.kind.src] : []
+              l.kind.kind === "video" && !l.hidden && (!only || only.has(l.id)) && l.endMs > inMs && l.startMs < outMs
+                ? [l.kind.src]
+                : []
             )
           ),
         ];
-        for (const [i, src] of clipSrcs.entries()) {
-          if (!exportingRef.current) break;
-          setExportMsg(`Preparing videos for export… ${i + 1}/${clipSrcs.length}`);
-          try {
-            proxies.set(src, await makeSeekProxy(src));
-          } catch (e) {
-            console.warn("seek proxy failed, using the original", src, e);
-          }
+        // Fast converts a few clips at a time (GPU/ultrafast); exact keeps it one by one.
+        const proxyT0 = performance.now();
+        const PROXY_PARALLEL = fast ? 3 : 1;
+        let proxiesDone = 0;
+        for (let i = 0; i < clipSrcs.length && exportingRef.current; i += PROXY_PARALLEL) {
+          await Promise.all(
+            clipSrcs.slice(i, i + PROXY_PARALLEL).map(async (src) => {
+              try {
+                proxies.set(src, await makeSeekProxy(src, fast));
+              } catch (e) {
+                console.warn("seek proxy failed, using the original", src, e);
+              }
+              setExportMsg(`Preparing videos for export… ${++proxiesDone}/${clipSrcs.length}`);
+            })
+          );
         }
+        timing.proxyMs = performance.now() - proxyT0;
         setSeekProxies(proxies);
         // Frame count for this render — used to calibrate the render-time estimate
         // shown in the export dialog on the next run.
@@ -2956,6 +2995,18 @@ export default function App() {
         // Wait for the canvas to actually paint the latest applied time.
         const awaitPaint = () =>
           new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        // One macrotask hop (~1 ms, vs ~33 ms for two screen refreshes). React runs
+        // its passive effects and any follow-up render from its own scheduler task,
+        // which this hop queues behind.
+        const macrotask = () =>
+          new Promise<void>((r) => {
+            const ch = new MessageChannel();
+            ch.port1.onmessage = () => {
+              ch.port1.close();
+              r();
+            };
+            ch.port2.postMessage(0);
+          });
 
         // Realtime capture (fallback) — captures the canvas via MediaRecorder as
         // the comp plays in wall-clock time. Used only when WebCodecs is absent.
@@ -3005,6 +3056,22 @@ export default function App() {
         // Deterministic path: render each frame, encode with an exact timestamp, and
         // stream the WebM to Rust as it's muxed (never one in-memory blob / string).
         let webmLen = 0;
+        // Which encoder produced the upload, and where the render time went.
+        let usedCodec: ExportCodec = "vp9";
+        const stats: ExportStats = { renderMs: 0, encoderWaitMs: 0, flushMs: 0, frames: 0, codec: "vp9" };
+        const phase = { evalMs: 0, seekMs: 0, paintMs: 0 };
+        // Fast MP4: let the GPU encode H.264 straight into the final MP4 (no second
+        // encode). Falls back to the VP9 → ffmpeg route automatically if it can't.
+        const wantH264 = fast && format === "mp4" && isDeterministicSupported() && !probing;
+        // Fast: resolves when the frame's state has been committed (see App's layout effect).
+        const nextCommit = () =>
+          new Promise<boolean>((resolve) => {
+            const t = window.setTimeout(() => resolve(false), 250);
+            commitWaitersRef.current.push(() => {
+              clearTimeout(t);
+              resolve(true);
+            });
+          });
         // Only the debug probe needs the finished video back in JS.
         let probeBlob: Blob | null = null;
         // Diagnostic: the transition factor sampled per frame. If these vary but
@@ -3014,10 +3081,18 @@ export default function App() {
         if (isDeterministicSupported()) {
           const probeChunks: { d: Uint8Array; pos: number }[] = [];
           let firstSlice = true;
-          try {
+          let lastPct = -1;
+          const runEncode = async (codec: ExportCodec): Promise<number> => {
+            // A retry (H.264 failed → VP9) starts the upload and the stats over.
+            firstSlice = true;
+            probeChunks.length = 0;
+            dbgFactors.length = 0;
+            lastPct = -1;
+            phase.evalMs = phase.seekMs = phase.paintMs = 0;
             setExportMsg("Rendering frames…");
-            let lastPct = -1;
-            webmLen = await encodeDeterministicWebm({
+            return await encodeDeterministicWebm({
+              codec,
+              stats,
               canvas,
               width: p.width,
               height: p.height,
@@ -3045,12 +3120,16 @@ export default function App() {
                 // Instead: set state, then yield across enough ticks that React commits
                 // AND react-konva commits + batch-draws on its own, THEN force one final
                 // synchronous stage draw right before the frame is grabbed.
+                const ph0 = performance.now();
                 const layers = await evaluateAt(tMs);
+                phase.evalMs += performance.now() - ph0;
                 const map: Record<number, ResolvedLayer> = {};
-                for (const l of layers) map[l.id] = l;
+                for (const l of layers) if (!only || only.has(l.id)) map[l.id] = l;
                 // Sample the first active transition factor for the diagnostic trace.
                 const withTr = layers.find((l) => l.transition);
                 dbgFactors.push(withTr?.transition ? withTr.transition.factor : null);
+                // Register for the commit BEFORE the state update (fast mode only).
+                const committed = fast ? nextCommit() : null;
                 setResolved(map);
                 setTime(tMs);
                 // Seek every on-screen video layer to this exact source-time and wait
@@ -3076,11 +3155,24 @@ export default function App() {
                       timeSec: durMs > 0 ? Math.min(Math.max(0, wanted), durMs / 1000 - 0.001) : Math.max(0, wanted),
                     };
                   });
+                const ps0 = performance.now();
                 if (videoTargets.length) await seekVideosForFrame(videoTargets);
-                // Yield: microtask drain + two animation frames. This lets React's
-                // async commit and react-konva's reconciler+batchDraw fully run.
-                await Promise.resolve();
-                await awaitPaint();
+                phase.seekMs += performance.now() - ps0;
+                const pp0 = performance.now();
+                if (committed) {
+                  // Fast: React + react-konva have committed this frame as soon as App's
+                  // layout effect fires; one macrotask hop then lets passive effects
+                  // settle. If the commit signal never came (250 ms), fall back to the
+                  // two-refresh wait rather than capture a stale frame.
+                  if (await committed) await macrotask();
+                  else await awaitPaint();
+                } else {
+                  // Exact: microtask drain + two animation frames. This lets React's
+                  // async commit and react-konva's reconciler+batchDraw fully run.
+                  await Promise.resolve();
+                  await awaitPaint();
+                }
+                phase.paintMs += performance.now() - pp0;
                 // Belt-and-suspenders: force a synchronous repaint of the exact stage
                 // (and any others) so the captured canvas holds THIS frame.
                 previewStageRef.current?.draw();
@@ -3097,6 +3189,23 @@ export default function App() {
               onFlush: () => setExportMsg("Finalizing video…"),
               shouldAbort: () => !exportingRef.current,
             });
+          };
+          try {
+            if (wantH264) {
+              try {
+                webmLen = await runEncode("h264");
+                usedCodec = "h264";
+              } catch (e) {
+                if (!exportingRef.current) throw e; // the user cancelled
+                console.warn("GPU H.264 export failed, using the standard encoder", e);
+                setExportMsg("GPU encoder unavailable — using the standard encoder…");
+                webmLen = 0;
+              }
+            }
+            if (!webmLen) {
+              webmLen = await runEncode("vp9");
+              usedCodec = "vp9";
+            }
             if (probing) {
               const whole = new Uint8Array(webmLen);
               for (const c of probeChunks) whole.set(c.d, c.pos);
@@ -3161,7 +3270,9 @@ export default function App() {
         // the exported timeline (0 at inMs), `sourceInMs` is how far into the file
         // to start (so a clip that begins before the range plays from the middle).
         const audioTracks = p.layers
-          .filter((l) => l.kind.kind === "audio" && !l.hidden && l.endMs > inMs && l.startMs < outMs)
+          .filter(
+            (l) => l.kind.kind === "audio" && !l.hidden && (!only || only.has(l.id)) && l.endMs > inMs && l.startMs < outMs
+          )
           .map((l) => {
             const k = l.kind.kind === "audio" ? l.kind : null;
             const durMs = k?.durationMs ?? 0;
@@ -3197,18 +3308,40 @@ export default function App() {
         // MP4 transcode: in "bitrate" mode target the user's bitrate (size ≈
         // bitrate × duration); in "quality" mode use CRF from the compression
         // level (constant quality, variable size). WebM is copied through as-is.
-        await exportVideo(webmLen, path, format, rateMode, level, bitrate, audioTracks, duration);
+        const mux0 = performance.now();
+        await exportVideo(webmLen, path, format, rateMode, level, bitrate, audioTracks, duration, fast, usedCodec === "h264");
+        timing.ffmpegMs = performance.now() - mux0;
         // Calibrate the render-time estimate: record how long this export took
         // per frame so the dialog can predict the next one more accurately.
         const msPerFrame = (performance.now() - renderStartedAt) / totalFrames;
         if (Number.isFinite(msPerFrame) && msPerFrame > 0) {
           try {
-            localStorage.setItem("sefx.export.msPerFrame", String(Math.round(msPerFrame)));
+            // Estimates are per speed mode: fast and exact differ by several times.
+            localStorage.setItem(fast ? "sefx.export.msPerFrame.fast" : "sefx.export.msPerFrame", String(Math.max(1, Math.round(msPerFrame))));
           } catch {
             /* localStorage may be unavailable; the estimate just stays at its default */
           }
         }
-        recordAction("export_video", { path, format, level, deterministic: isDeterministicSupported() });
+        // Where the time went — shown in the console and kept in the session log.
+        const totalMs = performance.now() - exportStartedAt;
+        const secs = (ms: number) => +(ms / 1000).toFixed(1);
+        const perf = {
+          mode: fast ? "fast" : "exact",
+          codec: usedCodec,
+          frames: stats.frames,
+          totalS: secs(totalMs),
+          fpsAchieved: stats.frames ? +((stats.frames / Math.max(1, totalMs - (timing.proxyMs ?? 0) - (timing.ffmpegMs ?? 0))) * 1000).toFixed(1) : 0,
+          proxyS: secs(timing.proxyMs ?? 0),
+          evaluateS: secs(phase.evalMs),
+          videoSeekS: secs(phase.seekMs),
+          paintWaitS: secs(phase.paintMs),
+          encoderWaitS: secs(stats.encoderWaitMs),
+          flushS: secs(stats.flushMs),
+          ffmpegS: secs(timing.ffmpegMs ?? 0),
+        };
+        console.info("[export timing]", perf);
+        record("export_timing", perf);
+        recordAction("export_video", { path, format, level, deterministic: isDeterministicSupported(), ...perf });
         if (!silent) alert(`Saved video:\n${path}`);
         return path;
       } catch (e) {
@@ -3232,6 +3365,117 @@ export default function App() {
   // the latest onExport without reordering ~2000 lines of hook declarations.
   const onExportRef = useRef(onExport);
   onExportRef.current = onExport;
+
+  // Merge: render the selected layers (plus a selected video's own audio layer)
+  // over their combined time range into ONE video, then swap it in for the
+  // originals — same spot on the timeline, effects/transitions baked in.
+  const onMergeLayers = useCallback(async () => {
+    const p = projectRef.current;
+    if (!p || exportingRef.current || mergingRef.current) return;
+    if (groupPathRef.current.length > 0) {
+      alert("Leave the group first (back to Root), then merge.");
+      return;
+    }
+    const chosen = selectedIdsRef.current.filter((id) => p.layers.some((l) => l.id === id));
+    if (chosen.length < 2) {
+      alert("Select two or more clips on the timeline to merge.");
+      return;
+    }
+    const ids = new Set(chosen);
+    // A video's separate audio layer (same file + range, what "add to timeline"
+    // creates) travels with it, so merging doesn't silently drop the sound.
+    for (const id of chosen) {
+      const v = p.layers.find((l) => l.id === id);
+      if (!v || v.kind.kind !== "video") continue;
+      for (const a of p.layers) {
+        if (
+          a.kind.kind === "audio" &&
+          !ids.has(a.id) &&
+          a.kind.src === v.kind.src &&
+          a.startMs === v.startMs &&
+          a.endMs === v.endMs &&
+          (a.kind.inMs ?? 0) === (v.kind.inMs ?? 0)
+        )
+          ids.add(a.id);
+      }
+    }
+    const layers = p.layers.filter((l) => ids.has(l.id));
+    if (!layers.some((l) => l.kind.kind !== "audio")) {
+      alert("Select at least one video or image clip to merge (audio alone has nothing to render).");
+      return;
+    }
+    const inMs = Math.min(...layers.map((l) => l.startMs));
+    const outMs = Math.max(...layers.map((l) => l.endMs));
+    if (outMs - inMs < 50) return;
+    try {
+      const path = await mergeOutputPath();
+      // Fast path first: when every clip is a plain video/audio layer (trim, speed,
+      // static position/scale/opacity — nothing the canvas has to draw) ffmpeg
+      // renders the merge directly, several times faster. The backend refuses
+      // ("ineligible: …") anything it can't reproduce exactly, and any failure
+      // falls through to the canvas render below, so the result is never worse.
+      let saved: string | undefined;
+      const t0 = performance.now();
+      mergingRef.current = true;
+      setMerging("Merging clips…");
+      try {
+        await mergeFast([...ids], inMs, outMs, path);
+        saved = path;
+        record("merge_fast", { ok: true, ms: Math.round(performance.now() - t0), count: ids.size });
+      } catch (e) {
+        const why = String(e);
+        console.info("fast merge not used:", why);
+        record("merge_fast", { ok: false, why, ms: Math.round(performance.now() - t0) });
+      } finally {
+        mergingRef.current = false;
+        setMerging(null);
+      }
+      saved ??= await onExportRef.current(
+        "mp4",
+        1, // near-original quality: the merged clip is re-encoded once more on export
+        p.fps,
+        false,
+        bitrateForLevel(1),
+        "quality",
+        path,
+        true,
+        { range: { inMs, outMs }, onlyIds: [...ids] }
+      );
+      if (!saved) throw new Error("the render didn't produce a file");
+      // New clip at the merged range's start, then drop the originals (one undo step).
+      const newId = await onAddMediaToTimeline(saved, inMs);
+      let pd = await deleteLayers([...ids]);
+      // The merged clip takes the FIRST video's place in the layer stack (the
+      // earliest-starting one; the lowest if they start together), with its audio
+      // just above it — instead of landing on top of everything.
+      if (newId != null) {
+        const stackBefore = p.layers.map((l) => l.id);
+        const firstVideo = [...layers]
+          .filter((l) => l.kind.kind === "video")
+          .sort((a, b) => a.startMs - b.startMs || stackBefore.indexOf(a.id) - stackBefore.indexOf(b.id))[0];
+        const audId = pd.layers.find((l) => l.kind.kind === "audio" && l.kind.src === saved)?.id ?? null;
+        const stillThere = new Set(pd.layers.map((l) => l.id));
+        const order: number[] = [];
+        for (const id of stackBefore) {
+          if (id === firstVideo?.id) {
+            order.push(newId);
+            if (audId != null) order.push(audId);
+          } else if (!ids.has(id) && stillThere.has(id)) order.push(id);
+        }
+        for (const l of pd.layers) if (!order.includes(l.id)) order.push(l.id); // safety: never drop a layer
+        pd = await reorderLayers(order);
+      }
+      setProject(pd);
+      durationRef.current = pd.durationMs;
+      setSelectedId(newId ?? null);
+      setSelectedIds(newId != null ? [newId] : []);
+      await resolveImages(pd);
+      await applyTime(timeRef.current);
+      recordAction("merge_layers", { count: ids.size, inMs, outMs, path: saved });
+    } catch (e) {
+      alert(`Merge failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [onAddMediaToTimeline, resolveImages, applyTime, recordAction]);
 
   // Show/hide a layer from the timeline's layer list.
   const onToggleHidden = useCallback(
@@ -4039,6 +4283,11 @@ export default function App() {
         },
         { separator: true },
         {
+          label: "Merge Clips (render to one video)",
+          onClick: () => void onMergeLayers(),
+          disabled: selectedIds.length < 2 || exporting,
+        },
+        {
           label: "Combine into Group",
           onClick: () => void onCombineLayers(),
           disabled: selectedIds.length < 2,
@@ -4227,6 +4476,13 @@ export default function App() {
           ◆ Key
         </button>
         <button
+          onClick={() => void onMergeLayers()}
+          disabled={selectedIds.length < 2 || exporting || merging != null}
+          title="Merge: render the selected clips into a single video"
+        >
+          Merge
+        </button>
+        <button
           onClick={onCombineLayers}
           disabled={selectedIds.length < 2}
           title="Combine the selected layers into a group (precomp)"
@@ -4336,6 +4592,15 @@ export default function App() {
             onSetPreviewQuality={setPreviewQuality}
             fpsOverlay={fpsOverlay}
           />
+          {merging && (
+            <div className="export-overlay">
+              <div className="export-card">
+                <div className="spinner" />
+                <div>{merging}</div>
+                <div className="muted">Rendering the selected clips with ffmpeg.</div>
+              </div>
+            </div>
+          )}
           {exporting && (
             <div className="export-overlay">
               <div className="export-card">
@@ -4621,6 +4886,7 @@ export default function App() {
                             onClick: () => setTransitionPick({ ids: selectedIds, slot: "out" }),
                           },
                           { label: "⧉ Combine into group", onClick: () => onCombineLayers() },
+                          { label: "⇉ Merge into one video", onClick: () => void onMergeLayers() },
                         ]
                       : []),
                     ...(project.layers.find((l) => l.id === ctxMenu.layerId)?.kind.kind === "group"

@@ -317,8 +317,8 @@ export const addAudioLayer = (path: string, durationMs: number) =>
 
 /** Re-time a just-added layer to start at `startMs` and slot it above `aboveId`
  *  (null = top). Folds into the preceding add's undo step. */
-export const placeLayer = (layerId: number, startMs: number, aboveId: number | null) =>
-  invoke<Project>("place_layer", { layerId, startMs, aboveId });
+export const placeLayer = (layerId: number, startMs: number, aboveId: number | null, grow = false) =>
+  invoke<Project>("place_layer", { layerId, startMs, aboveId, grow });
 
 /** Combine layers (current scope) into one nested Group (precomp). */
 export const combineLayers = (ids: number[]) =>
@@ -844,7 +844,8 @@ export const exportUploadChunk = (data: Uint8Array, offset: number, reset: boole
 
 /** Path of a cached short-GOP copy of a video, so the export's per-frame seeks
  *  stay cheap (see `make_seek_proxy`). Rejects if ffmpeg is missing or fails. */
-export const makeSeekProxy = (path: string) => invoke<string>("make_seek_proxy", { path });
+export const makeSeekProxy = (path: string, fast = false) =>
+  invoke<string>("make_seek_proxy", { path, fast });
 
 /** Mux/transcode the WebM uploaded via `exportUploadChunk` (`webmLen` bytes). */
 export const exportVideo = (
@@ -855,7 +856,11 @@ export const exportVideo = (
   level: number,
   bitrate: number,
   audio: AudioTrackSpec[],
-  durationMs: number
+  durationMs: number,
+  /** Fast mode: GPU/veryfast ffmpeg encode. */
+  fast = false,
+  /** The upload is already an H.264 MP4 (GPU WebCodecs) — ffmpeg only muxes audio. */
+  directMp4 = false
 ) =>
   invoke<void>("export_video", {
     webmLen,
@@ -866,6 +871,8 @@ export const exportVideo = (
     bitrate,
     audio,
     durationMs,
+    fast,
+    directMp4,
   });
 
 /** Check an already-exported video against the CURRENT project's image layers:
@@ -900,6 +907,18 @@ export const extractVideoFrames = (path: string, timesMs: number[], shortSide: n
 /** Delete a layer (object). Shapes detach any layers pinned to them. */
 export const deleteLayer = (layerId: number) =>
   invoke<Project>("delete_layer", { layerId });
+
+/** Delete several layers as one undo step. */
+export const deleteLayers = (layerIds: number[]) =>
+  invoke<Project>("delete_layers", { layerIds });
+
+/** Render layers over [inMs, outMs] into `outPath` with ffmpeg alone (no canvas render).
+ *  Rejects with "ineligible: …" when the layers need the canvas pipeline instead. */
+export const mergeFast = (layerIds: number[], inMs: number, outMs: number, outPath: string) =>
+  invoke<void>("merge_fast", { layerIds, inMs, outMs, outPath });
+
+/** A fresh output path (in the app data folder) for a merged clip. */
+export const mergeOutputPath = () => invoke<string>("merge_output_path");
 
 /** Duplicate a layer (copy/paste); returns the project with the clone on top. */
 export const duplicateLayer = (layerId: number) =>

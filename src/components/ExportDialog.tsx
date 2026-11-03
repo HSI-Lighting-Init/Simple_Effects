@@ -4,7 +4,7 @@
 // MP4 needs ffmpeg; if it's missing, offer a one-click winget install.
 import { useEffect, useMemo, useState } from "react";
 import { ffmpegStatus, installFfmpeg } from "../lib/api";
-import { bitrateForLevel } from "../lib/deterministicExport";
+import { bitrateForLevel, getExportSpeed, setExportSpeed, type ExportSpeed } from "../lib/deterministicExport";
 
 const LEVELS = [
   "Near original — largest file",
@@ -26,12 +26,16 @@ const BITRATE_PRESETS = [3, 5, 8, 14, 24, 40, 60];
 
 // localStorage key holding the last measured render cost (ms per frame), used to
 // estimate how long the next export will take. Calibrated after each export.
-const MS_PER_FRAME_KEY = "sefx.export.msPerFrame";
-const DEFAULT_MS_PER_FRAME = 90; // rough first-run guess (deterministic path)
+const MS_PER_FRAME_KEY = "sefx.export.msPerFrame"; // exact mode
+const MS_PER_FRAME_FAST_KEY = "sefx.export.msPerFrame.fast";
+// Rough first-run guesses per mode (the first real export replaces them).
+const DEFAULT_MS_PER_FRAME = 90;
+const DEFAULT_MS_PER_FRAME_FAST = 30;
 
-function readMsPerFrame(): number {
-  const v = Number(localStorage.getItem(MS_PER_FRAME_KEY));
-  return Number.isFinite(v) && v > 0 ? v : DEFAULT_MS_PER_FRAME;
+function readMsPerFrame(speed: ExportSpeed): number {
+  const fast = speed === "fast";
+  const v = Number(localStorage.getItem(fast ? MS_PER_FRAME_FAST_KEY : MS_PER_FRAME_KEY));
+  return Number.isFinite(v) && v > 0 ? v : fast ? DEFAULT_MS_PER_FRAME_FAST : DEFAULT_MS_PER_FRAME;
 }
 
 function formatBytes(bytes: number): string {
@@ -77,6 +81,9 @@ export default function ExportDialog({
   onClose: () => void;
 }) {
   const [format, setFormat] = useState<"mp4" | "webm">("mp4");
+  // Render speed: "fast" (GPU encode, no extra waits) or "exact" (the slow,
+  // conservative pipeline). Remembered; applied when Export is pressed.
+  const [speed, setSpeed] = useState<ExportSpeed>(() => getExportSpeed());
   // Rate control: "quality" drives the encoder by a 1–5 compression level
   // (constant quality / variable size); "bitrate" targets an exact bits/s (so
   // the file size ≈ bitrate × duration). Only one control is shown at a time.
@@ -119,9 +126,9 @@ export default function ExportDialog({
     const durSec = durationMs / 1000;
     const sizeBytes = (effBitrate * durSec) / 8;
     const nFrames = Math.max(1, Math.ceil(durSec * fps));
-    const est = (nFrames * readMsPerFrame()) / 1000;
+    const est = (nFrames * readMsPerFrame(speed)) / 1000;
     return { sizeStr: formatBytes(sizeBytes), timeStr: formatDuration(est), frames: nFrames };
-  }, [effBitrate, durationMs, fps]);
+  }, [effBitrate, durationMs, fps, speed]);
 
   // Quick reference: the estimated file size at each compression level, so the
   // trade-off is visible without dragging the slider through all five.
@@ -172,6 +179,29 @@ export default function ExportDialog({
                 WebM · VP9
               </button>
             </div>
+          </label>
+
+          <label className="insp-field">
+            Render speed
+            <div className="seg">
+              <button
+                className={"seg-btn" + (speed === "fast" ? " active" : "")}
+                onClick={() => setSpeed("fast")}
+              >
+                Fast
+              </button>
+              <button
+                className={"seg-btn" + (speed === "exact" ? " active" : "")}
+                onClick={() => setSpeed("exact")}
+              >
+                Exact (slow)
+              </button>
+            </div>
+            <span className="muted">
+              {speed === "fast"
+                ? "Uses the GPU encoder when available and skips extra waits. Several times faster; the file may be slightly larger/softer at the same bitrate."
+                : "Original pipeline: waits for every frame to fully paint and encodes on the CPU. Slowest, most conservative — use it if Fast ever shows a glitch."}
+            </span>
           </label>
 
           <label className="insp-field">
@@ -325,6 +355,7 @@ export default function ExportDialog({
             className="insp-btn active"
             disabled={needFfmpeg || checking || installing}
             onClick={() => {
+              setExportSpeed(speed);
               onExport(format, level, fps, burnFps, bitrate, rateMode);
               onClose();
             }}

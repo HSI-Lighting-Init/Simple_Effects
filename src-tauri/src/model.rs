@@ -1443,8 +1443,10 @@ impl Project {
     /// A blank project — the app opens with an empty timeline (no layers).
     pub fn empty() -> Self {
         Project {
-            width: 1920,
-            height: 1080,
+            // Default canvas: 9:16 portrait (reels / shorts), 4 s until media
+            // is dropped on the timeline (which fits the length to it).
+            width: 1080,
+            height: 1920,
             fps: 30.0,
             duration_ms: 4000,
             layers: vec![],
