@@ -106,6 +106,9 @@ import {
   setCompSize,
   setCompDuration,
   setCompFps,
+  cancelExport,
+  fetchUpdateManifest,
+  installUpdate,
   setLayerRange,
   scaleLayerToFit,
   setLayerTransition,
@@ -445,6 +448,15 @@ export default function App() {
   const [merging, setMerging] = useState<string | null>(null);
   const mergingRef = useRef(false);
   const exportingRef = useRef(false);
+  // The Cancel button on the export/merge card. Checked between the export's
+  // steps; the Rust side kills a running ffmpeg itself.
+  const cancelRef = useRef(false);
+  const [cancelling, setCancelling] = useState(false);
+  const onCancelExport = useCallback(() => {
+    cancelRef.current = true;
+    setCancelling(true);
+    void cancelExport();
+  }, []);
   const [showCompSettings, setShowCompSettings] = useState(false);
   const [fxEditorId, setFxEditorId] = useState<number | null>(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
@@ -2742,6 +2754,54 @@ export default function App() {
     }
   }, [doSaveAs, recordAction]);
 
+  // Auto-update: on launch (silent unless there's an update) and from Help.
+  const [updating, setUpdating] = useState<string | null>(null);
+  const checkForUpdates = useCallback(
+    async (manual: boolean) => {
+      if (import.meta.env.DEV) {
+        if (manual) alert("Updates are off in dev builds.");
+        return;
+      }
+      let m;
+      try {
+        m = await fetchUpdateManifest();
+      } catch (e) {
+        if (manual) alert(`Couldn't check for updates: ${e}`);
+        else console.warn("update check failed", e);
+        return;
+      }
+      if (m.build <= BUILD_INFO.build) {
+        if (manual) alert(`You're on the latest build (${BUILD_INFO.build}).`);
+        return;
+      }
+      const yes = await ask(`Simple Effects build ${m.build} is available (you have ${BUILD_INFO.build}). Install it now?`, {
+        title: "Simple Effects",
+        okLabel: "Install",
+        cancelLabel: "Later",
+      });
+      if (!yes) return;
+      if (exportingRef.current || mergingRef.current) {
+        alert("Finish or cancel the export first.");
+        return;
+      }
+      if (dirtyRef.current && !(await doSave())) return; // cancelled the Save: no update
+      setUpdating(`Downloading build ${m.build}…`);
+      try {
+        await installUpdate(m); // the app exits once the installer is ready
+      } catch (e) {
+        setUpdating(null);
+        alert(`Update failed: ${e}`);
+      }
+    },
+    [doSave]
+  );
+  const checkForUpdatesRef = useRef(checkForUpdates);
+  checkForUpdatesRef.current = checkForUpdates;
+  useEffect(() => {
+    const t = window.setTimeout(() => void checkForUpdatesRef.current(false), 5000);
+    return () => clearTimeout(t);
+  }, []);
+
   // Close-confirmation prompt actions.
   const closeWithoutSaving = useCallback(async () => {
     setShowClosePrompt(false);
@@ -2907,6 +2967,8 @@ export default function App() {
       // Burn the fps label into the frames if requested.
       setFpsOverlay(burnFps ? fps : null);
       exportingRef.current = true;
+      cancelRef.current = false;
+      setCancelling(false);
       setExporting(true);
       setExportMsg("Preparing…");
       try {
@@ -2973,7 +3035,7 @@ export default function App() {
         const proxyT0 = performance.now();
         const PROXY_PARALLEL = fast ? 3 : 1;
         let proxiesDone = 0;
-        for (let i = 0; i < clipSrcs.length && exportingRef.current; i += PROXY_PARALLEL) {
+        for (let i = 0; i < clipSrcs.length && !cancelRef.current; i += PROXY_PARALLEL) {
           await Promise.all(
             clipSrcs.slice(i, i + PROXY_PARALLEL).map(async (src) => {
               try {
@@ -3027,7 +3089,7 @@ export default function App() {
           await new Promise<void>((resolve) => {
             const tick = async () => {
               const t = performance.now() - startWall;
-              if (t >= duration) {
+              if (t >= duration || cancelRef.current) {
                 await applyTime(outMs);
                 if (probing) {
                   await awaitPaint();
@@ -3190,7 +3252,7 @@ export default function App() {
                 }
               },
               onFlush: () => setExportMsg("Finalizing video…"),
-              shouldAbort: () => !exportingRef.current,
+              shouldAbort: () => cancelRef.current,
             });
           };
           try {
@@ -3199,7 +3261,7 @@ export default function App() {
                 webmLen = await runEncode("h264");
                 usedCodec = "h264";
               } catch (e) {
-                if (!exportingRef.current) throw e; // the user cancelled
+                if (cancelRef.current) throw e; // the user cancelled
                 console.warn("GPU H.264 export failed, using the standard encoder", e);
                 setExportMsg("GPU encoder unavailable — using the standard encoder…");
                 webmLen = 0;
@@ -3221,6 +3283,7 @@ export default function App() {
             // silent (a status line the next message overwrote), so a failed
             // frame-accurate render quietly turned into a frozen one. Say so and let
             // the user decide; unattended (agent/MCP) exports just fail.
+            if (cancelRef.current) throw e; // cancelled, not failed: no fallback prompt
             console.error("deterministic export failed", e);
             const useRealtime =
               !silent &&
@@ -3311,6 +3374,9 @@ export default function App() {
         // MP4 transcode: in "bitrate" mode target the user's bitrate (size ≈
         // bitrate × duration); in "quality" mode use CRF from the compression
         // level (constant quality, variable size). WebM is copied through as-is.
+        // ponytail: a cancel landing in the ~ms between this check and export_video
+        // starting is reset by it, so that export just finishes. Fine for a button.
+        if (cancelRef.current) throw new Error("export cancelled");
         const mux0 = performance.now();
         await exportVideo(webmLen, path, format, rateMode, level, bitrate, audioTracks, duration, fast, usedCodec === "h264");
         timing.ffmpegMs = performance.now() - mux0;
@@ -3348,6 +3414,11 @@ export default function App() {
         if (!silent) alert(`Saved video:\n${path}`);
         return path;
       } catch (e) {
+        if (cancelRef.current) {
+          void cancelExport(); // again, now the render has stopped: drops the partial upload
+          if (silent) throw new Error("export cancelled");
+          return;
+        }
         if (silent) throw e;
         alert(`Export failed: ${e}`);
       } finally {
@@ -3420,6 +3491,8 @@ export default function App() {
       let saved: string | undefined;
       const t0 = performance.now();
       mergingRef.current = true;
+      cancelRef.current = false;
+      setCancelling(false);
       setMerging("Merging clips…");
       try {
         await mergeFast([...ids], inMs, outMs, path);
@@ -3433,6 +3506,7 @@ export default function App() {
         mergingRef.current = false;
         setMerging(null);
       }
+      if (cancelRef.current) return; // not a failed fast merge: don't fall back to the render
       saved ??= await onExportRef.current(
         "mp4",
         1, // near-original quality: the merged clip is re-encoded once more on export
@@ -3476,6 +3550,7 @@ export default function App() {
       await applyTime(timeRef.current);
       recordAction("merge_layers", { count: ids.size, inMs, outMs, path: saved });
     } catch (e) {
+      if (cancelRef.current) return;
       alert(`Merge failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }, [onAddMediaToTimeline, resolveImages, applyTime, recordAction]);
@@ -4426,6 +4501,7 @@ export default function App() {
     {
       title: "Help",
       items: [
+        { label: "Check for updates…", onClick: () => void checkForUpdates(true) },
         {
           label: "About Simple Effects",
           onClick: () =>
@@ -4601,6 +4677,18 @@ export default function App() {
                 <div className="spinner" />
                 <div>{merging}</div>
                 <div className="muted">Rendering the selected clips with ffmpeg.</div>
+                <button className="insp-btn" disabled={cancelling} onClick={onCancelExport}>
+                  {cancelling ? "Cancelling…" : "Cancel"}
+                </button>
+              </div>
+            </div>
+          )}
+          {updating && (
+            <div className="export-overlay">
+              <div className="export-card">
+                <div className="spinner" />
+                <div>{updating}</div>
+                <div className="muted">Simple Effects will close, install the update and reopen.</div>
               </div>
             </div>
           )}
@@ -4610,6 +4698,12 @@ export default function App() {
                 <div className="spinner" />
                 <div>{exportMsg || "Rendering…"}</div>
                 <div className="muted">Recording the full-resolution canvas — don't switch away.</div>
+                {/* Only a real export sets a message; the agent's quick frame grabs don't. */}
+                {exportMsg && (
+                  <button className="insp-btn" disabled={cancelling} onClick={onCancelExport}>
+                    {cancelling ? "Cancelling…" : "Cancel"}
+                  </button>
+                )}
               </div>
             </div>
           )}

@@ -2,6 +2,7 @@
 // bindings generated from the Rust model (`cargo test` regenerates them).
 import { invoke } from "@tauri-apps/api/core";
 import type { Project } from "../bindings/Project";
+import type { UpdateManifest } from "../bindings/UpdateManifest";
 import type { Track } from "../bindings/Track";
 import type { ResolvedLayer } from "../bindings/ResolvedLayer";
 import type { TransformEdit } from "../bindings/TransformEdit";
@@ -874,6 +875,16 @@ export const exportVideo = (
     fast,
     directMp4,
   });
+
+/** The newest published build (`latest.json` in HSI-Lighting/release). */
+export const fetchUpdateManifest = () => invoke<UpdateManifest>("fetch_update_manifest");
+
+/** Download + verify the installer, then the app exits and reopens updated. */
+export const installUpdate = (manifest: UpdateManifest) => invoke<void>("install_update", { manifest });
+
+/** Stop the running export/merge: kills its ffmpeg, deletes the partial output
+ *  and the temp upload. The running `exportVideo`/`mergeFast` rejects. */
+export const cancelExport = () => invoke<void>("cancel_export");
 
 /** Check an already-exported video against the CURRENT project's image layers:
  *  every 250ms, does the frame actually look like whichever image layer should

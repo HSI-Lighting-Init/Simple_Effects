@@ -15,4 +15,10 @@ layers: Array<Layer>,
  * project (not necessarily placed on the timeline). Saved with the project
  * so reopening a file restores its bin; a new project starts empty.
  */
-media: Array<string>, };
+media: Array<string>, 
+/**
+ * The user set the comp length by hand, so adding media no longer fits the
+ * comp to it (a longer clip is trimmed to the comp end instead). Off for a
+ * new project, which takes its first video's length.
+ */
+durationSetByUser: boolean, };

@@ -1716,7 +1716,7 @@ mod tests {
             transition_in: None,
             transition_out: None,
         };
-        let p = Project { width: 1920, height: 1080, fps: 30.0, duration_ms: 4000, layers: vec![layer], media: vec![] };
+        let p = Project { width: 1920, height: 1080, fps: 30.0, duration_ms: 4000, layers: vec![layer], media: vec![], duration_set_by_user: false };
         let bend_at = |t: u32| evaluate(&p, t, &HashMap::new(), &HashMap::new(), &HashMap::new())[0].shape2d.clone().unwrap().bend;
         assert_eq!(bend_at(0), 0.0);
         assert!((bend_at(500) - 50.0).abs() < 1.0, "midpoint should be ~50: {}", bend_at(500));

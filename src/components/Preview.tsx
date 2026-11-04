@@ -378,13 +378,26 @@ function drawTransitionFrame(
   transition: ResolvedTransition,
   effects: ResolvedEffect[],
   bcv: HTMLCanvasElement,
-  off: HTMLCanvasElement
+  off: HTMLCanvasElement,
+  node: Konva.Node
 ) {
   // `base` may be an image OR a video frame; applyEffects draws via drawImage,
   // which accepts both, so the cast is safe and effects apply to either.
   const texClip: CanvasImageSource =
     effects.length > 0 ? applyEffects(bcv, base as Texture, w, h, effects) : base;
-  const clip: Clip = { source: texClip, width: w, height: h };
+  // Run the engine at the size the layer actually covers in the comp, not the
+  // source's native size. The engine allocates full-size A/B frames per instance
+  // and we build one per frame, so a 6400x11466 image shown at 0.17x cost two
+  // fresh 293 MB canvases per frame: a 5 s export of two such fades took 152 s
+  // and peaked at 6.4 GB RAM / 3.7 GB VRAM (14 s, 2.6 / 1.1 GB at comp size).
+  // Comp space (not on-screen) so preview matches export; capped at native,
+  // the source has no more detail than that.
+  const layer = node.getLayer();
+  const s = node.getAbsoluteScale(layer ?? undefined);
+  const k = Math.min(1, Math.max(Math.abs(s.x), Math.abs(s.y)) * (layer?.getCanvas().getPixelRatio() ?? 1));
+  const tw = Math.max(1, Math.ceil(w * k));
+  const th = Math.max(1, Math.ceil(h * k));
+  const clip: Clip = { source: texClip, width: tw, height: th };
   const empty: Clip = { source: null, width: 0, height: 0 };
   const meta = getTransitionMeta(transition.engine ?? "");
   const featureA = meta?.feature === "a";
@@ -414,8 +427,8 @@ function drawTransitionFrame(
   const toPlain = settles ? 0 : f >= 1 - EDGE ? (f - (1 - EDGE)) / EDGE : 0;
   try {
     const tr = createTransition(transition.engine ?? "fade", A, B, {
-      outWidth: w,
-      outHeight: h,
+      outWidth: tw,
+      outHeight: th,
       direction: dir,
       solo: true,
       ...userParams,
@@ -477,7 +490,7 @@ function TransitionImageNode({
       scaleY={r.scaleY}
       rotation={r.rotation}
       opacity={r.opacity}
-      sceneFunc={(ctx) => {
+      sceneFunc={(ctx, shape) => {
         const bcv = bRef.current ?? (bRef.current = document.createElement("canvas"));
         const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
         drawTransitionFrame(
@@ -488,7 +501,8 @@ function TransitionImageNode({
           transition,
           r.effects,
           bcv,
-          off
+          off,
+          shape
         );
       }}
       hitFunc={(ctx, shape) => {
@@ -1240,7 +1254,7 @@ function VideoNode({
         scaleY={r.scaleY}
         rotation={r.rotation}
         opacity={r.opacity}
-        sceneFunc={(ctx) => {
+        sceneFunc={(ctx, shape) => {
           const bcv = bRef.current ?? (bRef.current = document.createElement("canvas"));
           const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
           drawTransitionFrame(
@@ -1251,7 +1265,8 @@ function VideoNode({
             engineTr,
             r.effects,
             bcv,
-            off
+            off,
+            shape
           );
         }}
         hitFunc={(ctx, shape) => {

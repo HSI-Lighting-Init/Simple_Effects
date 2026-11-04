@@ -49,13 +49,39 @@ fn layers_end(p: &Project) -> u32 {
 /// yet, or the comp ends exactly where the last layer does. A length the user
 /// set by hand (longer or shorter than the content) is NOT fit, and is left alone.
 fn comp_is_fit(p: &Project) -> bool {
-    p.layers.is_empty() || p.duration_ms == layers_end(p)
+    !p.duration_set_by_user && (p.layers.is_empty() || p.duration_ms == layers_end(p))
+}
+
+/// Trim every layer to end by `dur`, keeping the minimum span.
+fn clamp_layers_to(p: &mut Project, dur: u32) {
+    for l in &mut p.layers {
+        if l.end_ms > dur {
+            l.end_ms = dur;
+        }
+        if l.start_ms + MIN_SPAN_MS > l.end_ms {
+            l.start_ms = l.end_ms.saturating_sub(MIN_SPAN_MS);
+        }
+    }
+}
+
+/// Set the comp length by hand: it sticks from now on (see `refit_comp`).
+fn apply_comp_duration(p: &mut Project, duration_ms: u32) {
+    let dur = duration_ms.clamp(MIN_SPAN_MS, MAX_COMP_MS);
+    p.duration_ms = dur;
+    p.duration_set_by_user = true;
+    clamp_layers_to(p, dur);
 }
 
 /// Re-fit the comp length after content changed. `was_fit` (computed BEFORE the
 /// change) means follow the content both ways (grow and shrink); otherwise the
-/// comp only grows, so a layer is never left hanging past the end.
+/// comp only grows, so a layer is never left hanging past the end. A length the
+/// user set never moves: content past it is trimmed instead.
 fn refit_comp(p: &mut Project, was_fit: bool) {
+    if p.duration_set_by_user {
+        let dur = p.duration_ms;
+        clamp_layers_to(p, dur);
+        return;
+    }
     let end = layers_end(p).min(MAX_COMP_MS);
     if end == 0 {
         return;
@@ -1204,21 +1230,13 @@ fn set_comp_fps(state: State<AppState>, fps: f32) -> Project {
 }
 
 /// Set the composition length (ms). Any layer whose range runs past the new end
-/// is trimmed to fit (so blocks stay inside the timeline). Undoable.
+/// is trimmed to fit (so blocks stay inside the timeline), and media added later
+/// no longer changes it. Undoable.
 #[tauri::command]
 fn set_comp_duration(state: State<AppState>, duration_ms: u32) -> Project {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
-    let dur = duration_ms.clamp(MIN_SPAN_MS, 3_600_000);
-    project.duration_ms = dur;
-    for l in &mut project.layers {
-        if l.end_ms > dur {
-            l.end_ms = dur;
-        }
-        if l.start_ms + MIN_SPAN_MS > l.end_ms {
-            l.start_ms = l.end_ms.saturating_sub(MIN_SPAN_MS);
-        }
-    }
+    apply_comp_duration(&mut project, duration_ms);
     project.clone()
 }
 
@@ -1403,9 +1421,15 @@ fn place_layer(
     grow: Option<bool>,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
+    place_in_comp(&mut project, layer_id, start_ms, above_id, grow.unwrap_or(false))?;
+    Ok(project.clone())
+}
+
+fn place_in_comp(project: &mut Project, layer_id: u32, start_ms: u32, above_id: Option<u32>, grow: bool) -> Result<(), String> {
     // `grow`: media being added to the timeline keeps its full length — the comp
     // stretches to hold it instead of the clip being cut off at the comp end.
-    if grow.unwrap_or(false) {
+    // Not when the user set the length: then the clip is cut off.
+    if grow && !project.duration_set_by_user {
         if let Some(l) = project.layers.iter().find(|l| l.id == layer_id) {
             let span = l.end_ms.saturating_sub(l.start_ms).max(MIN_SPAN_MS);
             let end = start_ms.saturating_add(span).min(MAX_COMP_MS);
@@ -1433,7 +1457,7 @@ fn place_layer(
         };
         project.layers.insert(insert_at, layer);
     }
-    Ok(project.clone())
+    Ok(())
 }
 
 /// Combine the given layers (current scope) into one `Group` (precomp). Members
@@ -5537,6 +5561,7 @@ fn export_video(
     fast: Option<bool>,
     direct_mp4: Option<bool>,
 ) -> Result<(), String> {
+    begin_export();
     let tmp = export_upload_path();
     let result = export_video_from(
         &tmp, webm_len, &path, &format, &rate_mode, level, bitrate, &audio, duration_ms,
@@ -5684,14 +5709,65 @@ fn export_video_from(
     )
 }
 
+/// Set by the Cancel button (`cancel_export`), cleared when an export or merge
+/// starts. `run_ffmpeg` kills ffmpeg when it sees it.
+static EXPORT_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const EXPORT_CANCELLED: &str = "export cancelled";
+
+fn begin_export() {
+    EXPORT_CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Stop the running export or merge: kills its ffmpeg and deletes the partial
+/// file. Also drops the frame upload a render cancelled before ffmpeg left in
+/// %TEMP% (the frontend calls this again once its render loop has stopped, so a
+/// chunk still in flight can't recreate it).
+#[tauri::command]
+fn cancel_export() {
+    EXPORT_CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = std::fs::remove_file(export_upload_path());
+}
+
 /// Run a prepared ffmpeg command (output path appended here) and turn a failure
-/// into a readable error.
+/// into a readable error. A cancel kills it and removes the half-written output.
 fn run_ffmpeg(mut cmd: std::process::Command, path: &str) -> Result<(), String> {
-    let out = cmd.arg(path).output().map_err(|e| format!("run ffmpeg: {e}"))?;
-    if !out.status.success() {
+    use std::io::Read;
+    use std::process::Stdio;
+    let cancelled = || EXPORT_CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    if cancelled() {
+        return Err(EXPORT_CANCELLED.into());
+    }
+    let mut child = cmd
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("run ffmpeg: {e}"))?;
+    // Drain stderr on its own thread so a chatty ffmpeg never stalls on a full pipe.
+    let mut pipe = child.stderr.take().expect("stderr is piped");
+    let reader = std::thread::spawn(move || {
+        let mut s = Vec::new();
+        let _ = pipe.read_to_end(&mut s);
+        s
+    });
+    let status = loop {
+        if let Some(st) = child.try_wait().map_err(|e| format!("run ffmpeg: {e}"))? {
+            break st;
+        }
+        if cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(path);
+            return Err(EXPORT_CANCELLED.into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    let stderr = reader.join().unwrap_or_default();
+    if !status.success() {
         // The last line alone ("Error opening input files: …") never says WHICH
         // input failed — the line before it does — so keep the last few.
-        let err = String::from_utf8_lossy(&out.stderr);
+        let err = String::from_utf8_lossy(&stderr);
         let tail: Vec<&str> = err.lines().rev().filter(|l| !l.trim().is_empty()).take(4).collect();
         return Err(format!(
             "ffmpeg failed: {}",
@@ -6422,6 +6498,7 @@ fn merge_fast(
     out_ms: u32,
     out_path: String,
 ) -> Result<(), String> {
+    begin_export();
     // Snapshot the project and release the lock: ffmpeg can run for a while.
     let project = state.project.lock().unwrap().clone();
     let plan = plan_fast_merge(&project, &layer_ids, in_ms, out_ms)?;
@@ -6520,6 +6597,121 @@ fn load_image_data_url(path: String) -> Result<String, String> {
         _ => "application/octet-stream",
     };
     Ok(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
+}
+
+// --- Auto-update (docs/superpowers/specs/2026-11-04-auto-update-design.md) ---
+// `deploy.ps1 -Publish` uploads each build to HSI-Lighting/release and rewrites
+// one small manifest at a fixed download URL. Release downloads aren't counted
+// against GitHub's 60-calls-an-hour API limit, which the office IP already hits.
+
+const UPDATE_MANIFEST_URL: &str =
+    "https://github.com/HSI-Lighting/release/releases/download/simple-effects-latest/latest.json";
+const UPDATE_URL_PREFIX: &str = "https://github.com/HSI-Lighting/release/releases/download/";
+
+/// `latest.json`: the newest published build and where its installer is.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct UpdateManifest {
+    pub build: u32,
+    pub version: String,
+    pub url: String,
+    #[ts(type = "number")]
+    pub size: u64,
+    pub sha256: String,
+    #[serde(default)]
+    pub date: String,
+}
+
+fn update_url_allowed(url: &str) -> bool {
+    url.starts_with(UPDATE_URL_PREFIX) && !url.contains("..")
+}
+
+/// The downloaded installer is exactly what the manifest describes.
+fn check_download(path: &std::path::Path, size: u64, sha256: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).map_err(|e| format!("read the download: {e}"))?;
+    if bytes.len() as u64 != size {
+        return Err(format!("the download is {} bytes, expected {size}", bytes.len()));
+    }
+    let got: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    if !got.eq_ignore_ascii_case(sha256.trim()) {
+        return Err("the download is corrupt (checksum mismatch)".into());
+    }
+    Ok(())
+}
+
+/// curl's own message for a failed run, or a plain one for the common case.
+fn curl_error(out: &std::process::Output) -> String {
+    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if err.contains("404") {
+        return "no Simple Effects update has been published yet".into();
+    }
+    if err.is_empty() { format!("curl exited with {}", out.status) } else { err }
+}
+
+/// Download `latest.json`. Uses Windows' own curl.exe: no HTTP crate needed.
+#[tauri::command(async)]
+fn fetch_update_manifest() -> Result<UpdateManifest, String> {
+    let out = quiet_command("curl.exe")
+        .args(["-fsSL", "--max-time", "15", UPDATE_MANIFEST_URL])
+        .output()
+        .map_err(|e| format!("run curl: {e}"))?;
+    if !out.status.success() {
+        return Err(curl_error(&out));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("bad update info: {e}"))
+}
+
+/// Download and verify the installer, then hand off to a hidden helper that waits
+/// for this app to exit, installs silently and reopens it. Exits the app.
+#[tauri::command(async)]
+fn install_update(app: tauri::AppHandle, manifest: UpdateManifest) -> Result<(), String> {
+    if cfg!(debug_assertions) {
+        return Err("updates are off in dev builds".into());
+    }
+    if !update_url_allowed(&manifest.url) {
+        return Err(format!("refusing to download from {}", manifest.url));
+    }
+    let installer = std::env::temp_dir().join(format!("simple-effects-update-{}.exe", manifest.build));
+    let out = quiet_command("curl.exe")
+        .args(["-fsSL", "--max-time", "900", "-o"])
+        .arg(&installer)
+        .arg(&manifest.url)
+        .output()
+        .map_err(|e| format!("run curl: {e}"))?;
+    let checked = if out.status.success() {
+        check_download(&installer, manifest.size, &manifest.sha256)
+    } else {
+        Err(curl_error(&out))
+    };
+    if let Err(e) = checked {
+        let _ = std::fs::remove_file(&installer);
+        return Err(e);
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("find the app: {e}"))?;
+    spawn_install_helper(&installer, &exe, std::process::id())?;
+    app.exit(0);
+    Ok(())
+}
+
+/// Hidden PowerShell: wait for `pid` to exit, run `installer /S`, start `exe`.
+/// Sent as -EncodedCommand so paths with spaces or quotes need no shell escaping.
+fn spawn_install_helper(installer: &std::path::Path, exe: &std::path::Path, pid: u32) -> Result<(), String> {
+    let q = |p: &std::path::Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
+    let script = format!(
+        "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
+         Start-Process -Wait -FilePath {} -ArgumentList '/S'; \
+         Start-Process -FilePath {}",
+        q(installer),
+        q(exe)
+    );
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    quiet_command("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-EncodedCommand"])
+        .arg(STANDARD.encode(utf16))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("start the installer: {e}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -6670,6 +6862,9 @@ pub fn run() {
             install_ffmpeg,
             export_upload_chunk,
             export_video,
+            cancel_export,
+            fetch_update_manifest,
+            install_update,
             make_seek_proxy,
             audit_export,
             align_reference,
@@ -6964,5 +7159,167 @@ mod fast_merge_tests {
         eprintln!("fast merge took {:?}", t.elapsed());
         let size = std::fs::metadata(&out).unwrap().len();
         assert!(size > 10_000, "output is {size} bytes");
+    }
+}
+#[cfg(test)]
+mod comp_length_tests {
+    use super::*;
+
+    fn clip(id: u32, end: u32) -> Layer {
+        Layer {
+            id,
+            name: format!("v{id}"),
+            start_ms: 0,
+            end_ms: end,
+            kind: LayerKind::Video { src: "a.mp4".into(), width: 1080, height: 1920, duration_ms: end, in_ms: 0, speed: 1.0, reverse: false },
+            transform: Transform::at(540.0, 960.0),
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            transition_in: None,
+            transition_out: None,
+        }
+    }
+
+    /// What add_video_layer does to the comp: push the clip, then refit.
+    fn add(p: &mut Project, l: Layer) {
+        let was_fit = comp_is_fit(p);
+        p.layers.push(l);
+        refit_comp(p, was_fit);
+    }
+
+    #[test]
+    fn a_new_project_takes_the_first_videos_length() {
+        let mut p = Project::empty();
+        add(&mut p, clip(1, 12_000));
+        assert_eq!(p.duration_ms, 12_000);
+    }
+
+    #[test]
+    fn a_length_the_user_set_survives_importing_a_shorter_video() {
+        let mut p = Project::empty();
+        apply_comp_duration(&mut p, 60_000);
+        add(&mut p, clip(1, 12_000));
+        assert_eq!(p.duration_ms, 60_000);
+        assert_eq!(p.layers[0].end_ms, 12_000);
+    }
+
+    #[test]
+    fn a_longer_video_is_trimmed_to_the_users_length() {
+        let mut p = Project::empty();
+        apply_comp_duration(&mut p, 5_000);
+        add(&mut p, clip(1, 12_000));
+        assert_eq!(p.duration_ms, 5_000);
+        assert_eq!(p.layers[0].end_ms, 5_000);
+    }
+
+    #[test]
+    fn placing_media_does_not_grow_a_user_set_length() {
+        let mut p = Project::empty();
+        apply_comp_duration(&mut p, 5_000);
+        add(&mut p, clip(1, 4_000));
+        place_in_comp(&mut p, 1, 3_000, None, true).unwrap();
+        assert_eq!(p.duration_ms, 5_000);
+        assert_eq!((p.layers[0].start_ms, p.layers[0].end_ms), (3_000, 5_000));
+    }
+
+    #[test]
+    fn placing_media_still_grows_an_unset_length() {
+        let mut p = Project::empty();
+        add(&mut p, clip(1, 4_000));
+        place_in_comp(&mut p, 1, 3_000, None, true).unwrap();
+        assert_eq!(p.duration_ms, 7_000);
+    }
+
+    #[test]
+    fn old_project_files_load_with_the_length_unset() {
+        let json = r#"{"width":1080,"height":1920,"fps":30,"durationMs":4000,"layers":[]}"#;
+        let p: Project = serde_json::from_str(json).unwrap();
+        assert!(!p.duration_set_by_user);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod cancel_export_tests {
+    use super::*;
+
+    /// A stand-in for a long ffmpeg run: sleeps 30 s and ignores the output path
+    /// `run_ffmpeg` appends (it lands in a comment).
+    fn slow_command() -> std::process::Command {
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", "Start-Sleep 30; #"]);
+        cmd
+    }
+
+    /// One test, not two: the cancel flag is process-wide.
+    #[test]
+    fn cancel_kills_the_running_ffmpeg_removes_its_output_and_blocks_the_retry() {
+        let out = std::env::temp_dir().join("sefx_cancel_test.mp4");
+        std::fs::write(&out, b"partial").unwrap();
+        begin_export();
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            cancel_export();
+        });
+        let t = std::time::Instant::now();
+        let r = run_ffmpeg(slow_command(), out.to_str().unwrap());
+        assert_eq!(r.unwrap_err(), EXPORT_CANCELLED);
+        assert!(t.elapsed() < std::time::Duration::from_secs(10), "took {:?}", t.elapsed());
+        assert!(!out.exists(), "partial output left behind");
+
+        // Still cancelled: the NVENC -> x264 fallback must not start another run.
+        let t = std::time::Instant::now();
+        assert_eq!(run_ffmpeg(slow_command(), "unused.mp4").unwrap_err(), EXPORT_CANCELLED);
+        assert!(t.elapsed() < std::time::Duration::from_millis(500));
+        begin_export();
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_published_manifest() {
+        let json = r#"{"build":72,"version":"0.1.72","url":"https://github.com/HSI-Lighting/release/releases/download/simple-effects-v0.1.72/simple-effects_0.1.72_windows.exe","size":5,"sha256":"ABC","date":"2026-11-05"}"#;
+        let m: UpdateManifest = serde_json::from_str(json).unwrap();
+        assert_eq!((m.build, m.size, m.version.as_str()), (72, 5, "0.1.72"));
+    }
+
+    #[test]
+    fn only_downloads_from_the_release_repo() {
+        assert!(update_url_allowed("https://github.com/HSI-Lighting/release/releases/download/simple-effects-v0.1.72/a.exe"));
+        assert!(!update_url_allowed("https://github.com/someone/else/releases/download/x/a.exe"));
+        assert!(!update_url_allowed("http://github.com/HSI-Lighting/release/releases/download/x/a.exe"));
+        assert!(!update_url_allowed("https://github.com/HSI-Lighting/release/releases/download/../../../other/repo/a.exe"));
+    }
+
+    #[test]
+    fn a_download_must_match_the_manifest_size_and_hash() {
+        let f = std::env::temp_dir().join("sefx_update_check_test.bin");
+        std::fs::write(&f, b"hello").unwrap();
+        // sha256("hello")
+        let good = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        assert!(check_download(&f, 5, good).is_ok());
+        assert!(check_download(&f, 5, &good.to_uppercase()).is_ok());
+        assert!(check_download(&f, 6, good).unwrap_err().contains("bytes"));
+        assert!(check_download(&f, 5, &good.replace('2', "3")).unwrap_err().contains("checksum"));
+        let _ = std::fs::remove_file(&f);
+    }
+
+    /// Manual, real install: once a 3 s stand-in for the app exits, the helper runs
+    /// `SEFX_TEST_INSTALLER /S` and starts `SEFX_TEST_EXE`. Check the installed exe's
+    /// time and that the app opens. `cargo test --lib install_helper -- --ignored`
+    #[test]
+    #[ignore]
+    fn install_helper_waits_installs_and_reopens() {
+        let installer = std::env::var("SEFX_TEST_INSTALLER").expect("SEFX_TEST_INSTALLER");
+        let exe = std::env::var("SEFX_TEST_EXE").expect("SEFX_TEST_EXE");
+        let mut stand_in = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep 3"])
+            .spawn()
+            .unwrap();
+        spawn_install_helper(installer.as_ref(), exe.as_ref(), stand_in.id()).unwrap();
+        stand_in.wait().unwrap();
     }
 }

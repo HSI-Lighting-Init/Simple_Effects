@@ -2,12 +2,23 @@
 # Menu "Simple Effects" launcher runs the latest build in one step.
 #
 # Usage:  npm run deploy      (or)   powershell -ExecutionPolicy Bypass -File deploy.ps1
+#         npm run deploy -- -Publish   also publishes the build to HSI-Lighting/release,
+#         where every installed copy picks it up (Help > Check for updates, or on launch).
+#         Needs $env:GITHUB_TOKEN: a fine-grained token for HSI-Lighting/release with
+#         Contents: read and write.
 #
 # Steps: close the running app -> `npm run tauri build` -> run the NSIS
-# installer with /S (silent) -> refresh the shareable installer on the Desktop.
+# installer with /S (silent) -> refresh the shareable installer on the Desktop
+# -> (-Publish) upload it and point latest.json at it.
+param([switch]$Publish)
 
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
+
+# Fail before spending a build number, not after the build.
+if ($Publish -and -not $env:GITHUB_TOKEN) {
+  throw "-Publish needs `$env:GITHUB_TOKEN (a token with Contents read/write on HSI-Lighting/release)"
+}
 
 # --- Build number: bump it and stamp it into the app, so every update we ship is
 # identifiable (shown in the app's menu bar and on the Desktop installer name). ---
@@ -48,6 +59,47 @@ $desktopSetup = Join-Path $desktop "Simple Effects Setup.exe"
 $desktopStamped = Join-Path $desktop "Simple Effects Setup build $buildNum.exe"
 Copy-Item $setup.FullName $desktopSetup -Force
 Copy-Item $setup.FullName $desktopStamped -Force
+
+# --- Publish (see docs/superpowers/specs/2026-11-04-auto-update-design.md). The app
+# reads latest.json from a fixed download URL, which isn't counted against GitHub's
+# per-IP API limit. Installer first, manifest last: the app never sees a manifest
+# that points at a file that isn't there yet. ---
+if ($Publish) {
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $api = "https://api.github.com/repos/HSI-Lighting/release"
+  $gh = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json"; "X-GitHub-Api-Version" = "2022-11-28" }
+  $relVer = ((($ver -split '\.')[0..1]) -join '.') + ".$buildNum"
+  $tag = "simple-effects-v$relVer"
+  $assetName = "simple-effects_${relVer}_windows.exe"
+  $sha = (Get-FileHash $setup.FullName -Algorithm SHA256).Hash.ToLower()
+  $uploadUrl = { param($rel, $name) ($rel.upload_url -replace '\{.*\}$', '') + "?name=$name" }
+
+  Write-Host "==> Publishing $tag to HSI-Lighting/release..." -ForegroundColor Cyan
+  $rel = Invoke-RestMethod -Method Post -Uri "$api/releases" -Headers $gh -ContentType "application/json" -Body (@{
+    tag_name = $tag; name = "Simple Effects $relVer"; body = "Build $buildNum ($stamp, commit $commit)"; make_latest = "false"
+  } | ConvertTo-Json)
+  $asset = Invoke-RestMethod -Method Post -Uri (& $uploadUrl $rel $assetName) -Headers $gh -ContentType "application/octet-stream" -InFile $setup.FullName
+
+  # The fixed "simple-effects-latest" pre-release holds only latest.json.
+  try {
+    $latest = Invoke-RestMethod -Uri "$api/releases/tags/simple-effects-latest" -Headers $gh
+  } catch {
+    if ($_.Exception.Response.StatusCode.value__ -ne 404) { throw }
+    $latest = Invoke-RestMethod -Method Post -Uri "$api/releases" -Headers $gh -ContentType "application/json" -Body (@{
+      tag_name = "simple-effects-latest"; name = "Simple Effects update info"; prerelease = $true; make_latest = "false"
+      body = "latest.json here tells installed copies of Simple Effects which build is newest. Rewritten by deploy.ps1 -Publish."
+    } | ConvertTo-Json)
+  }
+  foreach ($old in @($latest.assets | Where-Object { $_.name -eq "latest.json" })) {
+    Invoke-RestMethod -Method Delete -Uri "$api/releases/assets/$($old.id)" -Headers $gh | Out-Null
+  }
+  $manifestFile = Join-Path $env:TEMP "simple-effects-latest.json"
+  [IO.File]::WriteAllText($manifestFile, (@{
+    build = $buildNum; version = $relVer; url = $asset.browser_download_url; size = $setup.Length; sha256 = $sha; date = $stamp
+  } | ConvertTo-Json)) # no BOM
+  Invoke-RestMethod -Method Post -Uri (& $uploadUrl $latest "latest.json") -Headers $gh -ContentType "application/json" -InFile $manifestFile | Out-Null
+  Write-Host "    Published: $($asset.browser_download_url)" -ForegroundColor Green
+}
 
 # Report where it landed (per-user install by default).
 $installed = "$env:LOCALAPPDATA\Simple Effects\simple-effects.exe"

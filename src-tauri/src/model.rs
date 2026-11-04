@@ -27,6 +27,11 @@ pub struct Project {
     /// so reopening a file restores its bin; a new project starts empty.
     #[serde(default)]
     pub media: Vec<String>,
+    /// The user set the comp length by hand, so adding media no longer fits the
+    /// comp to it (a longer clip is trimmed to the comp end instead). Off for a
+    /// new project, which takes its first video's length.
+    #[serde(default)]
+    pub duration_set_by_user: bool,
 }
 
 /// One item on the timeline.
@@ -1451,6 +1456,7 @@ impl Project {
             duration_ms: 4000,
             layers: vec![],
             media: vec![],
+            duration_set_by_user: false,
         }
     }
 
@@ -1552,6 +1558,7 @@ impl Project {
             duration_ms: 4000,
             layers: vec![backdrop, accent, title],
             media: vec![],
+            duration_set_by_user: false,
         }
     }
 }
