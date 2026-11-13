@@ -37,6 +37,8 @@ import { applyStylePack, stylePackById, type StyleResult } from "./lib/stylePack
 import TemplateDialog, { type TemplateSpec } from "./components/TemplateDialog";
 import TemplateExtractorDialog from "./components/TemplateExtractorDialog";
 import VideoTemplateDialog, { VIDEO_STYLES } from "./components/VideoTemplateDialog";
+import { SubtitlesDialog } from "./components/SubtitlesDialog";
+import type { SubtitleResult } from "./bindings/SubtitleResult";
 import MixedTemplateDialog, { MIXED_TEMPLATES } from "./components/MixedTemplateDialog";
 import BeforeAfterDialog from "./components/BeforeAfterDialog";
 import TransitionsDemo from "./components/TransitionsDemo";
@@ -45,6 +47,8 @@ import {
   addFrameGrid,
   setMedia as apiSetMedia,
   addImageLayer,
+  importSubtitles,
+  pasteTextLook,
   addVideoLayer,
   addAudioLayer,
   placeLayer,
@@ -206,6 +210,7 @@ import {
   type ExportStats,
 } from "./lib/deterministicExport";
 import type { Project } from "./bindings/Project";
+import type { Layer } from "./bindings/Layer";
 import type { ResolvedLayer } from "./bindings/ResolvedLayer";
 import type { TransformEdit } from "./bindings/TransformEdit";
 import type { LetterAnimation } from "./bindings/LetterAnimation";
@@ -880,6 +885,44 @@ export default function App() {
     await applyTime(timeRef.current);
     recordAction("add_image", { layerId: newId, path: selected });
   }, [resolveImages, applyTime, recordAction]);
+
+  // Generate Subtitles from Speech… (right-click a video/audio clip).
+  const [subtitlesFor, setSubtitlesFor] = useState<{ id: number; name: string } | null>(null);
+  const onSubtitlesGenerated = useCallback(
+    async (r: SubtitleResult, layerId: number) => {
+      setSubtitlesFor(null);
+      setProject(r.project);
+      durationRef.current = r.project.durationMs;
+      await applyTime(timeRef.current);
+      recordAction("transcribe_layer", { layerId });
+      if (r.dropped > 0)
+        alert(`Added ${r.lines} subtitle lines. ${r.dropped} didn't fit in the comp's length and were left out.`);
+    },
+    [applyTime, recordAction]
+  );
+
+  // File → Import Subtitles…: each line becomes a text layer in a "Subtitles" group.
+  const onImportSubtitles = useCallback(async () => {
+    const path = await open({
+      multiple: false,
+      filters: [
+        { name: "Subtitles", extensions: ["srt", "vtt", "ass", "ssa", "sub", "smi", "sami"] },
+        { name: "All files", extensions: ["*"] },
+      ],
+    });
+    if (typeof path !== "string") return;
+    try {
+      const r = await importSubtitles(path);
+      setProject(r.project);
+      durationRef.current = r.project.durationMs;
+      await applyTime(timeRef.current);
+      recordAction("import_subtitles", { path });
+      if (r.dropped > 0)
+        alert(`Added ${r.lines} subtitle lines. ${r.dropped} didn't fit in the comp's length and were left out.`);
+    } catch (e) {
+      alert(String(e));
+    }
+  }, [applyTime, recordAction]);
 
   // --- Media bin ---------------------------------------------------------
   // Load thumbnails for a set of media paths (image data URLs / video poster
@@ -1635,6 +1678,30 @@ export default function App() {
     transitionIn: Transition | null;
     transitionOut: Transition | null;
   } | null>(null);
+
+  // Clipboard for a TEXT layer's look (style, animation, transitions — a copy
+  // of the whole layer, so it survives entering/leaving groups). Paste Look
+  // applies it to the selected text layers, or every text layer in a group.
+  const [textLookClip, setTextLookClip] = useState<Layer | null>(null);
+  const onCopyTextLook = useCallback((layerId: number) => {
+    const layer = projectRef.current?.layers.find((l) => l.id === layerId);
+    if (layer?.kind.kind === "text") setTextLookClip(structuredClone(layer));
+  }, []);
+  const onPasteTextLook = useCallback(
+    async (layerId: number) => {
+      if (!textLookClip) return;
+      const ids = selectedIdsRef.current.includes(layerId) ? [...selectedIdsRef.current] : [layerId];
+      try {
+        const p = await pasteTextLook(textLookClip, ids);
+        setProject(p);
+        await applyTime(timeRef.current);
+        recordAction("paste_text_look", { targetIds: ids });
+      } catch (e) {
+        alert(String(e));
+      }
+    },
+    [textLookClip, applyTime, recordAction]
+  );
 
   // Copy a layer's look (deep clone), then paste it onto another layer.
   const onCopyLayerEffects = useCallback((layerId: number) => {
@@ -4306,6 +4373,7 @@ export default function App() {
         { label: "Restore Checkpoint…", onClick: () => void onRestoreCheckpointFile() },
         { separator: true },
         { label: "Import Image…", onClick: onOpenImage },
+        { label: "Import Subtitles…", onClick: () => void onImportSubtitles() },
         { separator: true },
         {
           label: "Export Video…",
@@ -4330,6 +4398,16 @@ export default function App() {
           label: "Paste Layer(s)",
           onClick: () => void onPasteLayer(),
           shortcut: "Ctrl+V",
+        },
+        {
+          label: "Copy Look",
+          onClick: () => selectedId != null && onCopyTextLook(selectedId),
+          disabled: selectedLayer?.kind.kind !== "text",
+        },
+        {
+          label: "Paste Look",
+          onClick: () => selectedId != null && void onPasteTextLook(selectedId),
+          disabled: !textLookClip || selectedId == null,
         },
         {
           label: "Duplicate Layer",
@@ -4947,8 +5025,19 @@ export default function App() {
                           onClick: () => setTransitionPick({ ids: [ctxMenu.layerId!], slot: "out" as const }),
                         },
                       ];
+                      const ctxLayer = project.layers.find((l) => l.id === ctxMenu.layerId);
+                      // Shares the export's Cancel flag, so it's off while exporting
+                      // (an item without onClick renders as plain, unclickable text).
+                      const subtitlesItem = exporting
+                        ? { label: "💬 Generate Subtitles — finish the export first" }
+                        : {
+                            label: "💬 Generate Subtitles from Speech…",
+                            onClick: () => ctxLayer && setSubtitlesFor({ id: ctxLayer.id, name: ctxLayer.name }),
+                          };
+                      if (lk === "audio") return [subtitlesItem];
                       if (lk === "image" || lk === "video")
                         return [
+                          ...(lk === "video" ? [subtitlesItem] : []),
                           { label: "⇄ Replace media…", onClick: () => void onReplaceMedia(ctxMenu.layerId!) },
                           { label: "⤢ Scale to fit", onClick: () => onScaleToFit(ctxMenu.layerId!) },
                           {
@@ -4967,6 +5056,14 @@ export default function App() {
                                   onClick: () => void onPasteLayerEffects(ctxMenu.layerId!),
                                 },
                               ]
+                            : []),
+                          ...transitions,
+                        ];
+                      if (lk === "text")
+                        return [
+                          { label: "⧉ Copy Look", onClick: () => onCopyTextLook(ctxMenu.layerId!) },
+                          ...(textLookClip
+                            ? [{ label: "⧉ Paste Look", onClick: () => void onPasteTextLook(ctxMenu.layerId!) }]
                             : []),
                           ...transitions,
                         ];
@@ -4990,6 +5087,14 @@ export default function App() {
                       ? [
                           { label: "↳ Enter group", onClick: () => onEnterGroup(ctxMenu.layerId!) },
                           { label: "⋆ Explode group", onClick: () => onExplodeLayer(ctxMenu.layerId!) },
+                          ...(textLookClip
+                            ? [
+                                {
+                                  label: "⧉ Paste Look to all text in group",
+                                  onClick: () => void onPasteTextLook(ctxMenu.layerId!),
+                                },
+                              ]
+                            : []),
                         ]
                       : []),
                     {
@@ -5090,6 +5195,15 @@ export default function App() {
           style={videoStyle}
           onCreate={onCreateSlideshow}
           onClose={() => setVideoStyle(null)}
+        />
+      )}
+
+      {subtitlesFor && (
+        <SubtitlesDialog
+          layerId={subtitlesFor.id}
+          layerName={subtitlesFor.name}
+          onClose={() => setSubtitlesFor(null)}
+          onDone={(r) => void onSubtitlesGenerated(r, subtitlesFor.id)}
         />
       )}
 

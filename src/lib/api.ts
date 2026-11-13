@@ -3,6 +3,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Project } from "../bindings/Project";
 import type { UpdateManifest } from "../bindings/UpdateManifest";
+import type { SubtitleResult } from "../bindings/SubtitleResult";
+import type { Layer } from "../bindings/Layer";
 import type { Track } from "../bindings/Track";
 import type { ResolvedLayer } from "../bindings/ResolvedLayer";
 import type { TransformEdit } from "../bindings/TransformEdit";
@@ -759,6 +761,11 @@ export const applyLayerStyle = (
   transitionOut: Transition | null
 ) => invoke<Project>("apply_layer_style", { layerId, effects, transform, transitionIn, transitionOut });
 
+/** Paste a copied text layer's look onto the target text layers (and every text
+ *  layer inside a target group). Keeps each target's text, timing and position. */
+export const pasteTextLook = (look: Layer, targetIds: number[]) =>
+  invoke<Project>("paste_text_look", { look, targetIds });
+
 export const moveCellKeyframesAt = (layerId: number, cell: number, fromMs: number, toMs: number) =>
   invoke<Project>("move_cell_keyframes_at", { layerId, cell, fromMs, toMs });
 
@@ -811,6 +818,27 @@ export const ffmpegStatus = () => invoke<string | null>("ffmpeg_status");
 
 /** Install ffmpeg via winget (one-time). Resolves when found, rejects on error. */
 export const installFfmpeg = () => invoke<string>("install_ffmpeg");
+
+// --- Subtitles (docs/superpowers/specs/2026-11-13-subtitles-design.md) ---
+
+/** Read any subtitle file ffmpeg understands into a "Subtitles" group. Undoable. */
+export const importSubtitles = (path: string) => invoke<SubtitleResult>("import_subtitles", { path });
+
+export type SpeechQuality = "fast" | "accurate";
+
+/** Is the speech model for this quality already downloaded? */
+export const whisperModelReady = (quality: SpeechQuality) => invoke<boolean>("whisper_model_ready", { quality });
+
+/** Download (once, verified) the speech model. Cancel with `cancelExport()`. */
+export const downloadWhisperModel = (quality: SpeechQuality) => invoke<void>("download_whisper_model", { quality });
+
+/** Upgrade/install winget's Gyan ffmpeg so speech detection works. Resolves to its path. */
+export const updateFfmpeg = () => invoke<string>("update_ffmpeg");
+
+/** Transcribe the played part of a video/audio layer into a "Subtitles" group.
+ *  `language` is "auto" or a 2–3 letter code. Undoable; cancel with `cancelExport()`. */
+export const transcribeLayer = (layerId: number, quality: SpeechQuality, language: string) =>
+  invoke<SubtitleResult>("transcribe_layer", { layerId, quality, language });
 
 /**
  * Save the recorded WebM as the chosen `format` ("webm" as-is, or "mp4" via

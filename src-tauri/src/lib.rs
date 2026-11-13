@@ -9,6 +9,7 @@ mod eval;
 mod mcp_bridge;
 mod sam_service;
 mod model;
+mod subtitles;
 mod surface;
 mod text;
 
@@ -355,12 +356,20 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
     let next_id = max_layer_id(&project.layers) + 1;
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
     let end_ms = default_new_layer_end(project.duration_ms);
+    let shaped = text::shape(&content, size, &Font("Vazirmatn".into()), 400, false);
+    project.layers.push(new_text_layer(next_id, content, size, cx, cy, 0, end_ms));
+    state.shaped.lock().unwrap().insert(next_id, shaped);
+    project.clone()
+}
+
+/// A plain text layer (Vazirmatn 400, centred, off-white) at `(x, y)` over
+/// `[start_ms, end_ms]`. Not shaped — callers reshape it.
+fn new_text_layer(id: u32, content: String, size: f32, x: f32, y: f32, start_ms: u32, end_ms: u32) -> Layer {
     let font = Font("Vazirmatn".into());
-    let shaped = text::shape(&content, size, &font, 400, false);
-    project.layers.push(Layer {
-        id: next_id,
+    Layer {
+        id,
         name: text_layer_name(&content),
-        start_ms: 0,
+        start_ms,
         end_ms,
         kind: LayerKind::Text {
             content,
@@ -386,15 +395,13 @@ fn add_text_layer(state: State<AppState>, content: String, size: f32) -> Project
             per_char_ry: 0.0,
             per_char_spread: 0.0,
         },
-        transform: Transform::at(cx, cy),
+        transform: Transform::at(x, y),
         hidden: false,
         attach: None,
         effects: vec![],
         transition_in: None,
         transition_out: None,
-    });
-    state.shaped.lock().unwrap().insert(next_id, shaped);
-    project.clone()
+    }
 }
 
 /// Add a blank adjustment layer spanning the whole comp. Its effect stack
@@ -1276,11 +1283,7 @@ fn set_layer_range(
     let delta = s as i64 - old_start as i64;
     let span_preserved = (e as i64 - s as i64) == (old_end as i64 - old_start as i64);
     if span_preserved && delta != 0 {
-        for_each_track_mut(layer, |tr| {
-            for k in tr.keys.iter_mut() {
-                k.time_ms = (k.time_ms as i64 + delta).max(0) as u32;
-            }
-        });
+        shift_layer_keys(layer, delta);
         // A group carries its contents: moving it shifts every child's timing
         // (ranges + keyframes) by the same delta, recursively.
         if let LayerKind::Group { children } = &mut layer.kind {
@@ -1330,6 +1333,13 @@ fn move_keyframes_at(
     if to == from_ms {
         return Ok(project.clone());
     }
+    move_layer_keys(layer, from_ms, to);
+    Ok(project.clone())
+}
+
+/// Move every key at `from_ms` to `to` on the tracks that have one there
+/// (replacing any key already at `to`).
+fn move_layer_keys(layer: &mut Layer, from_ms: u32, to: u32) {
     for_each_track_mut(layer, |tr| {
         if !tr.keys.iter().any(|k| k.time_ms == from_ms) {
             return;
@@ -1343,7 +1353,18 @@ fn move_keyframes_at(
         }
         tr.keys.sort_by(|a, b| a.time_ms.cmp(&b.time_ms));
     });
-    Ok(project.clone())
+    for_each_color_keys_mut(layer, |keys, _| {
+        if !keys.iter().any(|k| k.time_ms == from_ms) {
+            return;
+        }
+        keys.retain(|k| k.time_ms != to);
+        for k in keys.iter_mut() {
+            if k.time_ms == from_ms {
+                k.time_ms = to;
+            }
+        }
+        keys.sort_by_key(|k| k.time_ms);
+    });
 }
 
 /// Set (or clear) a layer's in/out transition. `slot` is "in" or "out"; `kind`
@@ -5002,6 +5023,122 @@ fn apply_layer_style(
     }
 }
 
+/// Where a keyframe at `t` on a look copied from a layer spanning `src` lands on
+/// a layer spanning `dst`. Keys in the first half keep their distance from the
+/// start, keys in the second half their distance from the end (so a fade-out
+/// stays a fade-out on a longer or shorter line). First-half keys never pass
+/// `dst`'s midpoint and second-half keys never come before it, so a target
+/// shorter than the look can't swap a fade-in's keys with a fade-out's.
+fn remap_key_time(t: u32, src: (u32, u32), dst: (u32, u32)) -> u32 {
+    let mid = (src.0 as i64 + src.1 as i64) / 2;
+    let dmid = (dst.0 as i64 + dst.1 as i64) / 2;
+    let t = t as i64;
+    let out = if t <= mid {
+        (dst.0 as i64 + (t - src.0 as i64)).min(dmid)
+    } else {
+        (dst.1 as i64 - (src.1 as i64 - t)).max(dmid)
+    };
+    out.clamp(dst.0 as i64, dst.1 as i64) as u32
+}
+
+/// Copy a text layer's look onto `target`: everything except its text, its
+/// per-letter edits (`parts`), its timing and its position. The look's keyframes
+/// are moved to line up with `target`'s span. No-op unless both are text.
+fn apply_text_look(target: &mut Layer, look: &Layer) {
+    if !matches!(look.kind, LayerKind::Text { .. }) {
+        return;
+    }
+    let LayerKind::Text { content, parts, .. } = &mut target.kind else { return };
+    let (content, parts) = (std::mem::take(content), std::mem::take(parts));
+    let (src, dst) = ((look.start_ms, look.end_ms), (target.start_ms, target.end_ms));
+    let mut l = look.clone();
+    for_each_track_mut(&mut l, |tr| {
+        for k in tr.keys.iter_mut() {
+            k.time_ms = remap_key_time(k.time_ms, src, dst);
+        }
+        tr.keys.sort_by_key(|k| k.time_ms);
+    });
+    for_each_color_keys_mut(&mut l, |keys, _| {
+        for k in keys.iter_mut() {
+            k.time_ms = remap_key_time(k.time_ms, src, dst);
+        }
+        keys.sort_by_key(|k| k.time_ms);
+    });
+    if let LayerKind::Text { content: c, parts: p, .. } = &mut l.kind {
+        *c = content;
+        *p = parts;
+    }
+    let (x, y) = (target.transform.x.clone(), target.transform.y.clone());
+    target.kind = l.kind;
+    target.transform = Transform { x, y, ..l.transform };
+    target.transition_in = l.transition_in;
+    target.transition_out = l.transition_out;
+    target.effects = l.effects;
+}
+
+/// Apply a look to `layer` if it's text, or to every text layer inside it if
+/// it's a group (nested groups too). Returns how many text layers changed.
+fn apply_text_look_recursive(layer: &mut Layer, look: &Layer) -> u32 {
+    if matches!(layer.kind, LayerKind::Text { .. }) {
+        apply_text_look(layer, look);
+        return 1;
+    }
+    match &mut layer.kind {
+        LayerKind::Group { children } => children.iter_mut().map(|c| apply_text_look_recursive(c, look)).sum(),
+        _ => 0,
+    }
+}
+
+/// Re-break any row of `content` wider than `max_w` (as `measure` sees it) at
+/// spaces. Rows that fit are left exactly as they are; rows are never joined.
+fn rewrap_to_width(content: &str, max_w: f32, measure: &dyn Fn(&str) -> f32) -> String {
+    content
+        .split('\n')
+        .map(|row| if measure(row) > max_w { subtitles::wrap_line(row, max_w, measure).join("\n") } else { row.to_string() })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// After a paste, keep pasted text inside the frame: re-break rows the new
+/// font/size made wider than `max_w`, in `layer` or any text inside it.
+fn rewrap_text_recursive(layer: &mut Layer, max_w: f32) {
+    match &mut layer.kind {
+        LayerKind::Text { content, size, font, weight, italic, .. } => {
+            let (size, weight, italic, font) = (*size, *weight, *italic, font.clone());
+            let width = |s: &str| text::shape(s, size, &font, weight, italic).width;
+            *content = rewrap_to_width(content, max_w, &width);
+        }
+        LayerKind::Group { children } => children.iter_mut().for_each(|c| rewrap_text_recursive(c, max_w)),
+        _ => {}
+    }
+}
+
+/// Paste Look: apply `look` (a copy of a text layer taken at Copy Look time) to
+/// every selected text layer and every text layer inside a selected group. One
+/// undo step; non-text layers are skipped.
+#[tauri::command]
+fn paste_text_look(state: State<AppState>, look: Layer, target_ids: Vec<u32>) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    let before = project.clone();
+    let max_w = 0.9 * project.width as f32;
+    let mut shaped = state.shaped.lock().unwrap();
+    let mut touched = 0;
+    for l in project.layers.iter_mut().filter(|l| target_ids.contains(&l.id)) {
+        let n = apply_text_look_recursive(l, &look);
+        if n > 0 {
+            rewrap_text_recursive(l, max_w);
+            reshape_recursive(&mut shaped, l);
+        }
+        touched += n;
+    }
+    drop(shaped);
+    if touched == 0 {
+        return Err("Select a text layer or a group of text layers.".into());
+    }
+    state.snapshot(&before);
+    Ok(project.clone())
+}
+
 /// Paste the same effect stack onto EVERY cell of a grid at once (except the
 /// `except` cell, if given — normally the source cell keeps its original). One
 /// undo step. Undoable.
@@ -5731,6 +5868,14 @@ fn cancel_export() {
 /// Run a prepared ffmpeg command (output path appended here) and turn a failure
 /// into a readable error. A cancel kills it and removes the half-written output.
 fn run_ffmpeg(mut cmd: std::process::Command, path: &str) -> Result<(), String> {
+    cmd.arg(path);
+    run_cancellable(cmd, std::path::Path::new(path), "ffmpeg")
+}
+
+/// Run `cmd` (ffmpeg, curl…) until it exits, polling the Cancel flag: a cancel
+/// kills it, deletes `partial` (its half-written output) and returns
+/// `EXPORT_CANCELLED`. A failure becomes "`tool` failed: <stderr tail>".
+fn run_cancellable(mut cmd: std::process::Command, partial: &std::path::Path, tool: &str) -> Result<(), String> {
     use std::io::Read;
     use std::process::Stdio;
     let cancelled = || EXPORT_CANCEL.load(std::sync::atomic::Ordering::SeqCst);
@@ -5738,13 +5883,12 @@ fn run_ffmpeg(mut cmd: std::process::Command, path: &str) -> Result<(), String> 
         return Err(EXPORT_CANCELLED.into());
     }
     let mut child = cmd
-        .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("run ffmpeg: {e}"))?;
-    // Drain stderr on its own thread so a chatty ffmpeg never stalls on a full pipe.
+        .map_err(|e| format!("run {tool}: {e}"))?;
+    // Drain stderr on its own thread so a chatty child never stalls on a full pipe.
     let mut pipe = child.stderr.take().expect("stderr is piped");
     let reader = std::thread::spawn(move || {
         let mut s = Vec::new();
@@ -5752,29 +5896,34 @@ fn run_ffmpeg(mut cmd: std::process::Command, path: &str) -> Result<(), String> 
         s
     });
     let status = loop {
-        if let Some(st) = child.try_wait().map_err(|e| format!("run ffmpeg: {e}"))? {
+        if let Some(st) = child.try_wait().map_err(|e| format!("run {tool}: {e}"))? {
             break st;
         }
         if cancelled() {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(partial);
             return Err(EXPORT_CANCELLED.into());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     };
     let stderr = reader.join().unwrap_or_default();
     if !status.success() {
-        // The last line alone ("Error opening input files: …") never says WHICH
-        // input failed — the line before it does — so keep the last few.
-        let err = String::from_utf8_lossy(&stderr);
-        let tail: Vec<&str> = err.lines().rev().filter(|l| !l.trim().is_empty()).take(4).collect();
-        return Err(format!(
-            "ffmpeg failed: {}",
-            if tail.is_empty() { "unknown error".to_string() } else { tail.into_iter().rev().collect::<Vec<_>>().join(" | ") }
-        ));
+        return Err(format!("{tool} failed: {}", stderr_tail(&stderr)));
     }
     Ok(())
+}
+
+/// The last few non-empty stderr lines, joined. The last line alone ("Error
+/// opening input files: …") never says WHICH input failed — the line before does.
+fn stderr_tail(stderr: &[u8]) -> String {
+    let err = String::from_utf8_lossy(stderr);
+    let tail: Vec<&str> = err.lines().rev().filter(|l| !l.trim().is_empty()).take(4).collect();
+    if tail.is_empty() {
+        "unknown error".into()
+    } else {
+        tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
+    }
 }
 
 /// Phase 7 ("drop a video" flow): extract [start_ms, end_ms) of `source_path`
@@ -5967,15 +6116,40 @@ fn extract_video_frames(path: String, times_ms: Vec<u32>, short_side: u32) -> Re
 fn shift_layer_time(layer: &mut Layer, delta: i64) {
     layer.start_ms = (layer.start_ms as i64 + delta).max(0) as u32;
     layer.end_ms = (layer.end_ms as i64 + delta).max(0) as u32;
-    for_each_track_mut(layer, |tr| {
-        for k in tr.keys.iter_mut() {
-            k.time_ms = (k.time_ms as i64 + delta).max(0) as u32;
-        }
-    });
+    shift_layer_keys(layer, delta);
     if let LayerKind::Group { children } = &mut layer.kind {
         for c in children.iter_mut() {
             shift_layer_time(c, delta);
         }
+    }
+}
+
+/// Move every keyframe on a layer (scalar tracks and colour keys) by `delta`.
+fn shift_layer_keys(layer: &mut Layer, delta: i64) {
+    let shift = |t: &mut u32| *t = (*t as i64 + delta).max(0) as u32;
+    for_each_track_mut(layer, |tr| tr.keys.iter_mut().for_each(|k| shift(&mut k.time_ms)));
+    for_each_color_keys_mut(layer, |keys, _| keys.iter_mut().for_each(|k| shift(&mut k.time_ms)));
+}
+
+/// Visit every colour-keyframe list on a layer, with the static colour it
+/// animates (`None` for per-letter colours, which fall back to the layer's).
+/// Colour keys aren't `Track`s, so `for_each_track_mut` can't reach them.
+fn for_each_color_keys_mut(layer: &mut Layer, mut f: impl FnMut(&mut Vec<ColorKey>, Option<&mut Rgba>)) {
+    match &mut layer.kind {
+        LayerKind::Text { color, color_keys, parts, .. } => {
+            f(color_keys, Some(color));
+            for p in parts.iter_mut() {
+                f(&mut p.color_keys, None);
+            }
+        }
+        LayerKind::FrameGrid { line_color, line_color_keys, .. } => f(line_color_keys, Some(line_color)),
+        LayerKind::Shape2D { style } => {
+            f(&mut style.fill_keys, Some(&mut style.fill));
+            f(&mut style.border_color_keys, Some(&mut style.border_color));
+            f(&mut style.glow_color_keys, Some(&mut style.glow_color));
+            f(&mut style.shadow_color_keys, Some(&mut style.shadow_color));
+        }
+        _ => {}
     }
 }
 
@@ -5988,13 +6162,37 @@ fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
     f(&mut tf.rotation);
     f(&mut tf.opacity);
     match &mut layer.kind {
-        LayerKind::Text { decompose, parts, .. } => {
+        LayerKind::Text { decompose, parts, animators, style, .. } => {
             f(decompose);
             for p in parts.iter_mut() {
                 f(&mut p.dx);
                 f(&mut p.dy);
                 f(&mut p.rotation);
                 f(&mut p.scale);
+            }
+            // Animator and style tracks are sampled at absolute comp time
+            // (eval::apply_animators), so they move with the layer too.
+            for a in animators.iter_mut() {
+                let s = &mut a.selector;
+                for tr in [
+                    &mut s.start, &mut s.end, &mut s.offset, &mut s.smoothness, &mut s.ease_high,
+                    &mut s.ease_low, &mut s.wiggles_per_sec, &mut s.amount, &mut s.correlation,
+                    &mut s.temporal_phase, &mut s.spatial_phase,
+                ] {
+                    f(tr);
+                }
+                let p = &mut a.props;
+                let [px, py] = &mut p.position;
+                for tr in [
+                    px, py, &mut p.scale, &mut p.rotation, &mut p.skew, &mut p.skew_axis, &mut p.opacity,
+                    &mut p.tracking, &mut p.blur, &mut p.rotation_x, &mut p.rotation_y, &mut p.position_z,
+                ] {
+                    f(tr);
+                }
+            }
+            if let Some(st) = style {
+                f(&mut st.tracking);
+                f(&mut st.baseline_shift);
             }
         }
         LayerKind::Shape3D {
@@ -6505,17 +6703,24 @@ fn merge_fast(
     run_fast_merge(&plan, &out_path)
 }
 
+/// `%LOCALAPPDATA%\Simple Effects\<sub>` (created), or under %TEMP% without
+/// LOCALAPPDATA (non-Windows).
+fn app_data_dir(sub: &str) -> Result<std::path::PathBuf, String> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .map(|p| p.join("Simple Effects"))
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join(sub);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
 /// A fresh, unique path for a merged clip: `<app data>/merged/merge-<ms>.mp4`
 /// (the folder is created). Merged videos are real project media, so they live
 /// in the app's data folder rather than %TEMP%, which the OS may clean up.
 #[tauri::command]
 fn merge_output_path() -> Result<String, String> {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .map(|p| p.join("Simple Effects"))
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("merged");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let dir = app_data_dir("merged")?;
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -6538,8 +6743,14 @@ fn delete_keyframes_at(
         .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
-    for_each_track_mut(layer, |tr| tr.keys.retain(|k| k.time_ms != t_ms));
+    delete_layer_keys_at(layer, t_ms);
     Ok(project.clone())
+}
+
+/// Remove every key at exactly `t_ms` on a layer.
+fn delete_layer_keys_at(layer: &mut Layer, t_ms: u32) {
+    for_each_track_mut(layer, |tr| tr.keys.retain(|k| k.time_ms != t_ms));
+    for_each_color_keys_mut(layer, |keys, _| keys.retain(|k| k.time_ms != t_ms));
 }
 
 /// Clear ALL keyframes on a layer (delete its animation tracks), freezing each
@@ -6553,11 +6764,26 @@ fn clear_keyframes(state: State<AppState>, layer_id: u32, t_ms: u32) -> Result<P
         .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
+    clear_layer_keys(layer, t_ms);
+    Ok(project.clone())
+}
+
+/// Drop all of a layer's keys, freezing each property at its value at `t_ms`.
+fn clear_layer_keys(layer: &mut Layer, t_ms: u32) {
     for_each_track_mut(layer, |tr| {
         tr.default = eval::sample_track(tr, t_ms);
         tr.keys.clear();
     });
-    Ok(project.clone())
+    // Per-letter colours have no static colour to freeze into; those belong to
+    // the letter overrides (cleared with them), so they're left alone here.
+    for_each_color_keys_mut(layer, |keys, still| {
+        if let Some(c) = still {
+            if !keys.is_empty() {
+                *c = eval::sample_color(keys, *c, t_ms);
+                keys.clear();
+            }
+        }
+    });
 }
 
 /// Clear all manual per-glyph overrides on a text layer.
@@ -6746,6 +6972,12 @@ pub fn run() {
             add_image_layer,
             add_video_layer,
             add_audio_layer,
+            subtitles::import_subtitles,
+            subtitles::whisper_model_ready,
+            subtitles::download_whisper_model,
+            subtitles::update_ffmpeg,
+            subtitles::transcribe_layer,
+            paste_text_look,
             place_layer,
             combine_layers,
             explode_layer,
@@ -7321,5 +7553,142 @@ mod update_tests {
             .unwrap();
         spawn_install_helper(installer.as_ref(), exe.as_ref(), stand_in.id()).unwrap();
         stand_in.wait().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod text_look_tests {
+    use super::*;
+
+    fn text(id: u32, content: &str, size: f32, x: f32, y: f32, start: u32, end: u32) -> Layer {
+        new_text_layer(id, content.into(), size, x, y, start, end)
+    }
+    fn key(t: u32) -> Keyframe {
+        Keyframe { time_ms: t, value: 0.0, easing: Easing::Linear }
+    }
+    fn size_of(l: &Layer) -> f32 {
+        let LayerKind::Text { size, .. } = &l.kind else { panic!("not text") };
+        *size
+    }
+
+    #[test]
+    fn keys_keep_their_distance_from_the_nearer_end() {
+        assert_eq!(remap_key_time(500, (0, 3000), (10000, 15000)), 10500);
+        assert_eq!(remap_key_time(2800, (0, 3000), (10000, 15000)), 14800);
+        assert_eq!(remap_key_time(2800, (0, 3000), (10000, 10100)), 10050); // 10100-200 = 9900: a second-half key never lands before the midpoint
+    }
+
+    #[test]
+    fn paste_copies_the_look_but_keeps_content_timing_position_and_parts() {
+        let mut look = text(1, "A", 80.0, 100.0, 100.0, 0, 3000);
+        look.transform.opacity.keys = vec![key(2800)];
+        if let LayerKind::Text { color_keys, parts, .. } = &mut look.kind {
+            *color_keys = vec![ColorKey { time_ms: 500, color: Rgba { r: 255, g: 0, b: 0, a: 255 }, easing: Easing::Linear }];
+            *parts = vec![LetterOverride::default(), LetterOverride::default()];
+        }
+        let mut target = text(2, "B", 40.0, 500.0, 900.0, 10000, 15000);
+        apply_text_look(&mut target, &look);
+        let LayerKind::Text { content, size, color_keys, parts, .. } = &target.kind else { panic!() };
+        assert_eq!((content.as_str(), *size), ("B", 80.0));
+        assert_eq!((target.start_ms, target.end_ms), (10000, 15000));
+        assert_eq!((target.transform.x.default, target.transform.y.default), (500.0, 900.0));
+        assert_eq!(target.transform.opacity.keys[0].time_ms, 14800);
+        assert_eq!(color_keys[0].time_ms, 10500);
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn paste_onto_a_group_restyles_every_text_child_and_skips_others() {
+        let look = text(1, "A", 80.0, 0.0, 0.0, 0, 3000);
+        let patch = Layer {
+            id: 11,
+            name: "patch".into(),
+            start_ms: 0,
+            end_ms: 1000,
+            kind: LayerKind::ColorPatch { color: Rgba { r: 1, g: 2, b: 3, a: 255 }, blend: crate::model::BlendMode::Normal, width: 10.0, height: 10.0 },
+            transform: Transform::at(0.0, 0.0),
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            transition_in: None,
+            transition_out: None,
+        };
+        let inner = Layer { id: 12, name: "inner".into(), kind: LayerKind::Group { children: vec![text(13, "c", 10.0, 0.0, 0.0, 0, 1000)] }, ..patch.clone() };
+        let mut group = Layer { id: 14, name: "g".into(), kind: LayerKind::Group { children: vec![text(10, "b", 10.0, 0.0, 0.0, 0, 1000), patch, inner] }, ..text(0, "", 1.0, 0.0, 0.0, 0, 1000) };
+        assert_eq!(apply_text_look_recursive(&mut group, &look), 2);
+        let LayerKind::Group { children } = &group.kind else { panic!() };
+        assert_eq!(size_of(&children[0]), 80.0);
+        assert!(matches!(children[1].kind, LayerKind::ColorPatch { .. }));
+        let LayerKind::Group { children: inner } = &children[2].kind else { panic!() };
+        assert_eq!(size_of(&inner[0]), 80.0);
+    }
+
+    // --- Final-review fixes ----------------------------------------------------
+
+    fn red(t: u32) -> ColorKey {
+        ColorKey { time_ms: t, color: Rgba { r: 255, g: 0, b: 0, a: 255 }, easing: Easing::Linear }
+    }
+    fn color_key_times(l: &Layer) -> Vec<u32> {
+        let LayerKind::Text { color_keys, .. } = &l.kind else { panic!() };
+        color_keys.iter().map(|k| k.time_ms).collect()
+    }
+
+    #[test]
+    fn a_look_pasted_onto_a_short_line_keeps_its_keys_in_order() {
+        let mut look = text(1, "A", 40.0, 0.0, 0.0, 0, 3000);
+        look.transform.opacity.keys = [0, 500, 2500, 3000].into_iter().map(key).collect();
+        let mut target = text(2, "B", 40.0, 0.0, 0.0, 10000, 10600);
+        apply_text_look(&mut target, &look);
+        let t: Vec<u32> = target.transform.opacity.keys.iter().map(|k| k.time_ms).collect();
+        assert!(t.windows(2).all(|w| w[0] <= w[1]), "keys out of order: {t:?}");
+        assert_eq!((t[0], t[3]), (10000, 10600));
+    }
+
+    #[test]
+    fn moving_a_text_layer_carries_its_colour_keys() {
+        let mut l = text(1, "A", 40.0, 0.0, 0.0, 0, 3000);
+        if let LayerKind::Text { color_keys, .. } = &mut l.kind {
+            *color_keys = vec![red(1000)];
+        }
+        shift_layer_time(&mut l, 500);
+        assert_eq!(color_key_times(&l), vec![1500]);
+    }
+
+    #[test]
+    fn colour_key_diamonds_can_be_moved_deleted_and_cleared() {
+        let mut l = text(1, "A", 40.0, 0.0, 0.0, 0, 3000);
+        if let LayerKind::Text { color_keys, .. } = &mut l.kind {
+            *color_keys = vec![red(1000), red(2000)];
+        }
+        move_layer_keys(&mut l, 1000, 1200);
+        assert_eq!(color_key_times(&l), vec![1200, 2000]);
+        delete_layer_keys_at(&mut l, 2000);
+        assert_eq!(color_key_times(&l), vec![1200]);
+        clear_layer_keys(&mut l, 1500);
+        let LayerKind::Text { color, color_keys, .. } = &l.kind else { panic!() };
+        assert!(color_keys.is_empty());
+        assert_eq!((color.r, color.g), (255, 0)); // frozen at the key's red
+    }
+
+    #[test]
+    fn rows_too_wide_for_the_frame_are_rewrapped_and_the_rest_left_alone() {
+        let m = |s: &str| s.chars().count() as f32 * 10.0;
+        assert_eq!(rewrap_to_width("one two three four\nok", 105.0, &m), "one two\nthree four\nok");
+        assert_eq!(rewrap_to_width("fits  here", 105.0, &m), "fits  here"); // double space kept
+    }
+
+    #[test]
+    fn moving_a_text_layer_now_carries_its_animator_keys() {
+        let mut l = text(1, "A", 40.0, 0.0, 0.0, 0, 3000);
+        let anim: crate::model::TextAnimator = serde_json::from_str(
+            r#"{"selector":{"kind":"range","shape":"square","seed":0,"offset":{"keys":[{"timeMs":1000,"value":0,"easing":"linear"}],"default":0}},"props":{"charOffset":0}}"#,
+        )
+        .unwrap();
+        if let LayerKind::Text { animators, .. } = &mut l.kind {
+            animators.push(anim);
+        }
+        shift_layer_time(&mut l, 500);
+        let LayerKind::Text { animators, .. } = &l.kind else { panic!() };
+        assert_eq!(animators[0].selector.offset.keys[0].time_ms, 1500);
     }
 }
