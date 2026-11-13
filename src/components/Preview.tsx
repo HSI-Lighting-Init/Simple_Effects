@@ -2297,7 +2297,13 @@ function TextGlyphs({
         <Shape
           sceneFunc={(ctx) => {
             const cv = styledOffRef.current;
-            if (cv) (ctx as unknown as CanvasRenderingContext2D).drawImage(cv, styled.imageX, styled.imageY, styled.logicalW, styled.logicalH);
+            // The raster is 2x comp px and usually shown far smaller (fit-to-window);
+            // the default "low" smoothing shrinks it without filtering, so styled
+            // text (outlined subtitles…) came out jagged. Set it on the NATIVE
+            // context — Konva's wrapper doesn't forward this property.
+            const c2d = ctx._context;
+            c2d.imageSmoothingQuality = "high";
+            if (cv) c2d.drawImage(cv, styled.imageX, styled.imageY, styled.logicalW, styled.logicalH);
           }}
           listening={false}
           perfectDrawEnabled={false}
