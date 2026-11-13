@@ -602,21 +602,33 @@ function rasterizeText(
 // text with a per-letter colour animator); `letterFill` overrides the fill.
 // Stroke `position` is honoured with clipping (inside = clip to glyph, outside =
 // clip to its complement).
+/** The layers a text run is painted in, bottom to top (see `paintGlyph`). */
+type GlyphPart = "under" | "fill" | "over";
+const GLYPH_PARTS: GlyphPart[] = ["under", "fill", "over"];
+
+/** Paint one layer of a glyph. Callers paint every glyph's "under", then every
+ *  glyph's "fill", then every glyph's "over", so outlines never cut into a
+ *  neighbouring glyph's fill. "under" = strokes beneath the fill (all of them
+ *  with fill-over-stroke; otherwise just "outside" strokes, which never cover
+ *  their own glyph anyway); "over" = the remaining strokes. */
 function paintGlyph(
   ctx: CanvasRenderingContext2D,
   path: Path2D,
   letterAlpha: number,
   style: TextStyle | null,
   base: Rgba,
-  letterFill?: Rgba | null,
-  embolden = 0
+  letterFill: Rgba | null,
+  embolden: number,
+  part: GlyphPart
 ) {
   const fills = letterFill
     ? [{ color: letterFill, opacity: 100 }]
     : style && style.fills.length
     ? style.fills
     : [{ color: base, opacity: 100 }];
-  const strokes = style ? style.strokes : [];
+  const allStrokes = style ? style.strokes : [];
+  const under = (s: (typeof allStrokes)[number]) => !!style?.fillOverStroke || s.position === "outside";
+  const strokes = part === "fill" ? [] : allStrokes.filter((s) => under(s) === (part === "under"));
   const drawFills = () => {
     for (const f of fills) {
       ctx.globalAlpha = letterAlpha * (f.color.a / 255) * (f.opacity / 100);
@@ -659,13 +671,8 @@ function paintGlyph(
       }
     }
   };
-  if (style?.fillOverStroke) {
-    drawStrokes();
-    drawFills();
-  } else {
-    drawFills();
-    drawStrokes();
-  }
+  if (part === "fill") drawFills();
+  else drawStrokes();
 }
 
 // Fill `src`'s alpha shape with `color`, optionally blurred — for shadows/glows.
@@ -843,6 +850,10 @@ function rasterizeStyledText(
   const drawGlyphs = (ctx: CanvasRenderingContext2D) => {
     ctx.setTransform(SS, 0, 0, SS, 0, 0);
     ctx.clearRect(0, 0, logicalW, logicalH);
+    // Paint the whole run in layers, not glyph by glyph: otherwise each glyph's
+    // outline lands on its neighbour's fill where they touch, cutting a seam
+    // through every joint of connected scripts (Arabic/Persian, script fonts).
+    for (const part of GLYPH_PARTS) {
     let trackAcc = 0;
     shaped.glyphs.forEach((g, i) => {
       const lt = letters[i];
@@ -874,11 +885,12 @@ function rasterizeStyledText(
         }
         if (lt?.blur) ctx.filter = `blur(${lt.blur}px)`;
         ctx.translate(-g.cx, -g.cy);
-        paintGlyph(ctx, new Path2D(g.d), lt?.opacity ?? 1, style, base, lt?.fill ?? null, shaped.embolden);
+        paintGlyph(ctx, new Path2D(g.d), lt?.opacity ?? 1, style, base, lt?.fill ?? null, shaped.embolden, part);
         ctx.restore();
       }
       trackAcc += lt?.tracking ?? 0;
     });
+    }
     ctx.globalAlpha = 1;
     ctx.filter = "none";
     ctx.setTransform(1, 0, 0, 1, 0, 0);
