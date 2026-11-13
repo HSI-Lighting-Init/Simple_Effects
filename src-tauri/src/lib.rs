@@ -552,10 +552,52 @@ fn clear_text_color_keys(
     Ok(project.clone())
 }
 
-/// Change a text layer's font and re-shape it.
+/// Apply a font change to `layer` if it's text, or to every text layer inside
+/// it if it's a group (nested groups too). Returns how many text layers changed.
+fn set_font_recursive(layer: &mut Layer, set: &dyn Fn(&mut Font, &mut u16, &mut bool)) -> u32 {
+    match &mut layer.kind {
+        LayerKind::Text { font, weight, italic, .. } => {
+            set(font, weight, italic);
+            1
+        }
+        LayerKind::Group { children } => children.iter_mut().map(|c| set_font_recursive(c, set)).sum(),
+        _ => 0,
+    }
+}
+
+/// A font change aimed at a GROUP (e.g. "Subtitles") goes to every text layer
+/// inside it as one undo step, and rows the new font makes wider than the
+/// frame are re-broken. `None` when `layer_id` isn't a group in this scope —
+/// the caller then handles it as a single text layer.
+fn set_font_on_group(
+    state: &AppState,
+    project: &mut Project,
+    layer_id: u32,
+    set: &dyn Fn(&mut Font, &mut u16, &mut bool),
+) -> Option<Result<Project, String>> {
+    if !project.layers.iter().any(|l| l.id == layer_id && matches!(l.kind, LayerKind::Group { .. })) {
+        return None;
+    }
+    let before = project.clone();
+    let max_w = 0.9 * project.width as f32;
+    let group = project.layers.iter_mut().find(|l| l.id == layer_id)?;
+    if set_font_recursive(group, set) == 0 {
+        return Some(Err("This group has no text layers.".into()));
+    }
+    rewrap_text_recursive(group, max_w);
+    reshape_recursive(&mut state.shaped.lock().unwrap(), group);
+    state.snapshot(&before);
+    Some(Ok(project.clone()))
+}
+
+/// Change a text layer's font and re-shape it — or, for a group, every text
+/// layer inside it.
 #[tauri::command]
 fn set_text_font(state: State<AppState>, layer_id: u32, font: Font) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
+    if let Some(r) = set_font_on_group(&state, &mut project, layer_id, &|f, _, _| *f = font.clone()) {
+        return r;
+    }
     state.snapshot(&project);
     let (content, size, weight, italic, align) = {
         let layer = project
@@ -579,7 +621,8 @@ fn set_text_font(state: State<AppState>, layer_id: u32, font: Font) -> Result<Pr
     Ok(project.clone())
 }
 
-/// Change a text layer's weight (100..900) and/or italic, then re-shape it.
+/// Change a text layer's weight (100..900) and/or italic, then re-shape it —
+/// or, for a group, every text layer inside it.
 #[tauri::command]
 fn set_text_font_style(
     state: State<AppState>,
@@ -588,6 +631,13 @@ fn set_text_font_style(
     italic: bool,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
+    let set = |_: &mut Font, w: &mut u16, it: &mut bool| {
+        *w = weight.clamp(100, 900);
+        *it = italic;
+    };
+    if let Some(r) = set_font_on_group(&state, &mut project, layer_id, &set) {
+        return r;
+    }
     state.snapshot(&project);
     let (content, size, font, align) = {
         let layer = project
@@ -5099,14 +5149,25 @@ fn rewrap_to_width(content: &str, max_w: f32, measure: &dyn Fn(&str) -> f32) -> 
         .join("\n")
 }
 
-/// After a paste, keep pasted text inside the frame: re-break rows the new
-/// font/size made wider than `max_w`, in `layer` or any text inside it.
+/// After a paste or a group font change, keep the text inside the frame:
+/// re-break rows the new font/size made wider than `max_w`, in `layer` or any
+/// text inside it. A block is centred on its y, so each added row lifts it by
+/// half a line: the bottom row stays put and the text grows upward (as
+/// subtitles do) instead of into whatever sits below it.
 fn rewrap_text_recursive(layer: &mut Layer, max_w: f32) {
     match &mut layer.kind {
         LayerKind::Text { content, size, font, weight, italic, .. } => {
             let (size, weight, italic, font) = (*size, *weight, *italic, font.clone());
             let width = |s: &str| text::shape(s, size, &font, weight, italic).width;
+            let rows_before = content.split('\n').count();
             *content = rewrap_to_width(content, max_w, &width);
+            let added = content.split('\n').count().saturating_sub(rows_before);
+            if added > 0 {
+                let lift = added as f32 * text::shape("Ag", size, &font, weight, italic).line_height / 2.0;
+                let y = &mut layer.transform.y;
+                y.default -= lift;
+                y.keys.iter_mut().for_each(|k| k.value -= lift);
+            }
         }
         LayerKind::Group { children } => children.iter_mut().for_each(|c| rewrap_text_recursive(c, max_w)),
         _ => {}
@@ -7675,6 +7736,40 @@ mod text_look_tests {
         let m = |s: &str| s.chars().count() as f32 * 10.0;
         assert_eq!(rewrap_to_width("one two three four\nok", 105.0, &m), "one two\nthree four\nok");
         assert_eq!(rewrap_to_width("fits  here", 105.0, &m), "fits  here"); // double space kept
+    }
+
+    #[test]
+    fn rewrapping_grows_the_text_upward_so_its_bottom_row_stays_put() {
+        let long = "a fairly long subtitle line that will certainly need wrapping now";
+        let mut l = text(1, long, 59.0, 540.0, 1690.0, 0, 1000);
+        rewrap_text_recursive(&mut l, 0.9 * 1080.0);
+        let LayerKind::Text { content, size, font, .. } = &l.kind else { panic!() };
+        let added = content.lines().count() - 1;
+        assert!(added >= 1, "expected the line to wrap: {content:?}");
+        let lh = text::shape("Ag", *size, font, 400, false).line_height;
+        let expected = 1690.0 - added as f32 * lh / 2.0;
+        assert!((l.transform.y.default - expected).abs() < 0.01, "y {} vs {}", l.transform.y.default, expected);
+    }
+
+    #[test]
+    fn a_font_set_on_a_group_reaches_every_text_layer_inside_it() {
+        let mut patch = text(11, "", 1.0, 0.0, 0.0, 0, 1000);
+        patch.kind = LayerKind::ColorPatch { color: Rgba { r: 1, g: 2, b: 3, a: 255 }, blend: crate::model::BlendMode::Normal, width: 10.0, height: 10.0 };
+        let inner = Layer { id: 12, kind: LayerKind::Group { children: vec![text(13, "c", 10.0, 0.0, 0.0, 0, 1000)] }, ..patch.clone() };
+        let mut group = Layer { id: 14, kind: LayerKind::Group { children: vec![text(10, "b", 10.0, 0.0, 0.0, 0, 1000), patch, inner] }, ..text(0, "", 1.0, 0.0, 0.0, 0, 1000) };
+        let n = set_font_recursive(&mut group, &|f, w, it| {
+            *f = Font("Sahel".into());
+            *w = 700;
+            *it = true;
+        });
+        assert_eq!(n, 2);
+        let LayerKind::Group { children } = &group.kind else { panic!() };
+        let LayerKind::Text { font, weight, italic, .. } = &children[0].kind else { panic!() };
+        assert_eq!((font.0.as_str(), *weight, *italic), ("Sahel", 700, true));
+        let LayerKind::Group { children: inner } = &children[2].kind else { panic!() };
+        let LayerKind::Text { font, .. } = &inner[0].kind else { panic!() };
+        assert_eq!(font.0, "Sahel");
+        assert!(matches!(children[1].kind, LayerKind::ColorPatch { .. }));
     }
 
     #[test]

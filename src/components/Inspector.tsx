@@ -762,6 +762,98 @@ function TextLayerStylesSection({
   );
 }
 
+/** Font family + Style (weight/italic) dropdowns. `layerId` may be a text
+ *  layer or a group — for a group the backend applies it to every text layer
+ *  inside (e.g. all the subtitles at once). */
+function FontPicker({
+  layerId,
+  font,
+  weight,
+  italic,
+  fonts,
+  onRefreshFonts,
+  onFont,
+  onFontStyle,
+}: {
+  layerId: number;
+  font: Font;
+  weight: number;
+  italic: boolean;
+  fonts: string[];
+  onRefreshFonts: () => void;
+  onFont: (layerId: number, font: Font) => void;
+  onFontStyle: (layerId: number, weight: number, italic: boolean) => void;
+}) {
+  // The faces (styles) the current family actually offers — Regular, Bold,
+  // Medium, Thin, Bold Italic… — for the Style dropdown. Refetched per font.
+  const [faces, setFaces] = useState<FontFace[]>([]);
+  useEffect(() => {
+    let alive = true;
+    fontStyles(font).then((f) => alive && setFaces(f));
+    return () => {
+      alive = false;
+    };
+  }, [font]);
+  // The dropdown's current value; if the stored weight/italic isn't among the
+  // faces (e.g. a family that lost a face), show it as an extra option.
+  const styleKey = `${weight}:${italic}`;
+  const faceList: FontFace[] = faces.some((f) => `${f.weight}:${f.italic}` === styleKey)
+    ? faces
+    : [...faces, { name: `${weight}${italic ? " Italic" : ""}`, weight, italic }];
+  return (
+    <>
+      <label className="insp-field">
+        Font
+        <div className="font-row">
+          <select
+            value={font}
+            onMouseDown={onRefreshFonts}
+            onChange={(e) => onFont(layerId, e.target.value as Font)}
+          >
+            {(fonts.includes(font) ? fonts : [font, ...fonts]).map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </select>
+          <button className="insp-btn" title="Re-scan installed fonts" onClick={onRefreshFonts}>
+            ↻
+          </button>
+        </div>
+      </label>
+
+      <label className="insp-field">
+        Style
+        <select
+          value={styleKey}
+          onChange={(e) => {
+            const [w, it] = e.target.value.split(":");
+            onFontStyle(layerId, Number(w), it === "true");
+          }}
+        >
+          {faceList.map((f) => (
+            <option key={`${f.weight}:${f.italic}`} value={`${f.weight}:${f.italic}`}>
+              {f.name}
+            </option>
+          ))}
+        </select>
+      </label>
+    </>
+  );
+}
+
+/** The first text layer inside a group (depth-first), or null. */
+function firstTextIn(layers: Layer[]): Layer | null {
+  for (const l of layers) {
+    if (l.kind.kind === "text") return l;
+    if (l.kind.kind === "group") {
+      const t = firstTextIn(l.kind.children);
+      if (t) return t;
+    }
+  }
+  return null;
+}
+
 function TextInspector({
   layerId,
   timeMs,
@@ -854,22 +946,6 @@ function TextInspector({
     setSize(size0);
   }, [layerId, content0, size0]);
 
-  // The faces (styles) the current family actually offers — Regular, Bold,
-  // Medium, Thin, Bold Italic… — for the Style dropdown. Refetched per font.
-  const [faces, setFaces] = useState<FontFace[]>([]);
-  useEffect(() => {
-    let alive = true;
-    fontStyles(font).then((f) => alive && setFaces(f));
-    return () => {
-      alive = false;
-    };
-  }, [font]);
-  // The dropdown's current value; if the stored weight/italic isn't among the
-  // faces (e.g. a family that lost a face), show it as an extra option.
-  const styleKey = `${weight}:${italic}`;
-  const faceList: FontFace[] = faces.some((f) => `${f.weight}:${f.italic}` === styleKey)
-    ? faces
-    : [...faces, { name: `${weight}${italic ? " Italic" : ""}`, weight, italic }];
 
   // Grow the text box to fit its content so long text isn't hidden behind a
   // 2-row scroll — height tracks the wrapped line count (min 2 rows, max ~12).
@@ -969,42 +1045,16 @@ function TextInspector({
         </div>
       </label>
 
-      <label className="insp-field">
-        Font
-        <div className="font-row">
-          <select
-            value={font}
-            onMouseDown={onRefreshFonts}
-            onChange={(e) => onFont(layerId, e.target.value as Font)}
-          >
-            {(fonts.includes(font) ? fonts : [font, ...fonts]).map((f) => (
-              <option key={f} value={f}>
-                {f}
-              </option>
-            ))}
-          </select>
-          <button className="insp-btn" title="Re-scan installed fonts" onClick={onRefreshFonts}>
-            ↻
-          </button>
-        </div>
-      </label>
-
-      <label className="insp-field">
-        Style
-        <select
-          value={styleKey}
-          onChange={(e) => {
-            const [w, it] = e.target.value.split(":");
-            onFontStyle(layerId, Number(w), it === "true");
-          }}
-        >
-          {faceList.map((f) => (
-            <option key={`${f.weight}:${f.italic}`} value={`${f.weight}:${f.italic}`}>
-              {f.name}
-            </option>
-          ))}
-        </select>
-      </label>
+      <FontPicker
+        layerId={layerId}
+        font={font}
+        weight={weight}
+        italic={italic}
+        fonts={fonts}
+        onRefreshFonts={onRefreshFonts}
+        onFont={onFont}
+        onFontStyle={onFontStyle}
+      />
 
       {effSlider("Size (height)", size, 8, 400, 1, (v) => {
         setSize(v);
@@ -3365,6 +3415,27 @@ export default function Inspector({
           onSetCrop={onSetImageCrop}
         />
       )}
+      {layer && layer.kind.kind === "group" && (() => {
+        // One font control for every text layer in the group — e.g. restyle all
+        // the subtitles at once. Shows the first text layer's current font.
+        const t = firstTextIn(layer.kind.children);
+        if (!t || t.kind.kind !== "text") return null;
+        return (
+          <>
+            <p className="insp-hint">Font for every text layer in this group:</p>
+            <FontPicker
+              layerId={layer.id}
+              font={t.kind.font}
+              weight={t.kind.weight}
+              italic={t.kind.italic}
+              fonts={fonts}
+              onRefreshFonts={onRefreshFonts}
+              onFont={onFont}
+              onFontStyle={onFontStyle}
+            />
+          </>
+        );
+      })()}
       {layer && layer.kind.kind === "text" && (
         <TextInspector
           layerId={layer.id}
