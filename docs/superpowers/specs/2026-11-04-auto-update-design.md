@@ -12,8 +12,8 @@ Already decided:
 
 - The app checks on launch and from **Help → Check for updates…**. If a newer build exists it asks first.
   If the user says yes, it saves the user's work, downloads, installs silently and restarts.
-- `npm run deploy -- -Publish` builds and publishes. It needs a `GITHUB_TOKEN` env var with write access to
-  HSI-Lighting/release.
+- `npm run deploy -- -Publish` builds and publishes, using the github.com login git already has on the PC
+  (or `GITHUB_TOKEN` if set). That account needs write access to HSI-Lighting/release.
 - Release names follow the other HSI apps: tag `simple-effects-v0.1.<build>`, asset
   `simple-effects_0.1.<build>_windows.exe`. `0.1` is `major.minor` from `package.json`, and `<build>` is the
   `build.json` number that deploy.ps1 already increments.
@@ -50,7 +50,8 @@ another app.
 
 `npm run deploy` behaves as it does today. With `-Publish`:
 
-1. **Before building**, the script stops if `GITHUB_TOKEN` is missing, so a build isn't wasted.
+1. **Before building**, the script gets a GitHub login: `GITHUB_TOKEN` if set, else git's stored github.com
+   login (`git credential fill`, no prompts). It stops if there is none, so a build isn't wasted.
 2. Build and install locally as today.
 3. Compute the installer's size and SHA-256 (`Get-FileHash`).
 4. Create release `simple-effects-v0.1.<build>` (`make_latest: false`, body = build date and commit). Upload
@@ -61,8 +62,8 @@ The installer goes up before the manifest, so the app never sees a manifest that
 All calls use `Invoke-RestMethod` against the GitHub REST API (the `gh` CLI isn't installed here). If any
 call fails, the script stops and prints GitHub's message.
 
-The token should be a fine-grained personal access token limited to HSI-Lighting/release with
-**Contents: read and write**. It is read from the environment and never written to a file.
+The login is only used in the API calls' Authorization header. It is never printed or written to a
+file.
 
 If publishing fails after the build, running deploy again makes the next build number. That costs one
 skipped number and nothing else.

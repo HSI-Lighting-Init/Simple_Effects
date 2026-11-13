@@ -4,8 +4,8 @@
 # Usage:  npm run deploy      (or)   powershell -ExecutionPolicy Bypass -File deploy.ps1
 #         npm run deploy -- -Publish   also publishes the build to HSI-Lighting/release,
 #         where every installed copy picks it up (Help > Check for updates, or on launch).
-#         Needs $env:GITHUB_TOKEN: a fine-grained token for HSI-Lighting/release with
-#         Contents: read and write.
+#         Uses the HSI-Lighting github.com login git already has saved on this PC,
+#         or $env:GITHUB_TOKEN if set.
 #
 # Steps: close the running app -> `npm run tauri build` -> run the NSIS
 # installer with /S (silent) -> refresh the shareable installer on the Desktop
@@ -15,9 +15,25 @@ param([switch]$Publish)
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
-# Fail before spending a build number, not after the build.
-if ($Publish -and -not $env:GITHUB_TOKEN) {
-  throw "-Publish needs `$env:GITHUB_TOKEN (a token with Contents read/write on HSI-Lighting/release)"
+# Fail before spending a build number, not after the build. The token never
+# leaves this process: it only goes into the API calls' Authorization header.
+if ($Publish) {
+  $token = $env:GITHUB_TOKEN
+  if (-not $token) {
+    # No prompts: Credential Manager gives up quietly and the next helper (wincred) answers.
+    # The request (no secret in it) goes in via a file: PowerShell can prefix piped text
+    # with a BOM, which makes git reject it ("missing protocol field").
+    # The HSI-Lighting account owns the release repo (this PC also has personal logins).
+    $env:GCM_INTERACTIVE = "never"; $env:GIT_TERMINAL_PROMPT = "0"
+    $req = Join-Path $env:TEMP "simple-effects-cred-request.txt"
+    [IO.File]::WriteAllText($req, "protocol=https`nhost=github.com`nusername=HSI-Lighting`n`n")
+    $cred = cmd /c "git credential fill < `"$req`" 2>nul"
+    Remove-Item $req
+    $token = ($cred | Where-Object { $_ -like "password=*" } | Select-Object -First 1) -replace '^password=', ''
+  }
+  if (-not $token) {
+    throw "-Publish needs a GitHub login: push once with git (it saves one), or set `$env:GITHUB_TOKEN"
+  }
 }
 
 # --- Build number: bump it and stamp it into the app, so every update we ship is
@@ -67,7 +83,7 @@ Copy-Item $setup.FullName $desktopStamped -Force
 if ($Publish) {
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
   $api = "https://api.github.com/repos/HSI-Lighting/release"
-  $gh = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json"; "X-GitHub-Api-Version" = "2022-11-28" }
+  $gh = @{ Authorization = "Bearer $token"; Accept = "application/vnd.github+json"; "X-GitHub-Api-Version" = "2022-11-28" }
   $relVer = ((($ver -split '\.')[0..1]) -join '.') + ".$buildNum"
   $tag = "simple-effects-v$relVer"
   $assetName = "simple-effects_${relVer}_windows.exe"
