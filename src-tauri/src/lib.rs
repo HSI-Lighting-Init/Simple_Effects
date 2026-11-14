@@ -5532,10 +5532,31 @@ fn find_ffmpeg() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Report the located ffmpeg path (or `None`) so the UI can offer MP4 export.
+/// The located ffmpeg and which of the encoders export can use it has.
+#[derive(serde::Serialize)]
+struct FfmpegInfo {
+    path: String,
+    encoders: Vec<String>,
+}
+
+/// Report the located ffmpeg (or `None`) so the export dialog can offer the
+/// formats it can encode.
 #[tauri::command]
-fn ffmpeg_status() -> Option<String> {
-    find_ffmpeg().map(|p| p.to_string_lossy().into_owned())
+fn ffmpeg_status() -> Option<FfmpegInfo> {
+    let p = find_ffmpeg()?;
+    let out = quiet_command(&p).args(["-hide_banner", "-encoders"]).output().ok();
+    let encoders = out.map(|o| parse_encoders(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
+    Some(FfmpegInfo { path: p.to_string_lossy().into_owned(), encoders })
+}
+
+/// The export encoders listed in `ffmpeg -encoders` output (name = 2nd column).
+fn parse_encoders(s: &str) -> Vec<String> {
+    const USED: [&str; 7] = ["libx264", "libx265", "libsvtav1", "libvpx-vp9", "h264_nvenc", "hevc_nvenc", "av1_nvenc"];
+    s.lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .filter(|n| USED.contains(n))
+        .map(String::from)
+        .collect()
 }
 
 /// Install ffmpeg via winget (blocking — may take a while). Returns once it's
@@ -5681,18 +5702,182 @@ fn audio_filter_complex_at(audio: &[AudioTrack], duration_ms: u32, first_input: 
     Some(fc)
 }
 
-/// Target video bitrate (bits/s) for a 1..5 compression level (1 = near-original
-/// / largest, 5 = highest compression / smallest). Mirrors the frontend's
-/// `bitrateForLevel` so the dialog's size estimate matches the encoder.
-fn bitrate_for_level(level: u8) -> u32 {
-    let mbps = match level {
-        1 => 24,
-        2 => 14,
-        3 => 8,
-        4 => 5,
-        _ => 3,
+/// What the Export dialog chose. Every field defaults (MP4 · H.264 · quality
+/// level 2 · Balanced · 192 kbps · subtitles burned in), so `{}` is the default
+/// export and callers that only set a few fields keep working.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExportSettings {
+    /// "mp4" | "mkv" | "webm".
+    pub container: String,
+    /// "h264" | "h265" | "av1" | "vp9".
+    pub codec: String,
+    /// "quality": constant quality (CRF, NVENC CQ), size varies with content.
+    /// "bitrate": hit `bitrate` (2-pass ABR in software, CBR on the GPU).
+    pub rate_mode: String,
+    /// 1 (near original) ..= 5 (smallest). Quality mode.
+    pub level: u8,
+    /// Target bits/s. Bitrate mode.
+    pub bitrate: u32,
+    /// "faster" | "balanced" | "smaller": the encoder preset.
+    pub encoder_speed: String,
+    /// 10-bit output for H.265 / AV1 (HandBrake's default; less banding).
+    pub ten_bit: bool,
+    pub audio_kbps: u32,
+    /// Fast render mode: try the GPU (NVENC) encoder first.
+    pub fast: bool,
+    /// "burn" (only in the pixels) | "track" (only a soft track) | "both".
+    pub subtitle_mode: String,
+    /// Also write `<output>.srt` next to the video.
+    pub subtitle_sidecar: bool,
+    /// The comp's subtitle cues in export time (0 = the first exported frame).
+    pub subtitle_cues: Vec<subtitles::Cue>,
+    /// The frontend's GPU encoder already wrote the final stream (Fast constant
+    /// quality: H.264 at the level's QP), so keep it instead of re-encoding.
+    pub upload_final: bool,
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self {
+            container: "mp4".into(),
+            codec: "h264".into(),
+            rate_mode: "quality".into(),
+            level: 2,
+            bitrate: 14_000_000,
+            encoder_speed: "balanced".into(),
+            ten_bit: true,
+            audio_kbps: 192,
+            fast: false,
+            subtitle_mode: "burn".into(),
+            subtitle_sidecar: false,
+            subtitle_cues: vec![],
+            upload_final: false,
+        }
+    }
+}
+
+/// Codecs each container can carry (the dialog offers the same pairs).
+fn codec_fits(container: &str, codec: &str) -> bool {
+    matches!((container, codec), ("mp4" | "mkv", "h264" | "h265" | "av1") | ("webm", "vp9" | "av1"))
+}
+
+/// ffmpeg's encoder for `codec`: NVENC when `gpu`, else software. `None`: no
+/// GPU encoder for it (VP9).
+fn encoder_name(codec: &str, gpu: bool) -> Option<&'static str> {
+    Some(match (codec, gpu) {
+        ("h265", false) => "libx265",
+        ("av1", false) => "libsvtav1",
+        ("vp9", false) => "libvpx-vp9",
+        (_, false) => "libx264",
+        ("h265", true) => "hevc_nvenc",
+        ("av1", true) => "av1_nvenc",
+        ("vp9", true) => return None,
+        (_, true) => "h264_nvenc",
+    })
+}
+
+/// CRF (software) or CQ (NVENC) for a 1..=5 quality level. x264 follows
+/// HandBrake's RF scale (16 near original … 18 HQ … 26); the others were matched
+/// to x264's VMAF per level on SE-test-assets synthetic-1 (2026-11-13), so a
+/// level looks about the same whichever codec is chosen. Mirrors the dialog's
+/// `qualityRf` (software column).
+fn quality_value(codec: &str, gpu: bool, level: u8) -> u8 {
+    let t: [u8; 5] = match (codec, gpu) {
+        ("h265", false) => [20, 22, 25, 28, 31],
+        ("av1", false) => [25, 30, 35, 40, 45],
+        ("vp9", _) => [24, 28, 32, 38, 44],
+        (_, false) => [16, 18, 20, 23, 26],
+        ("h265", true) => [27, 29, 31, 35, 40],
+        ("av1", true) => [34, 37, 40, 45, 50],
+        (_, true) => [25, 27, 29, 33, 37],
     };
-    mbps * 1_000_000
+    t[(level.clamp(1, 5) - 1) as usize]
+}
+
+/// The video-encoder arguments of one ffmpeg run. `pass` is 0 for a single
+/// pass, or 1 / 2 for the passes of a software 2-pass ABR (bitrate mode), whose
+/// stats go to `passlog`.
+fn video_encode_args(s: &ExportSettings, gpu: bool, pass: u8, passlog: &str) -> Vec<String> {
+    let enc = encoder_name(&s.codec, gpu).unwrap_or("libx264");
+    let mut a: Vec<String> = vec!["-c:v".into(), enc.into()];
+    let mut push = |xs: &[&str]| a.extend(xs.iter().map(|x| x.to_string()));
+    let sp = match s.encoder_speed.as_str() {
+        "faster" => 0,
+        "smaller" => 2,
+        _ => 1,
+    };
+    match enc {
+        "libx264" | "libx265" => push(&["-preset", ["veryfast", "medium", "slow"][sp]]),
+        "libsvtav1" => push(&["-preset", ["8", "6", "4"][sp]]),
+        "libvpx-vp9" => push(&["-deadline", "good", "-cpu-used", ["5", "3", "1"][sp], "-row-mt", "1"]),
+        _ => push(&["-preset", ["p4", "p5", "p7"][sp]]),
+    }
+    let target = s.bitrate.max(100_000).to_string();
+    if s.rate_mode == "bitrate" {
+        if gpu {
+            // NVENC has no 2-pass across runs; CBR keeps the size on target.
+            push(&["-rc", "cbr", "-b:v", &target, "-maxrate", &target, "-bufsize", &target]);
+        } else {
+            push(&["-b:v", &target]);
+            if pass > 0 {
+                push(&["-pass", &pass.to_string(), "-passlogfile", passlog]);
+            }
+        }
+    } else {
+        let q = quality_value(&s.codec, gpu, s.level).to_string();
+        if gpu {
+            push(&["-rc", "vbr", "-cq", &q, "-b:v", "0"]);
+        } else if enc == "libvpx-vp9" {
+            push(&["-crf", &q, "-b:v", "0"]); // libvpx: `-b:v 0` = pure constant quality
+        } else {
+            push(&["-crf", &q]);
+        }
+    }
+    let ten = s.ten_bit && matches!(s.codec.as_str(), "h265" | "av1");
+    push(&["-pix_fmt", if !ten { "yuv420p" } else if gpu { "p010le" } else { "yuv420p10le" }]);
+    if enc == "libx265" {
+        push(&["-x265-params", "log-level=error"]);
+    }
+    if s.codec == "h265" && s.container == "mp4" {
+        push(&["-tag:v", "hvc1"]); // Apple players only open HEVC MP4s tagged hvc1
+    }
+    a
+}
+
+/// Can the uploaded intermediate (`upload_codec`: the frontend's "h264" MP4 or
+/// "vp9" WebM) be kept as the output's video stream? In bitrate mode the
+/// frontend encoded it at the target already; with `upload_final` at the
+/// level's QP. Without ffmpeg there's no choice: a WebM/VP9 export saves the
+/// upload as-is (as before). Mirrored by the frontend's `exportPlan`.
+fn can_copy(s: &ExportSettings, upload_codec: &str, have_ffmpeg: bool) -> bool {
+    s.codec == upload_codec && (s.rate_mode == "bitrate" || s.upload_final || !have_ffmpeg)
+}
+
+/// Is the export just a file copy of the upload? Only when it's kept as the
+/// video stream (`can_copy`), is already in the requested container, and there's
+/// nothing to mux (`muxing`: audio or a subtitle track). An MP4 still goes
+/// through ffmpeg when it can: mp4-muxer writes the index at the end and only
+/// ffmpeg's `+faststart` moves it to the front (web playback starts before the
+/// whole file has downloaded). Without ffmpeg there's no choice: the upload is
+/// valid as it is, and a WebM drops its audio/track (as before).
+fn saves_upload_as_is(s: &ExportSettings, upload_codec: &str, have_ffmpeg: bool, muxing: bool) -> bool {
+    let native = matches!((upload_codec, s.container.as_str()), ("h264", "mp4") | ("vp9", "webm"));
+    can_copy(s, upload_codec, have_ffmpeg)
+        && native
+        && if have_ffmpeg { upload_codec == "vp9" && !muxing } else { !muxing || upload_codec == "vp9" }
+}
+
+/// Audio encoder args for `container`. libopus refuses more than 256 kb/s on a
+/// mono mix, after the whole render, so Opus is capped there.
+fn audio_codec_args(container: &str, kbps: u32) -> [String; 4] {
+    let (codec, max) = if container == "webm" { ("libopus", 256) } else { ("aac", 512) };
+    ["-c:a".into(), codec.into(), "-b:a".into(), format!("{}k", kbps.clamp(64, max))]
+}
+
+/// File-name prefix of this process's 2-pass stats files in %TEMP%.
+fn passlog_prefix() -> String {
+    format!("simple_effects_pass_{}", std::process::id())
 }
 
 /// Where the frontend streams the encoded WebM before `export_video` muxes it.
@@ -5735,36 +5920,28 @@ fn export_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String> {
     write_chunk_at(&export_upload_path(), offset, header("x-reset") == Some("1"), bytes)
 }
 
-/// Save the exported video from the WebM uploaded via `export_upload_chunk`
-/// (`webm_len` bytes — checked, so a short or empty upload fails loudly here
-/// instead of as a confusing ffmpeg error). The uploaded WebM is video-only.
-/// `format` "webm" writes it as-is when there's no audio, else remuxes with an
-/// Opus track; "mp4" transcodes to H.264 (+ AAC audio). `rate_mode` picks the
-/// H.264 rate control (always constrained ABR so size is predictable): "bitrate"
-/// targets `bitrate` bits/s; "quality" targets the 1..5 `level`'s preset bitrate.
-/// Either way output size ≈ target × duration, matching the dialog's estimate.
-/// `audio` are the comp's audio clips to mix in; muxing needs ffmpeg.
+/// Save the exported video from the intermediate uploaded via
+/// `export_upload_chunk` (`webm_len` bytes — checked, so a short or empty upload
+/// fails loudly here instead of as a confusing ffmpeg error). `upload_codec` is
+/// what the frontend encoded: "h264" (an MP4) or "vp9" (a WebM), video-only.
+/// `settings` is the dialog's choice: the upload is kept as the video stream
+/// when it already is what was asked for (`can_copy`), else ffmpeg encodes it
+/// (constant quality, or 2-pass to a bitrate — see `video_encode_args`).
+/// `audio` are the comp's audio clips to mix in. Returns the file's size.
 /// `async` so the (minutes-long, for heavy renders) ffmpeg run happens off the
 /// main thread — a plain sync command blocks the whole window while it runs.
 #[tauri::command(async)]
 fn export_video(
     webm_len: u64,
     path: String,
-    format: String,
-    rate_mode: String,
-    level: u8,
-    bitrate: u32,
+    settings: ExportSettings,
     audio: Vec<AudioTrack>,
     duration_ms: u32,
-    fast: Option<bool>,
-    direct_mp4: Option<bool>,
-) -> Result<(), String> {
+    upload_codec: String,
+) -> Result<u64, String> {
     begin_export();
     let tmp = export_upload_path();
-    let result = export_video_from(
-        &tmp, webm_len, &path, &format, &rate_mode, level, bitrate, &audio, duration_ms,
-        fast.unwrap_or(false), direct_mp4.unwrap_or(false),
-    );
+    let result = export_video_from(&tmp, webm_len, &path, &settings, &audio, duration_ms, &upload_codec);
     let _ = std::fs::remove_file(&tmp); // success or not, never leave GBs in %TEMP%
     result
 }
@@ -5773,138 +5950,129 @@ fn export_video_from(
     tmp: &std::path::Path,
     webm_len: u64,
     path: &str,
-    format: &str,
-    rate_mode: &str,
-    level: u8,
-    bitrate: u32,
+    s: &ExportSettings,
     audio: &[AudioTrack],
     duration_ms: u32,
-    fast: bool,
-    direct_mp4: bool,
-) -> Result<(), String> {
+    upload_codec: &str,
+) -> Result<u64, String> {
     let got = std::fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
     if webm_len == 0 || got != webm_len {
         return Err(format!("the rendered video didn't reach the exporter intact (expected {webm_len} bytes, got {got})"));
     }
+    if !codec_fits(&s.container, &s.codec) {
+        return Err(format!("{} files can't hold {} video", s.container.to_uppercase(), s.codec.to_uppercase()));
+    }
+    let size = || std::fs::metadata(path).map(|m| m.len()).map_err(|e| format!("read {path}: {e}"));
+
+    let has_cues = !s.subtitle_cues.is_empty();
+    if s.subtitle_sidecar && has_cues {
+        let srt = std::path::Path::new(path).with_extension("srt");
+        std::fs::write(&srt, subtitles::write_srt(&s.subtitle_cues)).map_err(|e| format!("write {}: {e}", srt.display()))?;
+    }
+    let track = s.subtitle_mode != "burn" && has_cues;
 
     let ffmpeg = find_ffmpeg();
     let filter = audio_filter_complex(audio, duration_ms);
-    let has_audio = filter.is_some() && ffmpeg.is_some();
-
-    // Fast path: WebM with no audio to mux → keep the recorded file as-is.
-    if format == "webm" && !has_audio {
-        if filter.is_some() && ffmpeg.is_none() {
-            // There WAS audio but we can't mux it — save video-only rather than fail.
-            eprintln!("export: ffmpeg not found; saving WebM without its audio track");
+    let copy = can_copy(s, upload_codec, ffmpeg.is_some());
+    let muxing = filter.is_some() || track;
+    if saves_upload_as_is(s, upload_codec, ffmpeg.is_some(), muxing) {
+        if muxing {
+            // No ffmpeg — old WebM behaviour: save video-only rather than fail.
+            eprintln!("export: ffmpeg not found; saving WebM without its audio / subtitle track");
         }
-        return std::fs::copy(tmp, path).map(|_| ()).map_err(|e| format!("write {path}: {e}"));
+        std::fs::copy(tmp, path).map_err(|e| format!("write {path}: {e}"))?;
+        return size();
     }
+    let ffmpeg = ffmpeg.ok_or(format!(
+        "{} export needs ffmpeg, which isn't installed. Install it from the export dialog.",
+        s.container.to_uppercase()
+    ))?;
 
-    // Direct MP4: the frontend already encoded H.264 (GPU, WebCodecs) into an MP4,
-    // so nothing is re-encoded. ffmpeg only mixes in the audio and moves the index
-    // to the front (+faststart) — seconds, not minutes. Without audio and without
-    // ffmpeg the file is valid as it is.
-    if direct_mp4 && format == "mp4" {
-        let Some(ffmpeg) = ffmpeg else {
+    let subs_path = std::env::temp_dir().join(format!("simple_effects_subs_{}.srt", std::process::id()));
+    if track {
+        std::fs::write(&subs_path, subtitles::write_srt(&s.subtitle_cues)).map_err(|e| format!("write subtitles: {e}"))?;
+    }
+    let audio_args = audio_codec_args(&s.container, s.audio_kbps);
+    // One ffmpeg run with the given video args. Inputs: 0 = video, 1..=N the
+    // audio clips, then the subtitle SRT.
+    let build = |video_args: &[String]| {
+        let mut cmd = quiet_command(&ffmpeg);
+        cmd.args(["-y", "-i"]).arg(tmp); // named .webm either way; ffmpeg sniffs the container
+        for a in audio {
+            cmd.args(["-i"]).arg(&a.path);
+        }
+        if track {
+            cmd.args(["-i"]).arg(&subs_path);
+        }
+        cmd.args(["-map", "0:v:0"]);
+        if let Some(fc) = &filter {
+            cmd.args(["-filter_complex", fc, "-map", "[aout]"]).args(&audio_args);
+        }
+        if track {
+            let sub_codec = match s.container.as_str() {
+                "mp4" => "mov_text",
+                "webm" => "webvtt",
+                _ => "srt",
+            };
+            // Shown by default only when it's the sole copy of the subtitles —
+            // "both" also burns them in, and two copies on screen would overlap.
+            let shown = if s.subtitle_mode == "track" { "default" } else { "0" };
+            cmd.args(["-map", &format!("{}:s", audio.len() + 1), "-c:s", sub_codec, "-disposition:s:0", shown]);
+            // A hand-set disposition turns off ffmpeg's automatic ones: keep the
+            // picture and sound the tracks players pick by default.
+            cmd.args(["-disposition:v:0", "default"]);
             if filter.is_some() {
-                return Err("Audio needs ffmpeg, which isn't installed.".into());
+                cmd.args(["-disposition:a:0", "default"]);
             }
-            return std::fs::copy(tmp, path).map(|_| ()).map_err(|e| format!("write {path}: {e}"));
-        };
-        let mut cmd = quiet_command(&ffmpeg);
-        // (the temp file is named .webm; ffmpeg sniffs the real container)
-        cmd.args(["-y", "-i"]).arg(tmp);
-        for a in audio {
-            cmd.args(["-i"]).arg(&a.path);
-        }
-        if let Some(fc) = &filter {
-            cmd.args(["-filter_complex", fc, "-map", "0:v:0", "-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]);
-        } else {
-            cmd.args(["-map", "0:v:0"]);
-        }
-        cmd.args(["-c:v", "copy", "-movflags", "+faststart"]);
-        return run_ffmpeg(cmd, path);
-    }
-
-    let ffmpeg = ffmpeg.ok_or(
-        "MP4 (and audio) need ffmpeg, which isn't installed. Install it from the export \
-         dialog, or choose WebM.",
-    )?;
-
-    // Both export modes target a bitrate so the output size is predictable and
-    // matches the dialog's estimate (size ≈ bitrate × duration):
-    //  • "bitrate" — the user's exact bitrate.
-    //  • "quality" — the compression level's preset bitrate (1 = near-original …
-    //    5 = smallest).
-    // We drive x264 in CONSTANT bitrate (CBR), not capped ABR. Plain `-b:v`/
-    // `-maxrate` only cap the peak; on compressible content (flat colours, slow
-    // motion) x264 undershoots the average badly, so a 600 MB estimate came out
-    // ~57 MB and raising the bitrate barely changed the file. Pinning
-    // minrate = maxrate = b:v with `nal-hrd=cbr` forces x264 to actually spend the
-    // bits, so the output tracks the target and the estimate holds.
-    let target = if rate_mode == "bitrate" { bitrate } else { bitrate_for_level(level) }.max(100_000);
-    let bv = target.to_string();
-    // 1-second VBV buffer → tight CBR that lands on the predicted size.
-    let bufsize = target.to_string();
-
-    // One ffmpeg invocation with the given video-codec args (audio inputs, the
-    // filter graph and the audio codec are the same for every attempt).
-    let build = |video_args: &[&str]| {
-        let mut cmd = quiet_command(&ffmpeg);
-        cmd.args(["-y", "-i"]).arg(tmp);
-        // Audio inputs (1..=N).
-        for a in audio {
-            cmd.args(["-i"]).arg(&a.path);
-        }
-        if let Some(fc) = &filter {
-            cmd.args(["-filter_complex", fc, "-map", "0:v:0", "-map", "[aout]"]);
-        } else {
-            cmd.args(["-map", "0:v:0"]);
         }
         cmd.args(video_args);
-        if filter.is_some() {
-            if format == "webm" {
-                cmd.args(["-c:a", "libopus", "-b:a", "192k"]);
-            } else {
-                cmd.args(["-c:a", "aac", "-b:a", "192k"]);
-            }
+        if s.container == "mp4" {
+            cmd.args(["-movflags", "+faststart"]);
         }
         cmd
     };
-
-    // Video codec: keep VP9 for WebM (fast copy), transcode to H.264 for MP4.
-    if format == "webm" {
-        return run_ffmpeg(build(&["-c:v", "copy"]), path);
-    }
-    // Fast: the GPU encoder (NVENC) when this ffmpeg/PC has one, else x264
-    // `veryfast`. Same CBR targeting, so the file size still matches the estimate;
-    // only the compression efficiency is a little lower than `medium`.
-    if fast {
-        let nvenc = run_ffmpeg(
-            build(&[
-                "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "cbr",
-                "-b:v", bv.as_str(), "-maxrate", bv.as_str(), "-bufsize", bufsize.as_str(),
-                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-            ]),
-            path,
-        );
-        if nvenc.is_ok() {
-            return nvenc;
+    let result = (|| {
+        if copy {
+            return run_ffmpeg(build(&["-c:v".into(), "copy".into()]), path);
         }
-        eprintln!("export: NVENC unavailable ({}), using x264 veryfast", nvenc.unwrap_err());
+        // Fast: the GPU encoder (NVENC) when this PC has one, else software.
+        if s.fast && encoder_name(&s.codec, true).is_some() {
+            match run_ffmpeg(build(&video_encode_args(s, true, 0, "")), path) {
+                Err(e) if e != EXPORT_CANCELLED => eprintln!("export: NVENC unavailable ({e}), using the software encoder"),
+                done => return done,
+            }
+        }
+        if s.rate_mode != "bitrate" {
+            return run_ffmpeg(build(&video_encode_args(s, false, 0, "")), path);
+        }
+        // 2-pass ABR (HandBrake's size-targeted presets): pass 1 only analyses
+        // the video, pass 2 spends the bits where they're needed — the size lands
+        // on target without CBR's waste on easy frames.
+        let log = std::env::temp_dir().join(passlog_prefix()).to_string_lossy().into_owned();
+        let mut pass1 = quiet_command(&ffmpeg);
+        pass1.args(["-y", "-i"]).arg(tmp).args(["-map", "0:v:0", "-an"]);
+        pass1.args(video_encode_args(s, false, 1, &log));
+        pass1.args(["-f", "null", if cfg!(windows) { "NUL" } else { "/dev/null" }]);
+        // A cancel deletes the run's "partial output": point that at the stats
+        // file (cleaned up below anyway), never at the null device.
+        let r = run_cancellable(pass1, std::path::Path::new(&log), "ffmpeg")
+            .and_then(|_| run_ffmpeg(build(&video_encode_args(s, false, 2, &log)), path));
+        remove_passlogs();
+        r
+    })();
+    let _ = std::fs::remove_file(&subs_path);
+    result?;
+    size()
+}
+
+/// Delete this process's 2-pass stats files (`<prefix>-0.log`, `.mbtree`, `.cutree`).
+fn remove_passlogs() {
+    let prefix = passlog_prefix();
+    for e in std::fs::read_dir(std::env::temp_dir()).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(e.path());
+        }
     }
-    run_ffmpeg(
-        build(&[
-            "-c:v", "libx264",
-            "-b:v", bv.as_str(), "-minrate", bv.as_str(), "-maxrate", bv.as_str(),
-            "-bufsize", bufsize.as_str(),
-            // Force strict CBR so the file actually reaches the target bitrate.
-            "-x264-params", "nal-hrd=cbr:force-cfr=1",
-            "-preset", if fast { "veryfast" } else { "medium" }, "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-        ]),
-        path,
-    )
 }
 
 /// Set by the Cancel button (`cancel_export`), cleared when an export or merge
@@ -7275,13 +7443,245 @@ mod export_upload_tests {
     fn empty_or_short_upload_fails_loudly_not_as_an_ffmpeg_error() {
         // The pre-fix failure: base64 came back "" for a big WebM → 0-byte file.
         let p = scratch("empty.webm");
+        let s = ExportSettings::default();
         std::fs::write(&p, b"").unwrap();
-        let e = export_video_from(&p, 0, "out.mp4", "mp4", "quality", 2, 0, &[], 1000, false, false).unwrap_err();
+        let e = export_video_from(&p, 0, "out.mp4", &s, &[], 1000, "vp9").unwrap_err();
         assert!(e.contains("intact"), "{e}");
         std::fs::write(&p, b"12345").unwrap();
-        let e = export_video_from(&p, 9, "out.mp4", "mp4", "quality", 2, 0, &[], 1000, true, true).unwrap_err();
+        let e = export_video_from(&p, 9, "out.mp4", &s, &[], 1000, "h264").unwrap_err();
         assert!(e.contains("expected 9 bytes, got 5"), "{e}");
         let _ = std::fs::remove_file(&p);
+    }
+}
+
+#[cfg(test)]
+mod export_settings_tests {
+    use super::*;
+
+    fn settings(json: &str) -> ExportSettings {
+        serde_json::from_str(json).unwrap()
+    }
+    /// `args` contains `flag` immediately followed by `value`.
+    fn has(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    #[test]
+    fn an_empty_settings_object_is_todays_default_export() {
+        let s = settings("{}");
+        assert_eq!((s.container.as_str(), s.codec.as_str(), s.rate_mode.as_str()), ("mp4", "h264", "quality"));
+        assert_eq!((s.level, s.audio_kbps, s.subtitle_mode.as_str()), (2, 192, "burn"));
+        assert!(s.ten_bit && !s.fast && !s.subtitle_sidecar && s.subtitle_cues.is_empty());
+    }
+
+    #[test]
+    fn settings_parse_from_the_dialogs_camel_case_json() {
+        let s = settings(
+            r#"{"container":"mkv","codec":"h265","rateMode":"bitrate","bitrate":5000000,"encoderSpeed":"smaller",
+                "tenBit":false,"audioKbps":320,"fast":true,"subtitleMode":"track","subtitleSidecar":true,
+                "subtitleCues":[{"startMs":0,"endMs":1500,"text":"Hi"}]}"#,
+        );
+        assert_eq!((s.container.as_str(), s.codec.as_str(), s.bitrate), ("mkv", "h265", 5_000_000));
+        assert_eq!((s.encoder_speed.as_str(), s.audio_kbps, s.subtitle_mode.as_str()), ("smaller", 320, "track"));
+        assert!(!s.ten_bit && s.fast && s.subtitle_sidecar);
+        assert_eq!(s.subtitle_cues, vec![subtitles::Cue { start_ms: 0, end_ms: 1500, text: "Hi".into() }]);
+    }
+
+    #[test]
+    fn quality_mode_is_constant_quality_not_cbr() {
+        let a = video_encode_args(&settings("{}"), false, 0, "");
+        assert!(has(&a, "-c:v", "libx264") && has(&a, "-crf", "18") && has(&a, "-preset", "medium"), "{a:?}");
+        assert!(has(&a, "-pix_fmt", "yuv420p"));
+        for cbr in ["-maxrate", "-minrate", "-bufsize", "-x264-params", "-b:v"] {
+            assert!(!a.iter().any(|x| x == cbr), "{cbr} in {a:?}");
+        }
+        // Levels follow HandBrake's RF scale: 1 = RF 16 … 5 = RF 26.
+        let rf = |lv: u8| {
+            let mut s = settings("{}");
+            s.level = lv;
+            video_encode_args(&s, false, 0, "")
+        };
+        assert!(has(&rf(1), "-crf", "16") && has(&rf(5), "-crf", "26"));
+    }
+
+    #[test]
+    fn h265_is_10_bit_and_tagged_hvc1_only_in_mp4() {
+        let mp4 = video_encode_args(&settings(r#"{"codec":"h265"}"#), false, 0, "");
+        assert!(has(&mp4, "-c:v", "libx265") && has(&mp4, "-pix_fmt", "yuv420p10le") && has(&mp4, "-tag:v", "hvc1"), "{mp4:?}");
+        assert!(has(&mp4, "-x265-params", "log-level=error"));
+        let mkv = video_encode_args(&settings(r#"{"codec":"h265","container":"mkv","tenBit":false}"#), false, 0, "");
+        assert!(has(&mkv, "-pix_fmt", "yuv420p") && !mkv.iter().any(|x| x == "-tag:v"), "{mkv:?}");
+    }
+
+    #[test]
+    fn gpu_quality_uses_nvenc_cq_and_the_speed_preset() {
+        let a = video_encode_args(&settings(r#"{"codec":"h265","encoderSpeed":"smaller"}"#), true, 0, "");
+        assert!(has(&a, "-c:v", "hevc_nvenc") && has(&a, "-rc", "vbr") && has(&a, "-b:v", "0"), "{a:?}");
+        assert!(has(&a, "-preset", "p7") && has(&a, "-pix_fmt", "p010le") && a.iter().any(|x| x == "-cq"));
+        assert_eq!(encoder_name("vp9", true), None); // no GPU VP9 encoder: software only
+    }
+
+    #[test]
+    fn bitrate_mode_is_two_pass_abr_in_software_and_cbr_on_the_gpu() {
+        let s = settings(r#"{"rateMode":"bitrate","bitrate":3000000}"#);
+        let p1 = video_encode_args(&s, false, 1, "LOG");
+        assert!(has(&p1, "-b:v", "3000000") && has(&p1, "-pass", "1") && has(&p1, "-passlogfile", "LOG"), "{p1:?}");
+        assert!(!p1.iter().any(|x| x == "-crf" || x == "-maxrate"));
+        assert!(has(&video_encode_args(&s, false, 2, "LOG"), "-pass", "2"));
+        let gpu = video_encode_args(&s, true, 0, "");
+        assert!(has(&gpu, "-rc", "cbr") && has(&gpu, "-maxrate", "3000000"), "{gpu:?}");
+    }
+
+    #[test]
+    fn vp9_quality_is_constrained_quality_with_row_threads() {
+        let a = video_encode_args(&settings(r#"{"container":"webm","codec":"vp9","encoderSpeed":"faster"}"#), false, 0, "");
+        assert!(has(&a, "-c:v", "libvpx-vp9") && has(&a, "-b:v", "0") && has(&a, "-row-mt", "1"), "{a:?}");
+        assert!(has(&a, "-cpu-used", "5") && a.iter().any(|x| x == "-crf"));
+    }
+
+    #[test]
+    fn containers_only_take_codecs_their_players_read() {
+        assert!(codec_fits("mp4", "h265") && codec_fits("mkv", "av1") && codec_fits("webm", "vp9"));
+        assert!(!codec_fits("mp4", "vp9") && !codec_fits("webm", "h264") && !codec_fits("mov", "h264"));
+    }
+
+    #[test]
+    fn the_upload_is_copied_only_when_it_already_is_the_requested_stream() {
+        let br = settings(r#"{"rateMode":"bitrate"}"#);
+        assert!(can_copy(&br, "h264", true)); // fast MP4 at a bitrate: no re-encode
+        assert!(!can_copy(&br, "vp9", true)); // VP9 intermediate → must become H.264
+        assert!(!can_copy(&settings("{}"), "h264", true)); // quality mode: CRF re-encode
+        // No ffmpeg: a WebM VP9 export still saves the intermediate as-is.
+        let webm = settings(r#"{"container":"webm","codec":"vp9"}"#);
+        assert!(can_copy(&webm, "vp9", false) && !can_copy(&webm, "vp9", true));
+        // Fast constant quality: the GPU already encoded the final H.264 at the level's QP.
+        assert!(can_copy(&settings(r#"{"uploadFinal":true}"#), "h264", true));
+        assert!(!can_copy(&settings(r#"{"uploadFinal":true,"codec":"h265"}"#), "h264", true));
+    }
+
+    #[test]
+    fn opus_never_gets_a_bitrate_it_rejects() {
+        // libopus refuses > 256 kb/s on a mono mix ("Nothing was written") —
+        // after the whole render. AAC takes the dialog's 320.
+        assert_eq!(audio_codec_args("webm", 320), ["-c:a", "libopus", "-b:a", "256k"]);
+        assert_eq!(audio_codec_args("mkv", 320), ["-c:a", "aac", "-b:a", "320k"]);
+        assert_eq!(audio_codec_args("mp4", 192), ["-c:a", "aac", "-b:a", "192k"]);
+    }
+
+    #[test]
+    fn an_mp4_upload_still_goes_through_ffmpeg_for_faststart() {
+        let br = settings(r#"{"rateMode":"bitrate"}"#);
+        // mp4-muxer writes the index at the end; only ffmpeg moves it to the front.
+        assert!(!saves_upload_as_is(&br, "h264", true, false));
+        assert!(saves_upload_as_is(&br, "h264", false, false)); // no ffmpeg: valid as it is
+        let webm = settings(r#"{"container":"webm","codec":"vp9","rateMode":"bitrate"}"#);
+        assert!(saves_upload_as_is(&webm, "vp9", true, false)); // WebM needs no faststart
+        assert!(!saves_upload_as_is(&webm, "vp9", true, true)); // audio / subtitles to mux
+        assert!(saves_upload_as_is(&webm, "vp9", false, true)); // no ffmpeg: video-only, as before
+        assert!(!saves_upload_as_is(&settings("{}"), "h264", true, false)); // quality: re-encode
+    }
+
+    #[test]
+    fn encoder_list_keeps_only_the_ones_export_uses() {
+        let out = " V....D libx264              libx264 H.264\n V....D libx265   x265\n A....D aac   AAC\n \
+                   V....D h264_nvenc   NVIDIA\n ------\n V..... libsvtav1   SVT\n";
+        assert_eq!(parse_encoders(out), vec!["libx264", "libx265", "h264_nvenc", "libsvtav1"]);
+    }
+
+    /// Real ffmpeg: a VP9 intermediate → MKV/H.265 with a soft SRT track and a
+    /// sidecar, and a 2-pass MP4 that lands near its target size.
+    /// `cargo test --lib export_settings_tests::exports_with_real_ffmpeg -- --ignored`.
+    #[test]
+    #[ignore]
+    fn exports_with_real_ffmpeg() {
+        let ff = find_ffmpeg().expect("ffmpeg");
+        let probe = ff.with_file_name(ff.file_name().unwrap().to_string_lossy().replace("ffmpeg", "ffprobe"));
+        let dir = std::env::temp_dir().join(format!("sefx_export_real_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join("upload.webm");
+        let ok = quiet_command(&ff)
+            .args(["-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:duration=4"])
+            .args(["-c:v", "libvpx-vp9", "-b:v", "8M", "-deadline", "realtime"])
+            .arg(&tmp)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let len = std::fs::metadata(&tmp).unwrap().len();
+        let streams = |p: &std::path::Path| {
+            let o = quiet_command(&probe)
+                .args(["-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0"])
+                .arg(p)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&o.stdout).split_whitespace().map(String::from).collect::<Vec<_>>()
+        };
+
+        let tone = dir.join("tone.m4a");
+        let ok = quiet_command(&ff)
+            .args(["-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-c:a", "aac"])
+            .arg(&tone)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let audio = [AudioTrack {
+            path: tone.to_string_lossy().into_owned(),
+            start_ms: 0,
+            play_ms: 4000,
+            source_in_ms: 0,
+            volume: 1.0,
+            speed: 1.0,
+            reverse: false,
+            fade_in_ms: 0,
+            fade_out_ms: 0,
+        }];
+        // "type,default" per stream, e.g. "audio,1".
+        let defaults = |p: &std::path::Path| {
+            let o = quiet_command(&probe)
+                .args(["-v", "error", "-show_entries", "stream=codec_type:stream_disposition=default", "-of", "csv=p=0"])
+                .arg(p)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&o.stdout).split_whitespace().map(String::from).collect::<Vec<_>>()
+        };
+
+        let mkv = dir.join("out.mkv");
+        let s = settings(
+            r#"{"container":"mkv","codec":"h265","subtitleMode":"track","subtitleSidecar":true,
+                "subtitleCues":[{"startMs":500,"endMs":2000,"text":"Hello\nthere"}]}"#,
+        );
+        let size = export_video_from(&tmp, len, mkv.to_str().unwrap(), &s, &audio, 4000, "vp9").unwrap();
+        assert_eq!(size, std::fs::metadata(&mkv).unwrap().len());
+        assert_eq!(streams(&mkv), vec!["hevc", "aac", "subrip"]);
+        // Setting the subtitle's flag by hand turns off ffmpeg's automatic ones:
+        // the picture and sound must still be the tracks players pick by default.
+        assert_eq!(defaults(&mkv), vec!["video,1", "audio,1", "subtitle,1"]);
+        // "both" also burns them in: the track is there but off by default.
+        let mut both = s.clone();
+        both.subtitle_mode = "both".into();
+        export_video_from(&tmp, len, mkv.to_str().unwrap(), &both, &audio, 4000, "vp9").unwrap();
+        assert_eq!(defaults(&mkv), vec!["video,1", "audio,1", "subtitle,0"]);
+        let srt = std::fs::read_to_string(dir.join("out.srt")).unwrap();
+        assert_eq!(subtitles::parse_srt(&srt), s.subtitle_cues);
+
+        let mp4 = dir.join("out.mp4");
+        let s = settings(r#"{"rateMode":"bitrate","bitrate":1000000}"#);
+        let size = export_video_from(&tmp, len, mp4.to_str().unwrap(), &s, &[], 4000, "vp9").unwrap();
+        assert_eq!(streams(&mp4), vec!["h264"]);
+        let want = 1_000_000.0 * 4.0 / 8.0;
+        assert!((size as f64 - want).abs() / want < 0.1, "2-pass size {size} vs target {want}");
+        // x265 takes its stats path through ffmpeg too (an absolute C:\ path).
+        let s = settings(r#"{"codec":"h265","rateMode":"bitrate","bitrate":1000000}"#);
+        let size = export_video_from(&tmp, len, mp4.to_str().unwrap(), &s, &[], 4000, "vp9").unwrap();
+        assert_eq!(streams(&mp4), vec!["hevc"]);
+        assert!((size as f64 - want).abs() / want < 0.1, "x265 2-pass size {size} vs target {want}");
+        // No stats files left behind in %TEMP%.
+        let left = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&passlog_prefix()))
+            .count();
+        assert_eq!(left, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

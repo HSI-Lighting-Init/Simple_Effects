@@ -5,6 +5,7 @@ import type { Project } from "../bindings/Project";
 import type { UpdateManifest } from "../bindings/UpdateManifest";
 import type { SubtitleResult } from "../bindings/SubtitleResult";
 import type { Layer } from "../bindings/Layer";
+import type { ExportSettings, SubtitleCue } from "./exportSettings";
 import type { Track } from "../bindings/Track";
 import type { ResolvedLayer } from "../bindings/ResolvedLayer";
 import type { TransformEdit } from "../bindings/TransformEdit";
@@ -813,8 +814,9 @@ export const unlinkCell = (layerId: number, groupId: number, cell: number) =>
 export const saveBinaryFile = (path: string, base64: string) =>
   invoke<void>("save_binary_file", { path, base64 });
 
-/** The located ffmpeg path, or null if not installed (gates MP4 export). */
-export const ffmpegStatus = () => invoke<string | null>("ffmpeg_status");
+/** The located ffmpeg and which export encoders it has (`libx264`, `hevc_nvenc`…),
+ *  or null if not installed. Gates the export dialog's formats. */
+export const ffmpegStatus = () => invoke<{ path: string; encoders: string[] } | null>("ffmpeg_status");
 
 /** Install ffmpeg via winget (one-time). Resolves when found, rejects on error. */
 export const installFfmpeg = () => invoke<string>("install_ffmpeg");
@@ -876,33 +878,17 @@ export const exportUploadChunk = (data: Uint8Array, offset: number, reset: boole
 export const makeSeekProxy = (path: string, fast = false) =>
   invoke<string>("make_seek_proxy", { path, fast });
 
-/** Mux/transcode the WebM uploaded via `exportUploadChunk` (`webmLen` bytes). */
+/** Turn the intermediate uploaded via `exportUploadChunk` (`webmLen` bytes,
+ *  `uploadCodec` "h264" MP4 or "vp9" WebM) into the file the dialog asked for —
+ *  copied, or re-encoded by ffmpeg. Resolves to the file's size in bytes. */
 export const exportVideo = (
   webmLen: number,
   path: string,
-  format: "mp4" | "webm",
-  rateMode: "quality" | "bitrate",
-  level: number,
-  bitrate: number,
+  settings: ExportSettings & { fast: boolean; subtitleCues: SubtitleCue[]; uploadFinal: boolean },
   audio: AudioTrackSpec[],
   durationMs: number,
-  /** Fast mode: GPU/veryfast ffmpeg encode. */
-  fast = false,
-  /** The upload is already an H.264 MP4 (GPU WebCodecs) — ffmpeg only muxes audio. */
-  directMp4 = false
-) =>
-  invoke<void>("export_video", {
-    webmLen,
-    path,
-    format,
-    rateMode,
-    level,
-    bitrate,
-    audio,
-    durationMs,
-    fast,
-    directMp4,
-  });
+  uploadCodec: "h264" | "vp9"
+) => invoke<number>("export_video", { webmLen, path, settings, audio, durationMs, uploadCodec });
 
 /** The newest published build (`latest.json` in HSI-Lighting/release). */
 export const fetchUpdateManifest = () => invoke<UpdateManifest>("fetch_update_manifest");

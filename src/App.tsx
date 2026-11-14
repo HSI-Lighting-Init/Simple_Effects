@@ -143,6 +143,7 @@ import {
   dropImageOnShape,
   editKeyframes,
   exportVideo,
+  ffmpegStatus,
   exportUploadChunk,
   makeSeekProxy,
   keyDecal,
@@ -209,6 +210,17 @@ import {
   type ExportSpeed,
   type ExportStats,
 } from "./lib/deterministicExport";
+import {
+  DEFAULT_EXPORT_SETTINGS,
+  bitrateForSize,
+  exportPlan,
+  formatBytes,
+  intermediateBitrate,
+  recordQualitySize,
+  subtitleCues,
+  subtitleGroups,
+  type ExportSettings,
+} from "./lib/exportSettings";
 import type { Project } from "./bindings/Project";
 import type { Layer } from "./bindings/Layer";
 import type { ResolvedLayer } from "./bindings/ResolvedLayer";
@@ -449,6 +461,11 @@ export default function App() {
   >(null);
   const [exporting, setExporting] = useState(false);
   const [exportMsg, setExportMsg] = useState("");
+  // While the export renders frames, nothing on screen may change continuously:
+  // on a 60 Hz display each presented screen update made the GPU encoder wait
+  // for vsync, capping Fast exports at ~56 fps (~100 fps with a still screen —
+  // measured 2026-11-13). The editor is hidden and the spinner stopped meanwhile.
+  const [renderingFrames, setRenderingFrames] = useState(false);
   // Set while a fast (ffmpeg-only) merge runs; shows a small busy card.
   const [merging, setMerging] = useState<string | null>(null);
   const mergingRef = useRef(false);
@@ -1329,10 +1346,22 @@ export default function App() {
         renderPreview: (tMs, shortSide) => renderPreviewAt(tMs, shortSide),
         contactSheet: (times, shortSide) => renderContactSheet(times, shortSide),
         exportVideo: async (outPath, opts) => {
-          const format = opts?.format ?? "mp4";
-          const level = opts?.level ?? 2;
-          const fps = opts?.fps ?? projectRef.current?.fps ?? 30;
-          const saved = await onExportRef.current(format, level, fps, false, bitrateForLevel(level), "quality", outPath, true);
+          const container = opts?.format ?? "mp4";
+          const p = projectRef.current;
+          const r = exportRangeRef.current;
+          const durationMs = r ? Math.min(r.outMs, p?.durationMs ?? 0) - Math.max(0, r.inMs) : (p?.durationMs ?? 0);
+          // Fixed defaults, not the dialog's remembered choice: agent exports stay reproducible.
+          const s: ExportSettings = {
+            ...DEFAULT_EXPORT_SETTINGS,
+            container,
+            codec: opts?.codec ?? (container === "webm" ? "vp9" : "h264"),
+            level: opts?.level ?? 2,
+            fps: opts?.fps ?? p?.fps ?? 30,
+            ...(opts?.targetMb
+              ? { rateMode: "bitrate", bitrate: bitrateForSize(opts.targetMb, durationMs, DEFAULT_EXPORT_SETTINGS.audioKbps) }
+              : {}),
+          };
+          const saved = await onExportRef.current(s, outPath, true);
           if (!saved) throw new Error("export did not produce a file");
           return saved;
         },
@@ -2985,16 +3014,13 @@ export default function App() {
   // frame at full resolution, then encode it with an exact timestamp via
   // WebCodecs (VP9 → WebM) so the output is exactly `fps` with no dropped or
   // duplicated frames regardless of how fast rendering is. Falls back to a
-  // real-time MediaRecorder capture if WebCodecs isn't available. MP4 is the
-  // WebM transcoded by Rust/ffmpeg. `level` 1..5 = compression/bitrate.
+  // real-time MediaRecorder capture if WebCodecs isn't available. Rust/ffmpeg
+  // then turns that intermediate into the container/codec in `s` (see
+  // `export_video`): copied when it already is the asked-for stream, else
+  // re-encoded at constant quality or 2-pass to the target bitrate.
   const onExport = useCallback(
     async (
-      format: "mp4" | "webm",
-      level: number,
-      fps: number,
-      burnFps: boolean,
-      bitrate: number,
-      rateMode: "quality" | "bitrate",
+      s: ExportSettings,
       outPath?: string,
       silent?: boolean,
       // Merge: render only these layers over this range instead of the whole comp.
@@ -3002,14 +3028,11 @@ export default function App() {
       opts?: { range?: { inMs: number; outMs: number }; onlyIds?: number[]; speed?: ExportSpeed }
     ) => {
       if (exportingRef.current) return;
+      const { container, fps } = s;
       const only = opts?.onlyIds ? new Set(opts.onlyIds) : null;
       const fast = (opts?.speed ?? getExportSpeed()) === "fast";
       const exportStartedAt = performance.now();
       const timing: Record<string, number> = {};
-      // The bitrate the frame encoder targets: the user's value in bitrate mode,
-      // or one derived from the compression level in quality mode (WebCodecs has
-      // no CRF, so quality mode still needs a generous target for the WebM pass).
-      const encodeBitrate = rateMode === "bitrate" ? bitrate : bitrateForLevel(level);
       // Render the whole comp, not a group's inner scope.
       const rootP = await ensureRootScope();
       let p = rootP ?? projectRef.current;
@@ -3024,15 +3047,15 @@ export default function App() {
       const path =
         outPath ??
         (await save({
-          defaultPath: `render-${stamp}.${format}`,
-          filters: [{ name: `${format.toUpperCase()} video`, extensions: [format] }],
+          defaultPath: `render-${stamp}.${container}`,
+          filters: [{ name: `${container.toUpperCase()} video`, extensions: [container] }],
         }));
       if (!path) return;
 
       stop();
       setSelectedId(null);
       // Burn the fps label into the frames if requested.
-      setFpsOverlay(burnFps ? fps : null);
+      setFpsOverlay(s.burnFps ? fps : null);
       exportingRef.current = true;
       cancelRef.current = false;
       setCancelling(false);
@@ -3084,6 +3107,25 @@ export default function App() {
         const inMs = range ? Math.max(0, Math.min(range.inMs, p.durationMs)) : 0;
         const outMs = range ? Math.max(inMs + 1, Math.min(range.outMs, p.durationMs)) : p.durationMs;
         const duration = outMs - inMs;
+        // Fast MP4/MKV: the GPU encodes H.264 frames (no VP9 software encode).
+        // Falls back to the VP9 route automatically if it can't.
+        const wantH264 = fast && container !== "webm" && isDeterministicSupported() && !probing;
+        // Only a WebM/VP9 export can do without ffmpeg (MP4/MKV need it, the dialog gates that).
+        const haveFfmpeg = container === "webm" && s.codec === "vp9" ? !!(await ffmpegStatus().catch(() => null)) : true;
+        // The frame encoder's file IS the output's video when it already is the
+        // asked-for stream — then it must be encoded at the target. Otherwise
+        // ffmpeg re-encodes it, so make it generous: it's a temp file, and its
+        // quality caps the output's.
+        const { copied, gpuQp, burnSubtitles } = exportPlan(s, wantH264, haveFfmpeg);
+        const encodeBitrate = !copied
+          ? intermediateBitrate(p.width, p.height, fps)
+          : s.rateMode === "bitrate"
+            ? s.bitrate
+            : bitrateForLevel(s.level);
+        // Subtitles: a soft track / sidecar gets the Subtitles group's lines; a
+        // track-only export leaves the group out of the pixels.
+        const cues = s.subtitleMode !== "burn" || s.subtitleSidecar ? subtitleCues(p.layers, inMs, outMs) : [];
+        const unburned = new Set(burnSubtitles ? [] : subtitleGroups(p.layers).map((l) => l.id));
         // Short-GOP copies of the range's video clips, so each per-frame seek decodes
         // a few frames instead of everything since the clip's last keyframe (see
         // make_seek_proxy). Cached after the first export. Without ffmpeg, or if a
@@ -3189,9 +3231,6 @@ export default function App() {
         let usedCodec: ExportCodec = "vp9";
         const stats: ExportStats = { renderMs: 0, encoderWaitMs: 0, flushMs: 0, frames: 0, codec: "vp9" };
         const phase = { evalMs: 0, seekMs: 0, paintMs: 0 };
-        // Fast MP4: let the GPU encode H.264 straight into the final MP4 (no second
-        // encode). Falls back to the VP9 → ffmpeg route automatically if it can't.
-        const wantH264 = fast && format === "mp4" && isDeterministicSupported() && !probing;
         // Fast: resolves when the frame's state has been committed (see App's layout effect).
         const nextCommit = () =>
           new Promise<boolean>((resolve) => {
@@ -3219,108 +3258,114 @@ export default function App() {
             lastPct = -1;
             phase.evalMs = phase.seekMs = phase.paintMs = 0;
             setExportMsg("Rendering frames…");
-            return await encodeDeterministicWebm({
-              codec,
-              stats,
-              canvas,
-              width: p.width,
-              height: p.height,
-              fps,
-              durationMs: duration,
-              bitrate: encodeBitrate,
-              onData: async (d, pos) => {
-                if (probing) probeChunks.push({ d, pos });
-                const reset = firstSlice;
-                firstSlice = false;
-                await exportUploadChunk(d, pos, reset);
-              },
-              renderFrame: async (relMs) => {
-                // The encoder counts from 0; shift into absolute comp time so a
-                // partial export renders the right section (inMs = 0 for a full comp).
-                const tMs = inMs + relMs;
-                // Evaluate this exact frame and push it to the preview via a NORMAL
-                // state update. We deliberately do NOT use flushSync here: react-konva
-                // renders the Stage's children through its OWN concurrent reconciler
-                // and drains it with flushSyncWork() inside a layout effect. Wrapping
-                // our setState in ReactDOM's flushSync can defer that inner drain
-                // (nested sync work on a different root) instead of applying it — which
-                // left the Konva nodes on the OLD sceneFunc and froze every frame.
-                //
-                // Instead: set state, then yield across enough ticks that React commits
-                // AND react-konva commits + batch-draws on its own, THEN force one final
-                // synchronous stage draw right before the frame is grabbed.
-                const ph0 = performance.now();
-                const layers = await evaluateAt(tMs);
-                phase.evalMs += performance.now() - ph0;
-                const map: Record<number, ResolvedLayer> = {};
-                for (const l of layers) if (!only || only.has(l.id)) map[l.id] = l;
-                // Sample the first active transition factor for the diagnostic trace.
-                const withTr = layers.find((l) => l.transition);
-                dbgFactors.push(withTr?.transition ? withTr.transition.factor : null);
-                // Register for the commit BEFORE the state update (fast mode only).
-                const committed = fast ? nextCommit() : null;
-                setResolved(map);
-                setTime(tMs);
-                // Seek every on-screen video layer to this exact source-time and wait
-                // for the decode, so the captured frame shows the right video content.
-                // `.visible`, not mere presence: evaluateAt returns EVERY layer, so this
-                // used to load + await all of the comp's videos on every frame — one
-                // unloadable clip anywhere stalled each frame by SEEK_TIMEOUT_MS.
-                const videoTargets = p.layers
-                  .filter((l) => l.kind.kind === "video" && map[l.id]?.visible)
-                  .map((l) => {
-                    const k = l.kind.kind === "video" ? l.kind : null;
-                    const durMs = k?.durationMs ?? 0;
-                    const inMs = k?.inMs ?? 0;
-                    const spd = k?.speed && k.speed > 0 ? k.speed : 1;
-                    const reverse = k?.reverse ?? false;
-                    // Source time honours speed & reverse (matches VideoNode).
-                    const elapsed = Math.max(0, (tMs - l.startMs) / 1000);
-                    const playLen = Math.max(0, (l.endMs - l.startMs) / 1000);
-                    const wanted = reverse
-                      ? inMs / 1000 + Math.max(0, playLen - elapsed) * spd
-                      : inMs / 1000 + elapsed * spd;
-                    return {
-                      layerId: l.id,
-                      src: k?.src ?? "",
-                      startSec: videoStartSec(inMs, spd, reverse, l.startMs, l.endMs),
-                      timeSec: durMs > 0 ? Math.min(Math.max(0, wanted), durMs / 1000 - 0.001) : Math.max(0, wanted),
-                    };
-                  });
-                const ps0 = performance.now();
-                if (videoTargets.length) await seekVideosForFrame(videoTargets);
-                phase.seekMs += performance.now() - ps0;
-                const pp0 = performance.now();
-                if (committed) {
-                  // Fast: React + react-konva have committed this frame as soon as App's
-                  // layout effect fires; one macrotask hop then lets passive effects
-                  // settle. If the commit signal never came (250 ms), fall back to the
-                  // two-refresh wait rather than capture a stale frame.
-                  if (await committed) await macrotask();
-                  else await awaitPaint();
-                } else {
-                  // Exact: microtask drain + two animation frames. This lets React's
-                  // async commit and react-konva's reconciler+batchDraw fully run.
-                  await Promise.resolve();
-                  await awaitPaint();
-                }
-                phase.paintMs += performance.now() - pp0;
-                // Belt-and-suspenders: force a synchronous repaint of the exact stage
-                // (and any others) so the captured canvas holds THIS frame.
-                previewStageRef.current?.draw();
-                for (const st of Konva.stages) st.draw();
-              },
-              onFrameRendered: probing ? (relMs) => probePreview(canvas, inMs + relMs) : undefined,
-              onProgress: (frac) => {
-                const pct = Math.round(frac * 100);
-                if (pct !== lastPct) {
-                  lastPct = pct;
-                  setExportMsg(`Rendering frame-accurate… ${pct}%`);
-                }
-              },
-              onFlush: () => setExportMsg("Finalizing video…"),
-              shouldAbort: () => cancelRef.current,
-            });
+            setRenderingFrames(true);
+            try {
+              return await encodeDeterministicWebm({
+                codec,
+                quantizer: codec === "h264" ? gpuQp : null,
+                stats,
+                canvas,
+                width: p.width,
+                height: p.height,
+                fps,
+                durationMs: duration,
+                bitrate: encodeBitrate,
+                onData: async (d, pos) => {
+                  if (probing) probeChunks.push({ d, pos });
+                  const reset = firstSlice;
+                  firstSlice = false;
+                  await exportUploadChunk(d, pos, reset);
+                },
+                renderFrame: async (relMs) => {
+                  // The encoder counts from 0; shift into absolute comp time so a
+                  // partial export renders the right section (inMs = 0 for a full comp).
+                  const tMs = inMs + relMs;
+                  // Evaluate this exact frame and push it to the preview via a NORMAL
+                  // state update. We deliberately do NOT use flushSync here: react-konva
+                  // renders the Stage's children through its OWN concurrent reconciler
+                  // and drains it with flushSyncWork() inside a layout effect. Wrapping
+                  // our setState in ReactDOM's flushSync can defer that inner drain
+                  // (nested sync work on a different root) instead of applying it — which
+                  // left the Konva nodes on the OLD sceneFunc and froze every frame.
+                  //
+                  // Instead: set state, then yield across enough ticks that React commits
+                  // AND react-konva commits + batch-draws on its own, THEN force one final
+                  // synchronous stage draw right before the frame is grabbed.
+                  const ph0 = performance.now();
+                  const layers = await evaluateAt(tMs);
+                  phase.evalMs += performance.now() - ph0;
+                  const map: Record<number, ResolvedLayer> = {};
+                  for (const l of layers) if ((!only || only.has(l.id)) && !unburned.has(l.id)) map[l.id] = l;
+                  // Sample the first active transition factor for the diagnostic trace.
+                  const withTr = layers.find((l) => l.transition);
+                  dbgFactors.push(withTr?.transition ? withTr.transition.factor : null);
+                  // Register for the commit BEFORE the state update (fast mode only).
+                  const committed = fast ? nextCommit() : null;
+                  setResolved(map);
+                  setTime(tMs);
+                  // Seek every on-screen video layer to this exact source-time and wait
+                  // for the decode, so the captured frame shows the right video content.
+                  // `.visible`, not mere presence: evaluateAt returns EVERY layer, so this
+                  // used to load + await all of the comp's videos on every frame — one
+                  // unloadable clip anywhere stalled each frame by SEEK_TIMEOUT_MS.
+                  const videoTargets = p.layers
+                    .filter((l) => l.kind.kind === "video" && map[l.id]?.visible)
+                    .map((l) => {
+                      const k = l.kind.kind === "video" ? l.kind : null;
+                      const durMs = k?.durationMs ?? 0;
+                      const inMs = k?.inMs ?? 0;
+                      const spd = k?.speed && k.speed > 0 ? k.speed : 1;
+                      const reverse = k?.reverse ?? false;
+                      // Source time honours speed & reverse (matches VideoNode).
+                      const elapsed = Math.max(0, (tMs - l.startMs) / 1000);
+                      const playLen = Math.max(0, (l.endMs - l.startMs) / 1000);
+                      const wanted = reverse
+                        ? inMs / 1000 + Math.max(0, playLen - elapsed) * spd
+                        : inMs / 1000 + elapsed * spd;
+                      return {
+                        layerId: l.id,
+                        src: k?.src ?? "",
+                        startSec: videoStartSec(inMs, spd, reverse, l.startMs, l.endMs),
+                        timeSec: durMs > 0 ? Math.min(Math.max(0, wanted), durMs / 1000 - 0.001) : Math.max(0, wanted),
+                      };
+                    });
+                  const ps0 = performance.now();
+                  if (videoTargets.length) await seekVideosForFrame(videoTargets);
+                  phase.seekMs += performance.now() - ps0;
+                  const pp0 = performance.now();
+                  if (committed) {
+                    // Fast: React + react-konva have committed this frame as soon as App's
+                    // layout effect fires; one macrotask hop then lets passive effects
+                    // settle. If the commit signal never came (250 ms), fall back to the
+                    // two-refresh wait rather than capture a stale frame.
+                    if (await committed) await macrotask();
+                    else await awaitPaint();
+                  } else {
+                    // Exact: microtask drain + two animation frames. This lets React's
+                    // async commit and react-konva's reconciler+batchDraw fully run.
+                    await Promise.resolve();
+                    await awaitPaint();
+                  }
+                  phase.paintMs += performance.now() - pp0;
+                  // Belt-and-suspenders: force a synchronous repaint of the exact stage
+                  // (and any others) so the captured canvas holds THIS frame.
+                  previewStageRef.current?.draw();
+                  for (const st of Konva.stages) st.draw();
+                },
+                onFrameRendered: probing ? (relMs) => probePreview(canvas, inMs + relMs) : undefined,
+                onProgress: (frac) => {
+                  const pct = Math.round(frac * 100);
+                  if (pct !== lastPct) {
+                    lastPct = pct;
+                    setExportMsg(`Rendering frame-accurate… ${pct}%`);
+                  }
+                },
+                onFlush: () => setExportMsg("Finalizing video…"),
+                shouldAbort: () => cancelRef.current,
+              });
+            } finally {
+              setRenderingFrames(false); // before any fallback prompt / ffmpeg stage
+            }
           };
           try {
             if (wantH264) {
@@ -3431,22 +3476,31 @@ export default function App() {
           })
           .filter((a) => a.path && a.playMs > 0);
 
+        // Fast constant-quality H.264: the GPU wrote the final stream at the level's
+        // QP — Rust keeps it (if quantizer mode wasn't available, it re-encodes).
+        const uploadFinal = usedCodec === "h264" && s.codec === "h264" && stats.quantizer != null;
         setExportMsg(
-          audioTracks.length
-            ? "Muxing audio (ffmpeg)…"
-            : format === "mp4"
-              ? "Encoding MP4 (ffmpeg)…"
+          (!copied && !uploadFinal) || usedCodec !== s.codec // H.264 fell back to VP9: re-encode after all
+            ? `Encoding ${container.toUpperCase()} (ffmpeg)…`
+            : audioTracks.length || cues.length
+              ? "Muxing audio and subtitles (ffmpeg)…"
               : "Saving…"
         );
-        // MP4 transcode: in "bitrate" mode target the user's bitrate (size ≈
-        // bitrate × duration); in "quality" mode use CRF from the compression
-        // level (constant quality, variable size). WebM is copied through as-is.
         // ponytail: a cancel landing in the ~ms between this check and export_video
         // starting is reset by it, so that export just finishes. Fine for a button.
         if (cancelRef.current) throw new Error("export cancelled");
         const mux0 = performance.now();
-        await exportVideo(webmLen, path, format, rateMode, level, bitrate, audioTracks, duration, fast, usedCodec === "h264");
+        const bytes = await exportVideo(
+          webmLen,
+          path,
+          { ...s, fast, subtitleCues: cues, uploadFinal },
+          audioTracks,
+          duration,
+          usedCodec
+        );
         timing.ffmpegMs = performance.now() - mux0;
+        // Constant quality has no exact size: remember this one for the next estimate.
+        if (s.rateMode === "quality") recordQualitySize(s.codec, s.level, bytes, p.width * p.height * totalFrames);
         // Calibrate the render-time estimate: record how long this export took
         // per frame so the dialog can predict the next one more accurately.
         const msPerFrame = (performance.now() - renderStartedAt) / totalFrames;
@@ -3477,8 +3531,17 @@ export default function App() {
         };
         console.info("[export timing]", perf);
         record("export_timing", perf);
-        recordAction("export_video", { path, format, level, deterministic: isDeterministicSupported(), ...perf });
-        if (!silent) alert(`Saved video:\n${path}`);
+        recordAction("export_video", {
+          path,
+          container,
+          videoCodec: s.codec,
+          rateMode: s.rateMode,
+          level: s.level,
+          bytes,
+          deterministic: isDeterministicSupported(),
+          ...perf,
+        });
+        if (!silent) alert(`Saved video (${formatBytes(bytes)}):\n${path}`);
         return path;
       } catch (e) {
         if (cancelRef.current) {
@@ -3575,12 +3638,9 @@ export default function App() {
       }
       if (cancelRef.current) return; // not a failed fast merge: don't fall back to the render
       saved ??= await onExportRef.current(
-        "mp4",
-        1, // near-original quality: the merged clip is re-encoded once more on export
-        p.fps,
-        false,
-        bitrateForLevel(1),
-        "quality",
+        // Near-original H.264 at a fixed bitrate: in Fast mode the GPU's file is
+        // kept as-is (one encode, as before); the clip is encoded again on export.
+        { ...DEFAULT_EXPORT_SETTINGS, rateMode: "bitrate", bitrate: bitrateForLevel(1), fps: p.fps },
         path,
         true,
         { range: { inMs, outMs }, onlyIds: [...ids] }
@@ -3972,6 +4032,14 @@ export default function App() {
     }
     return p;
   }, [resolveImages, applyTime]);
+
+  // The export renders the whole comp (onExport leaves any group first), so the
+  // dialog must see it too: inside a group, `project.layers` are that group's
+  // children and the Subtitles / Audio options would be judged on the wrong layers.
+  const openExportDialog = useCallback(async () => {
+    await ensureRootScope();
+    setShowExportDialog(true);
+  }, [ensureRootScope]);
 
   const doUndo = useCallback(async () => {
     const p = await undo();
@@ -4377,7 +4445,7 @@ export default function App() {
         { separator: true },
         {
           label: "Export Video…",
-          onClick: () => setShowExportDialog(true),
+          onClick: () => void openExportDialog(),
           disabled: exporting,
         },
       ],
@@ -4555,7 +4623,7 @@ export default function App() {
           disabled: !selectedLayer,
         },
         { separator: true },
-        { label: "Export Video…", onClick: () => setShowExportDialog(true), disabled: exporting },
+        { label: "Export Video…", onClick: () => void openExportDialog(), disabled: exporting },
       ],
     },
     {
@@ -4595,7 +4663,7 @@ export default function App() {
 
   return (
     <div
-      className="app"
+      className={"app" + (exporting && renderingFrames ? " rendering-frames" : "")}
       style={{ gridTemplateRows: `30px 48px 1fr 6px ${timelineH}px` }}
     >
       <MenuBar
@@ -4675,7 +4743,7 @@ export default function App() {
           ✂
         </button>
         <button
-          onClick={() => setShowExportDialog(true)}
+          onClick={() => void openExportDialog()}
           disabled={exporting}
           title="Export the comp to a video (MP4 / WebM)"
         >
@@ -4773,7 +4841,8 @@ export default function App() {
           {exporting && (
             <div className="export-overlay">
               <div className="export-card">
-                <div className="spinner" />
+                {/* The % in the message shows progress while frames render (see renderingFrames). */}
+                {!renderingFrames && <div className="spinner" />}
                 <div>{exportMsg || "Rendering…"}</div>
                 <div className="muted">Recording the full-resolution canvas — don't switch away.</div>
                 {/* Only a real export sets a message; the agent's quick frame grabs don't. */}
@@ -5158,6 +5227,8 @@ export default function App() {
           }
           width={project.width}
           height={project.height}
+          hasAudio={project.layers.some((l) => l.kind.kind === "audio" && !l.hidden)}
+          hasSubtitles={subtitleGroups(project.layers).length > 0}
           onExport={onExport}
           onClose={() => setShowExportDialog(false)}
         />
@@ -5177,7 +5248,7 @@ export default function App() {
           probe={probeAsset}
           mediaPaths={project.media}
           onSaveToDesktop={onAgentSaveToDesktop}
-          onDone={() => setShowExportDialog(true)}
+          onDone={() => void openExportDialog()}
           onClose={() => setShowScenario(false)}
         />
       )}

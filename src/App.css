@@ -1462,6 +1462,19 @@ body {
   backdrop-filter: blur(2px);
 }
 
+/* While frames render, keep the screen still (see renderingFrames in App.tsx):
+   the editor is hidden — it still draws, the export captures it — and only the
+   progress card shows, over the whole window. */
+.app.rendering-frames {
+  visibility: hidden;
+}
+.app.rendering-frames .export-overlay {
+  visibility: visible;
+  position: fixed;
+  background: var(--bg, #12121a);
+  backdrop-filter: none;
+}
+
 .export-card {
   display: flex;
   flex-direction: column;
@@ -1503,6 +1516,10 @@ body {
 .modal {
   min-width: 380px;
   max-width: 90vw;
+  /* A tall dialog (Export) scrolls its body; title and buttons stay on screen. */
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -1522,6 +1539,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .modal-actions {

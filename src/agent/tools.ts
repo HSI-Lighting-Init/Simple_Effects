@@ -9,6 +9,7 @@
 import type { Project } from "../bindings/Project";
 import type { TransformEdit } from "../bindings/TransformEdit";
 import type { EffectParam } from "../lib/api";
+import { codecsFor, type Container, type VideoCodec } from "../lib/exportSettings";
 import { REGISTRY } from "../lib/transitions/registry";
 import { STYLE_PACKS, stylePackById, applyStylePack } from "../lib/stylePacks";
 import { GPU_FX } from "../lib/effects";
@@ -69,7 +70,10 @@ export interface AgentCtx {
   contactSheet(times: number[], shortSide?: number): Promise<string>;
   /** Render the whole comp to a real MP4/WebM file on disk (the actual encode,
    *  not a preview) and mux its audio. Resolves to the saved path. */
-  exportVideo(outPath: string, opts?: { format?: "mp4" | "webm"; level?: number; fps?: number }): Promise<string>;
+  exportVideo(
+    outPath: string,
+    opts?: { format?: Container; codec?: VideoCodec; level?: number; fps?: number; targetMb?: number }
+  ): Promise<string>;
   /** Bring files into the media bin (so `media` / add_media_layer can use them). */
   importMedia(paths: string[]): Promise<void>;
   /** Save a named restore point of the whole project; resolves to its path. */
@@ -537,13 +541,19 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "export_video",
-    description: "Render the WHOLE comp to a real MP4/WebM file on disk, with its audio muxed in — the actual deliverable, not a preview. This is a real encode (can take minutes for a full comp) — always check the look with contact_sheet/render_preview FIRST, this is the last step. Requires ffmpeg for MP4 (WebM needs nothing extra).",
+    description: "Render the WHOLE comp to a real MP4/MKV/WebM file on disk, with its audio muxed in — the actual deliverable, not a preview. This is a real encode (can take minutes for a full comp) — always check the look with contact_sheet/render_preview FIRST, this is the last step. Constant quality by default (small files); give target_mb to hit a size instead. Requires ffmpeg for MP4/MKV (WebM VP9 needs nothing extra). H.264 MP4 plays everywhere; social apps don't take MKV.",
     inputSchema: {
       type: "object",
       properties: {
         path: { type: "string", description: "absolute output file path, e.g. C:\\Users\\me\\Desktop\\out.mp4" },
-        format: { type: "string", enum: ["mp4", "webm"], description: "default: inferred from path, else mp4" },
+        format: { type: "string", enum: ["mp4", "mkv", "webm"], description: "container; default: inferred from path, else mp4" },
+        codec: {
+          type: "string",
+          enum: ["h264", "h265", "av1", "vp9"],
+          description: "video codec; default h264 (vp9 for webm). mp4/mkv: h264, h265, av1. webm: vp9, av1",
+        },
         quality: { type: "integer", enum: [1, 2, 3, 4, 5], description: "1 near-original/largest .. 5 highest compression/smallest (default 2)" },
+        target_mb: { type: "number", description: "hit this file size (MB) instead of a quality level (2-pass encode)" },
         fps: { type: "number", description: "defaults to the comp's fps" },
       },
       required: ["path"],
@@ -552,11 +562,16 @@ export const TOOLS: ToolDef[] = [
     handler: async (a, ctx) => {
       const path = str(a.path);
       if (!path) return err("path is required — an absolute output file path");
-      const format = a.format === "webm" || a.format === "mp4" ? a.format : /\.webm$/i.test(path) ? "webm" : "mp4";
+      const ext = /\.(mp4|mkv|webm)$/i.exec(path)?.[1].toLowerCase() as Container | undefined;
+      const format: Container = a.format === "webm" || a.format === "mp4" || a.format === "mkv" ? a.format : (ext ?? "mp4");
+      const codec = typeof a.codec === "string" ? (a.codec as VideoCodec) : undefined;
+      if (codec && !codecsFor(format).includes(codec))
+        return err(`${format} can't hold ${codec} — use one of: ${codecsFor(format).join(", ")}`);
       const level = Math.max(1, Math.min(5, int(a.quality, 2)));
       const fps = typeof a.fps === "number" && isFinite(a.fps) && a.fps > 0 ? a.fps : undefined;
+      const targetMb = typeof a.target_mb === "number" && isFinite(a.target_mb) && a.target_mb > 0 ? a.target_mb : undefined;
       try {
-        const saved = await ctx.exportVideo(path, { format, level, fps });
+        const saved = await ctx.exportVideo(path, { format, codec, level, fps, targetMb });
         return ok(`exported to ${saved}`);
       } catch (e) {
         return err(`export failed: ${e instanceof Error ? e.message : String(e)}`);

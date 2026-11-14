@@ -60,6 +60,8 @@ export interface ExportStats {
   flushMs: number;
   frames: number;
   codec: ExportCodec;
+  /** The fixed QP the GPU H.264 encoded at (quantizer mode), or null: a bitrate. */
+  quantizer?: number | null;
 }
 
 export type ExportCodec = "vp9" | "h264";
@@ -67,24 +69,28 @@ export type ExportCodec = "vp9" | "h264";
 /**
  * A WebCodecs H.264 config this PC can encode (GPU first), or null — odd frame
  * sizes (H.264 needs even), or no H.264 encoder in the webview. Callers fall back
- * to the VP9 path on null.
+ * to the VP9 path on null. With `quantizer`, a fixed-QP ("quantizer" mode) config
+ * is tried first; the result's `bitrateMode` says which one this PC took.
  */
 export async function pickH264Config(
   width: number,
   height: number,
   fps: number,
-  bitrate: number
+  bitrate: number,
+  quantizer: number | null = null
 ): Promise<VideoEncoderConfig | null> {
   if (!isDeterministicSupported() || width % 2 || height % 2) return null;
+  const modes = quantizer != null ? (["quantizer", "constant", "variable"] as const) : (["constant", "variable"] as const);
   for (const hardwareAcceleration of ["prefer-hardware", "no-preference"] as const) {
     // High profile, level 5.2 / 5.1 / 4.2 — the higher levels cover 4K and 60 fps.
     for (const codec of ["avc1.640034", "avc1.640033", "avc1.64002A"]) {
-      for (const bitrateMode of ["constant", "variable"] as const) {
+      for (const bitrateMode of modes) {
         const cfg: VideoEncoderConfig = {
           codec,
           width,
           height,
-          bitrate,
+          // Quantizer mode has no bitrate: each frame carries its QP.
+          ...(bitrateMode === "quantizer" ? {} : { bitrate }),
           framerate: fps,
           hardwareAcceleration,
           bitrateMode,
@@ -169,6 +175,9 @@ export interface DeterministicOpts {
   bitrate: number;
   /** "vp9" (default): WebM. "h264": GPU H.264 straight into an MP4 (see `pickH264Config`). */
   codec?: ExportCodec;
+  /** H.264 only: encode every frame at this fixed QP when the PC can (see
+   *  `stats.quantizer` for whether it did), instead of at `bitrate`. */
+  quantizer?: number | null;
   /** Filled in as the render runs — where the time went. */
   stats?: ExportStats;
   /** Render the comp at `tMs` and resolve once the canvas has painted it. */
@@ -210,6 +219,9 @@ export async function encodeDeterministicWebm(opts: DeterministicOpts): Promise<
   const codec: ExportCodec = opts.codec ?? "vp9";
   const stats: ExportStats = opts.stats ?? { renderMs: 0, encoderWaitMs: 0, flushMs: 0, frames: 0, codec };
   stats.codec = codec;
+  stats.quantizer = null;
+  // Per-frame encode options (the QP rides on each frame in quantizer mode).
+  let frameOpts: (keyFrame: boolean) => VideoEncoderEncodeOptions = (keyFrame) => ({ keyFrame });
 
   let config: VideoEncoderConfig;
   let upload: { settle: (all?: boolean) => Promise<void>; readonly size: number };
@@ -217,9 +229,14 @@ export async function encodeDeterministicWebm(opts: DeterministicOpts): Promise<
   let finalize: () => void;
 
   if (codec === "h264") {
-    const cfg = await pickH264Config(width, height, fps, bitrate);
+    const cfg = await pickH264Config(width, height, fps, bitrate, opts.quantizer ?? null);
     if (!cfg) throw new Error("H.264 encoder not available for this frame size");
     config = cfg;
+    const qp = cfg.bitrateMode === "quantizer" ? opts.quantizer : null;
+    if (qp != null) {
+      stats.quantizer = qp;
+      frameOpts = (keyFrame) => ({ keyFrame, avc: { quantizer: qp } });
+    }
     const u = createUploadTarget(opts.onData, (o) => new Mp4StreamTarget(o));
     upload = u;
     // fastStart:false = index at the end, so memory stays flat; Rust moves it to
@@ -287,7 +304,7 @@ export async function encodeDeterministicWebm(opts: DeterministicOpts): Promise<
       stats.renderMs += performance.now() - r0;
       opts.onFrameRendered?.(tMs, f);
       const frame = new VideoFrame(canvas, { timestamp: f * frameDurUs, duration: frameDurUs });
-      encoder.encode(frame, { keyFrame: f % keyEvery === 0 });
+      encoder.encode(frame, frameOpts(f % keyEvery === 0));
       frame.close();
       // Backpressure: BLOCK until the encoder drains below the threshold before
       // rendering the next frame. This was an `if` that yielded a single task and

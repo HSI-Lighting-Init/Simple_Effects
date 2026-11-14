@@ -5,11 +5,25 @@
 use super::*;
 
 /// One subtitle line: shown from `start_ms` to `end_ms`, `\n` between rows.
-#[derive(Debug, Clone, PartialEq)]
+/// Deserialize: the export dialog sends the comp's cues for a soft track.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Cue {
     pub start_ms: u32,
     pub end_ms: u32,
     pub text: String,
+}
+
+/// Cues → SRT text (what `parse_srt` reads back). Blank rows are dropped:
+/// in SRT an empty line ends the cue.
+pub fn write_srt(cues: &[Cue]) -> String {
+    let t = |ms: u32| format!("{:02}:{:02}:{:02},{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000);
+    let mut s = String::new();
+    for (i, c) in cues.iter().enumerate() {
+        let rows: Vec<&str> = c.text.lines().filter(|r| !r.trim().is_empty()).collect();
+        s.push_str(&format!("{}\n{} --> {}\n{}\n\n", i + 1, t(c.start_ms), t(c.end_ms), rows.join("\n")));
+    }
+    s
 }
 
 /// Read SRT (as ffmpeg writes it, from any subtitle format or from Whisper).
@@ -564,6 +578,17 @@ pub fn import_subtitles(state: State<'_, AppState>, path: String) -> Result<Subt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn written_srt_reads_back_as_the_same_cues() {
+        let cues = vec![
+            Cue { start_ms: 0, end_ms: 1500, text: "Hello".into() },
+            Cue { start_ms: 3_723_004, end_ms: 3_724_000, text: "two\nrows".into() },
+        ];
+        let s = write_srt(&cues);
+        assert!(s.starts_with("1\n00:00:00,000 --> 00:00:01,500\nHello\n\n2\n01:02:03,004 --> "), "{s}");
+        assert_eq!(parse_srt(&s), cues);
+    }
 
     #[test]
     fn parses_whisper_style_srt_numbered_from_zero() {
