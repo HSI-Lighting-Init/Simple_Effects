@@ -14,24 +14,30 @@ export function clipsEndMs(layers: Layer[]): number | null {
   return end;
 }
 
-/** Where a dropped media file lands: a clip snaps to the nearest clip edge and
- *  ripples later layers; anything else lands at the pointer untouched. */
+/** Where a dropped media file lands: a clip snaps to the nearest clip edge (and
+ *  ripples later layers) or to the playhead when that is nearer (no ripple — it
+ *  stacks there, like adding at the playhead); anything else lands at the
+ *  pointer untouched. */
 export function mediaDropTarget(
   layers: Layer[],
   ms: number,
   isClip: boolean,
+  playheadMs?: number,
 ): { ms: number; ripple: boolean } {
   if (!isClip) return { ms, ripple: false };
   const edges: number[] = [];
   for (const l of layers) {
     if (isClipLayer(l)) edges.push(l.startMs, l.endMs);
   }
-  if (edges.length === 0) return { ms, ripple: false };
+  if (edges.length === 0) return { ms: playheadMs ?? ms, ripple: false };
   let best = edges[0];
   for (const e of edges) {
     const d = Math.abs(e - ms);
     const bestD = Math.abs(best - ms);
     if (d < bestD || (d === bestD && e < best)) best = e; // ties → earlier edge
   }
+  // An edge wins ties, so a playhead sitting on an edge still inserts there.
+  if (playheadMs != null && Math.abs(playheadMs - ms) < Math.abs(best - ms))
+    return { ms: playheadMs, ripple: false };
   return { ms: best, ripple: true };
 }

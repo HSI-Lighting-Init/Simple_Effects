@@ -454,6 +454,27 @@ export default function App() {
       /* ignore */
     }
   }, []);
+  // Media-bin click places videos/images at the playhead (on) or after the last
+  // clip (off, the default). Persisted; F12 or Edit menu toggles it.
+  const [addAtPlayhead, setAddAtPlayhead] = useState(() => {
+    try {
+      return localStorage.getItem("sefx.addAtPlayhead") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const addAtPlayheadRef = useRef(addAtPlayhead);
+  addAtPlayheadRef.current = addAtPlayhead;
+  const toggleAddAtPlayhead = useCallback(() => {
+    setAddAtPlayhead((v) => {
+      try {
+        localStorage.setItem("sefx.addAtPlayhead", v ? "0" : "1");
+      } catch {
+        /* ignore */
+      }
+      return !v;
+    });
+  }, []);
   // True while an OS file drag is hovering the window (shows the drop overlay).
   const [fileDragging, setFileDragging] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -1164,9 +1185,10 @@ export default function App() {
     // Capture the layer selected at add-time — the new one slots just above it.
     const above = selectedIdRef.current;
     // Videos and images without an explicit time go after the last clip (or at the
-    // playhead when there is none). Computed before the add so it isn't counted.
+    // playhead when there is none, or when "Add Clips at Playhead" is on).
+    // Computed before the add so it isn't counted.
     const seqEnd =
-      (kind === "video" || kind === "image") && atMs == null
+      (kind === "video" || kind === "image") && atMs == null && !addAtPlayheadRef.current
         ? clipsEndMs(projectRef.current?.layers ?? [])
         : null;
     const at = seqEnd ?? atMs ?? Math.round(timeRef.current);
@@ -4190,6 +4212,11 @@ export default function App() {
         setRazor(false);
         return;
       }
+      if (e.key === "F12") {
+        e.preventDefault(); // also keeps WebView2 devtools from opening
+        toggleAddAtPlayhead();
+        return;
+      }
       // Delete / Backspace removes the selected layer (not while in decompose
       // per-glyph editing, where it may mean something else).
       if ((e.key === "Delete" || e.key === "Backspace") && !inField) {
@@ -4316,6 +4343,7 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [
+    toggleAddAtPlayhead,
     doUndo,
     doRedo,
     onDeleteLayer,
@@ -4538,6 +4566,11 @@ export default function App() {
         {
           label: (razor ? "✓ " : "") + "Cut Tool (click to split)",
           onClick: () => setRazor((v) => !v),
+        },
+        {
+          label: (addAtPlayhead ? "✓ " : "") + "Add Clips at Playhead (off: after last clip)",
+          onClick: toggleAddAtPlayhead,
+          shortcut: "F12",
         },
         { separator: true },
         {

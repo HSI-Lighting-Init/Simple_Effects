@@ -31,4 +31,14 @@ describe("mediaDropTarget", () => {
     expect(clipsEndMs([...seq, L("image", 0, 20000, { shapeId: 1 })])).toBe(10000));
   it("snaps an image to the nearest clip edge, image edges included", () =>
     expect(mediaDropTarget(withImage, 12500, true)).toEqual({ ms: 13000, ripple: true }));
+  it("snaps to the playhead when it is nearer than any clip edge, without rippling", () =>
+    expect(mediaDropTarget(seq, 2800, true, 3000)).toEqual({ ms: 3000, ripple: false }));
+  it("prefers the clip edge when it is nearer than the playhead", () =>
+    expect(mediaDropTarget(seq, 9000, true, 3000)).toEqual({ ms: 10000, ripple: true }));
+  it("prefers the clip edge (and ripples) when the playhead sits on it", () =>
+    expect(mediaDropTarget(seq, 5200, true, 5000)).toEqual({ ms: 5000, ripple: true }));
+  it("snaps to the playhead when no clip is on the timeline", () =>
+    expect(mediaDropTarget([L("text", 0, 3000)], 1234, true, 4000)).toEqual({ ms: 4000, ripple: false }));
+  it("never snaps audio to the playhead", () =>
+    expect(mediaDropTarget(seq, 2800, false, 3000)).toEqual({ ms: 2800, ripple: false }));
 });

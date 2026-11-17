@@ -289,6 +289,9 @@ export default function Timeline({
   // Comp time (ms) of the insertion line for a Media-bin drag; null = not over
   // the visible tracks.
   const [dropHint, setDropHint] = useState<number | null>(null);
+  // Playhead for the bin-drag snap, read live so playback doesn't re-arm the drag.
+  const timeRef = useRef(time);
+  timeRef.current = time;
   // Inline layer-name editing: the layer id being renamed + the draft text.
   const [renaming, setRenaming] = useState<{ id: number; draft: string } | null>(null);
   const commitRename = () => {
@@ -559,7 +562,7 @@ export default function Timeline({
         return null;
       const rect = el.getBoundingClientRect();
       const pct = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
-      return mediaDropTarget(project.layers, Math.round(pct * dur), isClip);
+      return mediaDropTarget(project.layers, Math.round(pct * dur), isClip, Math.round(timeRef.current));
     };
     const move = (ev: MouseEvent) => setDropHint(targetAt(ev)?.ms ?? null);
     const up = (ev: MouseEvent) => {
