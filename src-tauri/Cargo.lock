@@ -3767,6 +3767,7 @@ dependencies = [
  "tiny_http",
  "ts-rs",
  "ttf-parser",
+ "windows",
 ]
 
 [[package]]

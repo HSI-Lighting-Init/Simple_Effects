@@ -8,6 +8,8 @@ import type { FrameCell } from "../bindings/FrameCell";
 import type { Effect } from "../bindings/Effect";
 import type { Track } from "../bindings/Track";
 import { paramColor } from "../lib/paramColors";
+import { mediaKind } from "../lib/media";
+import { mediaDropTarget } from "../lib/videoSequence";
 
 /** Smallest range a layer block may be trimmed to (ms) — matches the Rust floor. */
 const MIN_SPAN_MS = 50;
@@ -232,6 +234,13 @@ interface Props {
   exportRange: { inMs: number; outMs: number } | null;
   /** Set (or clear, with null) the export range. */
   onSetExportRange: (r: { inMs: number; outMs: number } | null) => void;
+  /** A Media-bin item being dragged (absolute path), or null. While set, the timeline
+   *  tracks the pointer, shows where it would land, and handles the release. */
+  mediaDragPath: string | null;
+  /** The drag finished (dropped on the tracks or released anywhere else). */
+  onMediaDragEnd: () => void;
+  /** Dropped on the tracks: add `path` at comp time `ms`; `ripple` pushes later layers right. */
+  onDropMedia: (path: string, ms: number, ripple: boolean) => void;
 }
 
 export default function Timeline({
@@ -264,6 +273,9 @@ export default function Timeline({
   onResizeLabels,
   exportRange,
   onSetExportRange,
+  mediaDragPath,
+  onMediaDragEnd,
+  onDropMedia,
 }: Props) {
   const tracksRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -272,6 +284,9 @@ export default function Timeline({
   const [rowOverId, setRowOverId] = useState<number | null>(null);
   // True while dragging a whole multi-selection (so every moved row is dimmed).
   const [groupDragging, setGroupDragging] = useState(false);
+  // Comp time (ms) of the insertion line for a Media-bin drag; null = not over
+  // the visible tracks.
+  const [dropHint, setDropHint] = useState<number | null>(null);
   // Inline layer-name editing: the layer id being renamed + the draft text.
   const [renaming, setRenaming] = useState<{ id: number; draft: string } | null>(null);
   const commitRename = () => {
@@ -520,6 +535,48 @@ export default function Timeline({
     const pct = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
     onSplitLayer(layer.id, Math.round(pct * dur));
   };
+
+  // A Media-bin item is being dragged: track the pointer, show where it would
+  // land, and add it on release over the visible tracks. Same pointer pattern as
+  // the row drag (HTML5 drag-and-drop is swallowed by WebView2 on Windows).
+  useEffect(() => {
+    if (!mediaDragPath) return;
+    const isVideo = mediaKind(mediaDragPath) === "video";
+    const targetAt = (ev: MouseEvent) => {
+      const s = scrollRef.current;
+      const el = tracksRef.current;
+      if (!s || !el) return null;
+      // Only the visible tracks count: releasing over the preview/bin/inspector
+      // cancels.
+      const visible = s.getBoundingClientRect();
+      if (
+        ev.clientX < visible.left || ev.clientX > visible.right ||
+        ev.clientY < visible.top || ev.clientY > visible.bottom
+      )
+        return null;
+      const rect = el.getBoundingClientRect();
+      const pct = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+      return mediaDropTarget(project.layers, Math.round(pct * dur), isVideo);
+    };
+    const move = (ev: MouseEvent) => setDropHint(targetAt(ev)?.ms ?? null);
+    const up = (ev: MouseEvent) => {
+      const t = targetAt(ev);
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      setDropHint(null);
+      onMediaDragEnd();
+      if (t) onDropMedia(mediaDragPath, t.ms, t.ripple);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    document.body.style.cursor = "copy";
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.style.cursor = "";
+      setDropHint(null);
+    };
+  }, [mediaDragPath, project, dur, onDropMedia, onMediaDragEnd]);
 
   const startBlockDrag = (
     e: React.MouseEvent,
@@ -1332,6 +1389,9 @@ export default function Timeline({
               />
             )}
             <div className="tl-playhead" style={{ left: `${(time / dur) * 100}%` }} />
+            {dropHint != null && (
+              <div className="tl-insert-line" style={{ left: `${(dropHint / dur) * 100}%` }} />
+            )}
             {marquee && (
               <div
                 className="tl-marquee"

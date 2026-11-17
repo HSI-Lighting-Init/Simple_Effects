@@ -35,3 +35,6 @@ sha2 = "0.10"
 fontdb = "0.23.0"
 tiny_http = "0.12"
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+

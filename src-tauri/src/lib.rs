@@ -1481,8 +1481,10 @@ fn reorder_layers(state: State<AppState>, order: Vec<u32>) -> Result<Project, St
 
 /// Place a just-added layer: move its play range to start at `start_ms` (keeping
 /// its span, clamped to the comp) and slot it directly ABOVE `above_id` in the
-/// stack (last = top). `above_id` = None leaves it on top. One undo step — the
-/// caller runs this right after an add so the two read as a single action.
+/// stack (last = top). `above_id` = None leaves it on top. `ripple` shifts every
+/// layer that starts at or after `start_ms` right by the new layer's length.
+/// One undo step — the caller runs this right after an add so the two read as a
+/// single action.
 #[tauri::command]
 fn place_layer(
     state: State<AppState>,
@@ -1490,13 +1492,44 @@ fn place_layer(
     start_ms: u32,
     above_id: Option<u32>,
     grow: Option<bool>,
+    ripple: Option<bool>,
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
-    place_in_comp(&mut project, layer_id, start_ms, above_id, grow.unwrap_or(false))?;
+    place_in_comp(&mut project, layer_id, start_ms, above_id, grow.unwrap_or(false), ripple.unwrap_or(false))?;
     Ok(project.clone())
 }
 
-fn place_in_comp(project: &mut Project, layer_id: u32, start_ms: u32, above_id: Option<u32>, grow: bool) -> Result<(), String> {
+fn place_in_comp(project: &mut Project, layer_id: u32, start_ms: u32, above_id: Option<u32>, grow: bool, ripple: bool) -> Result<(), String> {
+    // `ripple`: inserting media mid-timeline pushes everything that starts at or
+    // after the insert point right, so later clips still play in order. Runs
+    // before the grow / re-time below, which then sees the restored full span.
+    if ripple {
+        let span = project
+            .layers
+            .iter()
+            .find(|l| l.id == layer_id)
+            .map(|l| match &l.kind {
+                // Full source length: add_video_layer may have trimmed it to a
+                // user-set comp length.
+                LayerKind::Video { duration_ms, .. } if *duration_ms > 0 => {
+                    (*duration_ms).clamp(MIN_SPAN_MS, MAX_COMP_MS)
+                }
+                _ => l.end_ms.saturating_sub(l.start_ms).max(MIN_SPAN_MS),
+            })
+            .ok_or("layer not found")?;
+        for l in project.layers.iter_mut().filter(|l| l.id != layer_id && l.start_ms >= start_ms) {
+            shift_layer_time(l, span as i64);
+        }
+        if let Some(l) = project.layers.iter_mut().find(|l| l.id == layer_id) {
+            l.end_ms = l.start_ms.saturating_add(span);
+        }
+        // Always make room, even for a length the user set by hand.
+        project.duration_ms = project
+            .duration_ms
+            .max(layers_end(project))
+            .max(start_ms.saturating_add(span))
+            .min(MAX_COMP_MS);
+    }
     // `grow`: media being added to the timeline keeps its full length — the comp
     // stretches to hold it instead of the clip being cut off at the comp end.
     // Not when the user set the length: then the clip is cut off.
@@ -7169,12 +7202,40 @@ fn spawn_install_helper(installer: &std::path::Path, exe: &std::path::Path, pid:
         .map_err(|e| format!("start the installer: {e}"))
 }
 
+/// Paint the native title bar in the app's own colours (--panel / --text / --line
+/// in App.css). Windows 11 only; Windows 10 rejects these attributes and keeps its
+/// standard bar, so errors are ignored.
+#[cfg(windows)]
+fn theme_title_bar(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
+    };
+    // COLORREF is 0x00BBGGRR: #16161e, #e7e7ef, #2a2a38.
+    for (attr, bgr) in [
+        (DWMWA_CAPTION_COLOR, 0x001e1616u32),
+        (DWMWA_TEXT_COLOR, 0x00efe7e7),
+        (DWMWA_BORDER_COLOR, 0x00382a2a),
+    ] {
+        unsafe {
+            let _ = DwmSetWindowAttribute(hwnd, attr, &bgr as *const u32 as *const _, 4);
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            #[cfg(windows)]
+            {
+                if let Some(w) = app.get_webview_window("main") {
+                    if let Ok(hwnd) = w.hwnd() {
+                        theme_title_bar(hwnd);
+                    }
+                }
+            }
             // Open with a clear timeline (no default layers).
             let project = Project::empty();
             let mut shaped = HashMap::new();
@@ -7881,6 +7942,13 @@ mod comp_length_tests {
         refit_comp(p, was_fit);
     }
 
+    /// `l` moved to start at `start`, keeping its span.
+    fn starting_at(mut l: Layer, start: u32) -> Layer {
+        l.end_ms += start;
+        l.start_ms = start;
+        l
+    }
+
     #[test]
     fn a_new_project_takes_the_first_videos_length() {
         let mut p = Project::empty();
@@ -7911,7 +7979,7 @@ mod comp_length_tests {
         let mut p = Project::empty();
         apply_comp_duration(&mut p, 5_000);
         add(&mut p, clip(1, 4_000));
-        place_in_comp(&mut p, 1, 3_000, None, true).unwrap();
+        place_in_comp(&mut p, 1, 3_000, None, true, false).unwrap();
         assert_eq!(p.duration_ms, 5_000);
         assert_eq!((p.layers[0].start_ms, p.layers[0].end_ms), (3_000, 5_000));
     }
@@ -7920,7 +7988,7 @@ mod comp_length_tests {
     fn placing_media_still_grows_an_unset_length() {
         let mut p = Project::empty();
         add(&mut p, clip(1, 4_000));
-        place_in_comp(&mut p, 1, 3_000, None, true).unwrap();
+        place_in_comp(&mut p, 1, 3_000, None, true, false).unwrap();
         assert_eq!(p.duration_ms, 7_000);
     }
 
@@ -7929,6 +7997,43 @@ mod comp_length_tests {
         let json = r#"{"width":1080,"height":1920,"fps":30,"durationMs":4000,"layers":[]}"#;
         let p: Project = serde_json::from_str(json).unwrap();
         assert!(!p.duration_set_by_user);
+    }
+
+    #[test]
+    fn ripple_insert_makes_room_and_carries_keyframes() {
+        let mut p = Project::empty();
+        add(&mut p, clip(1, 5_000)); // 0–5 s
+        add(&mut p, starting_at(clip(2, 5_000), 5_000)); // 5–10 s
+        let mut title = starting_at(clip(3, 2_000), 10_000); // 10–12 s
+        title.transform.opacity.keys.push(Keyframe { time_ms: 11_000, value: 1.0, easing: Easing::Linear });
+        add(&mut p, title);
+        add(&mut p, clip(5, 20_000)); // music-like: 0–20 s, spans the insert point
+        add(&mut p, clip(4, 3_000)); // the new clip, as add_video_layer leaves it (at 0)
+        place_in_comp(&mut p, 4, 5_000, None, true, true).unwrap();
+        let range = |id: u32| {
+            let l = p.layers.iter().find(|l| l.id == id).unwrap();
+            (l.start_ms, l.end_ms)
+        };
+        assert_eq!(range(1), (0, 5_000)); // before the insert point: untouched
+        assert_eq!(range(4), (5_000, 8_000)); // the inserted clip
+        assert_eq!(range(2), (8_000, 13_000)); // pushed right by 3 s
+        assert_eq!(range(3), (13_000, 15_000));
+        assert_eq!(range(5), (0, 20_000)); // started earlier: never moves or stretches
+        let title = p.layers.iter().find(|l| l.id == 3).unwrap();
+        assert_eq!(title.transform.opacity.keys[0].time_ms, 14_000); // keys travel with it
+        assert!(p.duration_ms >= 20_000);
+    }
+
+    #[test]
+    fn ripple_insert_grows_a_user_set_length_to_the_full_clip() {
+        let mut p = Project::empty();
+        apply_comp_duration(&mut p, 5_000);
+        add(&mut p, clip(1, 5_000));
+        add(&mut p, clip(2, 12_000)); // refit trims it to 0–5 s, like add_video_layer does
+        place_in_comp(&mut p, 2, 5_000, None, true, true).unwrap();
+        let l = p.layers.iter().find(|l| l.id == 2).unwrap();
+        assert_eq!((l.start_ms, l.end_ms), (5_000, 17_000)); // full 12 s source, not the trimmed 5 s
+        assert_eq!(p.duration_ms, 17_000);
     }
 }
 

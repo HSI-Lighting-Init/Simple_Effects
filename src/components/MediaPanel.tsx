@@ -1,8 +1,8 @@
 // The media bin: a staging area (left of the preview) for images you've imported
 // but haven't necessarily placed on the timeline yet. Import via the file dialog
-// or by dropping files onto the app; click a thumbnail to drop it onto the
-// timeline as a new image layer.
-import type { DragEvent as ReactDragEvent } from "react";
+// or by dropping files onto the app; click a thumbnail to add it to the timeline,
+// drag it onto the timeline to place it there.
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { mediaKind } from "../lib/media";
 
 interface Props {
@@ -16,6 +16,8 @@ interface Props {
   onAddToTimeline: (path: string) => void;
   /** Remove an item from the bin (does not touch layers already using it). */
   onRemove: (path: string) => void;
+  /** The pointer moved past the drag threshold: a drag of `path` has started. */
+  onDragToTimeline: (path: string) => void;
 }
 
 /** Just the file name (for the label under each thumbnail). */
@@ -24,12 +26,31 @@ function baseName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-export default function MediaPanel({ media, thumbs, onImport, onAddToTimeline, onRemove }: Props) {
-  // Let an item be dragged onto the preview/timeline (a future drop target can
-  // read the path from dataTransfer); clicking is the primary "add" action.
-  const onDragStart = (e: ReactDragEvent, path: string) => {
-    e.dataTransfer.setData("application/x-sefx-media", path);
-    e.dataTransfer.effectAllowed = "copy";
+export default function MediaPanel({ media, thumbs, onImport, onAddToTimeline, onRemove, onDragToTimeline }: Props) {
+  // Click adds; dragging past a few pixels hands the path to the timeline, which
+  // owns the drop. Not HTML5 drag-and-drop: WebView2 swallows it on Windows.
+  const startPress = (e: ReactMouseEvent, path: string) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest(".media-remove")) return;
+    e.preventDefault(); // stop the native text selection while dragging
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    const move = (ev: MouseEvent) => {
+      if (Math.hypot(ev.clientX - x0, ev.clientY - y0) <= 4) return;
+      off();
+      onDragToTimeline(path);
+    };
+    // A release before the threshold is still a click.
+    const up = () => {
+      off();
+      onAddToTimeline(path);
+    };
+    const off = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
   };
 
   return (
@@ -53,10 +74,8 @@ export default function MediaPanel({ media, thumbs, onImport, onAddToTimeline, o
             <div
               key={path}
               className="media-item"
-              title={`${baseName(path)} (${kind})\nClick to add to the timeline`}
-              draggable
-              onDragStart={(e) => onDragStart(e, path)}
-              onClick={() => onAddToTimeline(path)}
+              title={`${baseName(path)} (${kind})\nClick to add to the timeline, drag to place it`}
+              onMouseDown={(e) => startPress(e, path)}
             >
               <div className="media-thumb">
                 {thumbs[path] ? (

@@ -20,6 +20,7 @@ import {
   IMPORT_EXTENSIONS,
 } from "./lib/media";
 import { hasAudio, waveformPng } from "./lib/waveform";
+import { videoEndMs } from "./lib/videoSequence";
 import RecorderPanel from "./components/RecorderPanel";
 import ContextMenu from "./components/ContextMenu";
 import MenuBar, { type MenuDef } from "./components/MenuBar";
@@ -428,6 +429,9 @@ export default function App() {
   const [media, setMedia] = useState<string[]>([]);
   // Thumbnails for non-image media (video poster frames), path → data URL.
   const [mediaThumbs, setMediaThumbs] = useState<Record<string, string>>({});
+  // A Media-bin item being dragged toward the timeline (absolute path), or null.
+  const [mediaDragPath, setMediaDragPath] = useState<string | null>(null);
+  const endMediaDrag = useCallback(() => setMediaDragPath(null), []);
   // Waveform strips for audio layers, source path → PNG data URL. Loaded lazily
   // from the decoded audio; `wavesLoadedRef` guards against re-decoding.
   const [waveforms, setWaveforms] = useState<Record<string, string>>({});
@@ -1139,11 +1143,15 @@ export default function App() {
     if (paths.length) await addMediaPaths(paths);
   }, [addMediaPaths]);
 
-  const onAddMediaToTimeline = useCallback(async (path: string, atMs?: number) => {
+  const onAddMediaToTimeline = useCallback(async (path: string, atMs?: number, ripple = false) => {
     const kind = mediaKind(path);
     // Capture the layer selected at add-time — the new one slots just above it.
     const above = selectedIdRef.current;
-    const at = atMs ?? Math.round(timeRef.current);
+    // Videos without an explicit time go after the last video (or at the playhead
+    // when there is none). Computed before the add so the new layer isn't counted.
+    const seqEnd = kind === "video" && atMs == null ? videoEndMs(projectRef.current?.layers ?? []) : null;
+    const at = seqEnd ?? atMs ?? Math.round(timeRef.current);
+    const ripplePlace = seqEnd != null || ripple;
     let p: Project;
     let videoDurationMs = 0;
     if (kind === "video") {
@@ -1158,10 +1166,11 @@ export default function App() {
       await resolveImages(p);
     }
     const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
-    // Drop it at the playhead and directly above the previously selected layer.
+    // Drop it at the playhead (videos: after the last video) and directly above
+    // the previously selected layer.
     if (newId != null) {
       // grow: the clip keeps its full length and the comp stretches to hold it.
-      p = await placeLayer(newId, at, above, true);
+      p = await placeLayer(newId, at, above, true, ripplePlace);
       setSelectedId(newId);
     }
     // A video with an audio track gets its own editable audio layer, aligned to
@@ -1171,6 +1180,7 @@ export default function App() {
     if (kind === "video" && newId != null && (await hasAudio(path).catch(() => false))) {
       let pa = await addAudioLayer(path, videoDurationMs);
       const audId = pa.layers.length ? pa.layers[pa.layers.length - 1].id : null;
+      // No ripple: the video's placement already made room for this row.
       if (audId != null) pa = await placeLayer(audId, at, newId, true);
       p = pa;
     }
@@ -1341,7 +1351,7 @@ export default function App() {
         commit,
         addMedia: async (i) => {
           const m = list()[i];
-          return m ? ((await onAddMediaToTimeline(m.path)) ?? -1) : -1;
+          return m ? ((await onAddMediaToTimeline(m.path, Math.round(timeRef.current))) ?? -1) : -1;
         },
         renderPreview: (tMs, shortSide) => renderPreviewAt(tMs, shortSide),
         contactSheet: (times, shortSide) => renderContactSheet(times, shortSide),
@@ -4781,6 +4791,7 @@ export default function App() {
           onImport={onImportMedia}
           onAddToTimeline={onAddMediaToTimeline}
           onRemove={onRemoveMedia}
+          onDragToTimeline={setMediaDragPath}
         />
         <div
           className="v-resizer"
@@ -5003,6 +5014,9 @@ export default function App() {
         onResizeLabels={(w) => setLayoutValue("labelsW", w)}
         exportRange={exportRange}
         onSetExportRange={setExportRange}
+        mediaDragPath={mediaDragPath}
+        onMediaDragEnd={endMediaDrag}
+        onDropMedia={onAddMediaToTimeline}
       />
 
       {showRecorder && (

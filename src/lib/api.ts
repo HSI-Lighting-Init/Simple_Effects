@@ -320,9 +320,10 @@ export const addAudioLayer = (path: string, durationMs: number) =>
   invoke<Project>("add_audio_layer", { path, durationMs });
 
 /** Re-time a just-added layer to start at `startMs` and slot it above `aboveId`
- *  (null = top). Folds into the preceding add's undo step. */
-export const placeLayer = (layerId: number, startMs: number, aboveId: number | null, grow = false) =>
-  invoke<Project>("place_layer", { layerId, startMs, aboveId, grow });
+ *  (null = top). `ripple` pushes later layers right by its length. Folds into the
+ *  preceding add's undo step. */
+export const placeLayer = (layerId: number, startMs: number, aboveId: number | null, grow = false, ripple = false) =>
+  invoke<Project>("place_layer", { layerId, startMs, aboveId, grow, ripple });
 
 /** Combine layers (current scope) into one nested Group (precomp). */
 export const combineLayers = (ids: number[]) =>
