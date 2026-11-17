@@ -2,10 +2,11 @@
 // probing, and a registry of live <video> elements so the deterministic export
 // can seek every video to the exact frame before it captures the canvas.
 //
-// We load files as blob object URLs (fetched through Tauri's asset protocol)
-// rather than the asset URL directly: blob URLs are same-origin, so drawing a
-// video frame onto a canvas never taints it — which keeps the WebCodecs export
-// working.
+// Playback and export still load files as blob object URLs: blob URLs are
+// same-origin, so drawing a video frame onto a canvas never taints it — which
+// keeps the WebCodecs export working. Probes (size / length / poster) read the
+// file URL directly instead: that only fetches the byte ranges they need, so a
+// large file never gets copied into memory just to show its bin thumbnail.
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { record } from "./recorder";
 
@@ -59,43 +60,83 @@ export function getMediaUrl(path: string): Promise<string> {
 export async function getVideoMeta(
   path: string
 ): Promise<{ width: number; height: number; durationMs: number }> {
-  const url = await getMediaUrl(path);
   return new Promise((resolve, reject) => {
     const v = document.createElement("video");
     v.preload = "metadata";
     v.muted = true;
-    v.onloadedmetadata = () =>
-      resolve({
+    // Release the decoder / partial load as soon as the answer is in.
+    const release = () => {
+      v.removeAttribute("src");
+      v.load();
+    };
+    v.onloadedmetadata = () => {
+      const meta = {
         width: v.videoWidth || 1,
         height: v.videoHeight || 1,
         durationMs: Number.isFinite(v.duration) ? Math.round(v.duration * 1000) : 0,
-      });
-    v.onerror = () => reject(new Error("video metadata failed"));
-    v.src = url;
+      };
+      release();
+      resolve(meta);
+    };
+    v.onerror = () => {
+      release();
+      reject(new Error("video metadata failed"));
+    };
+    v.src = convertFileSrc(path);
   });
 }
 
 /** Read an audio clip's duration (via a throwaway element). */
 export async function getAudioMeta(path: string): Promise<{ durationMs: number }> {
-  const url = await getMediaUrl(path);
   return new Promise((resolve, reject) => {
     const a = document.createElement("audio");
     a.preload = "metadata";
-    a.onloadedmetadata = () =>
-      resolve({ durationMs: Number.isFinite(a.duration) ? Math.round(a.duration * 1000) : 0 });
-    a.onerror = () => reject(new Error("audio metadata failed"));
-    a.src = url;
+    const release = () => {
+      a.removeAttribute("src");
+      a.load();
+    };
+    a.onloadedmetadata = () => {
+      const meta = { durationMs: Number.isFinite(a.duration) ? Math.round(a.duration * 1000) : 0 };
+      release();
+      resolve(meta);
+    };
+    a.onerror = () => {
+      release();
+      reject(new Error("audio metadata failed"));
+    };
+    a.src = convertFileSrc(path);
   });
 }
 
-/** Generate a poster thumbnail (data URL) from a video's first frame. */
-export async function getVideoPoster(path: string): Promise<string> {
-  const url = await getMediaUrl(path);
+class PosterTimeout extends Error {
+  constructor() {
+    super("poster timed out");
+  }
+}
+
+/** Poster from one URL: first frame, 160 px wide, JPEG 0.7. */
+function posterFrom(url: string, crossOrigin: boolean): Promise<string> {
   return new Promise((resolve, reject) => {
     const v = document.createElement("video");
     v.preload = "auto";
     v.muted = true;
-    v.crossOrigin = "anonymous";
+    if (crossOrigin) v.crossOrigin = "anonymous";
+    let settled = false;
+    let timer = 0;
+    const release = () => {
+      v.removeAttribute("src");
+      v.load();
+    };
+    const finish = (done: () => void) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      release();
+      done();
+    };
+    // A load that never settles must not hold up the rest of the bin. Generous: a
+    // read can queue behind another file being copied for playback.
+    timer = window.setTimeout(() => finish(() => reject(new PosterTimeout())), 30_000);
     const grab = () => {
       try {
         const cv = document.createElement("canvas");
@@ -103,9 +144,10 @@ export async function getVideoPoster(path: string): Promise<string> {
         cv.width = Math.max(1, Math.round(v.videoWidth * scale));
         cv.height = Math.max(1, Math.round(v.videoHeight * scale));
         cv.getContext("2d")!.drawImage(v, 0, 0, cv.width, cv.height);
-        resolve(cv.toDataURL("image/jpeg", 0.7));
+        const png = cv.toDataURL("image/jpeg", 0.7);
+        finish(() => resolve(png));
       } catch (e) {
-        reject(e);
+        finish(() => reject(e));
       }
     };
     v.onseeked = grab;
@@ -117,9 +159,22 @@ export async function getVideoPoster(path: string): Promise<string> {
         grab();
       }
     };
-    v.onerror = () => reject(new Error("poster failed"));
+    v.onerror = () => finish(() => reject(new Error("poster failed")));
     v.src = url;
   });
+}
+
+/** Generate a poster thumbnail (data URL) from a video's first frame. Reads the
+ *  file directly first; if that load fails or drawing it is refused (a
+ *  release-build origin may differ), fall back to the canvas-safe blob URL. A
+ *  slow load doesn't fall back: copying the whole file would only queue more. */
+export async function getVideoPoster(path: string): Promise<string> {
+  try {
+    return await posterFrom(convertFileSrc(path), true);
+  } catch (e) {
+    if (e instanceof PosterTimeout) throw e;
+    return posterFrom(await getMediaUrl(path), false);
+  }
 }
 
 // --- Warm <video> pool, keyed by layer ---

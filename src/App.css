@@ -640,6 +640,29 @@ body {
   font-size: 11px;
   padding: 3px 8px;
 }
+/* Media-bin loading bar, under the header while files are importing. */
+.media-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.media-progress-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+.media-progress-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+.media-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease-out;
+}
 .media-empty {
   flex: 1;
   display: flex;
@@ -2377,6 +2400,22 @@ body {
   inset: auto;
   top: 50%;
   bottom: 0;
+}
+
+/* A sound exists but its waveform couldn't be decoded here: a flat lane with a
+   centre line reads as sound, clearly not as a waveform. Its block's tooltip
+   carries the reason. */
+.tl-wave-none {
+  background: rgba(255, 255, 255, 0.12);
+}
+.tl-wave-none::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.45);
 }
 
 /* A selected block (single or multi-select) gets a bright ring. */

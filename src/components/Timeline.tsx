@@ -11,6 +11,7 @@ import { paramColor } from "../lib/paramColors";
 import { mediaKind } from "../lib/media";
 import { mediaDropTarget } from "../lib/videoSequence";
 import { isTucked, tuckedSounds } from "../lib/linkedSound";
+import { waveformError } from "../lib/waveform";
 
 /** Smallest range a layer block may be trimmed to (ms) — matches the Rust floor. */
 const MIN_SPAN_MS = 50;
@@ -1271,6 +1272,16 @@ export default function Timeline({
             const span = Math.max(1, eMs - sMs);
             const childRows = gridChildRows(l);
             const showChildren = gridExpanded(l);
+            // "" marks a sound whose waveform couldn't be decoded on this PC; the
+            // block's tooltip then carries the reason.
+            let failedWave: string | null = null;
+            if (l.kind.kind === "audio" && waveforms?.[l.kind.src] === "") failedWave = l.kind.src;
+            else if (l.kind.kind === "video")
+              for (const snd of tuckedSounds(project.layers, l.id))
+                if (snd.kind.kind === "audio" && waveforms?.[snd.kind.src] === "") {
+                  failedWave = snd.kind.src;
+                  break;
+                }
             return (
               <Fragment key={l.id}>
               <div
@@ -1281,7 +1292,11 @@ export default function Timeline({
                   data-lid={l.id}
                   className={"tl-block" + (selectedIds.includes(l.id) ? " selected" : "")}
                   style={{ left: `${left}%`, width: `${width}%`, background: kindColor(l) }}
-                  title={`${(sMs / 1000).toFixed(2)}s – ${(eMs / 1000).toFixed(2)}s · drag to move, edges to trim · right-click for effects`}
+                  title={`${(sMs / 1000).toFixed(2)}s – ${(eMs / 1000).toFixed(2)}s · drag to move, edges to trim · right-click for effects${
+                    failedWave != null
+                      ? `\nSound — waveform unavailable on this PC: ${waveformError(failedWave) ?? "unknown reason"}`
+                      : ""
+                  }`}
                   onMouseDown={(e) => startBlockDrag(e, l, "move")}
                   onDoubleClick={() => l.kind.kind === "group" && onEnterGroup(l.id)}
                   onContextMenu={(e) => {
@@ -1312,24 +1327,28 @@ export default function Timeline({
                       title={`Out: ${l.transitionOut.engine ?? l.transitionOut.kind} · ${(l.transitionOut.durMs / 1000).toFixed(2)}s`}
                     />
                   )}
-                  {l.kind.kind === "audio" && waveforms?.[l.kind.src] && (
+                  {l.kind.kind === "audio" && waveforms?.[l.kind.src] != null && (
                     <div
-                      className="tl-wave"
-                      style={{ backgroundImage: `url(${waveforms[l.kind.src]})` }}
+                      className={"tl-wave" + (waveforms[l.kind.src] ? "" : " tl-wave-none")}
+                      style={
+                        waveforms[l.kind.src]
+                          ? { backgroundImage: `url(${waveforms[l.kind.src]})` }
+                          : undefined
+                      }
                     />
                   )}
                   {l.kind.kind === "video" &&
                     tuckedSounds(project.layers, l.id).map((sound) => {
                       const wave = sound.kind.kind === "audio" ? waveforms?.[sound.kind.src] : undefined;
-                      if (!wave) return null;
+                      if (wave == null) return null;
                       return (
                         <div
                           key={`w${sound.id}`}
-                          className="tl-wave tl-wave-tucked"
+                          className={"tl-wave tl-wave-tucked" + (wave ? "" : " tl-wave-none")}
                           style={{
                             left: `${((sound.startMs - l.startMs) / span) * 100}%`,
                             width: `${((sound.endMs - sound.startMs) / span) * 100}%`,
-                            backgroundImage: `url(${wave})`,
+                            ...(wave ? { backgroundImage: `url(${wave})` } : {}),
                           }}
                         />
                       );

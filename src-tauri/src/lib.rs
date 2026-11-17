@@ -8,6 +8,7 @@ mod analyze;
 mod eval;
 mod linked_sound;
 mod mcp_bridge;
+mod mp4_tracks;
 mod sam_service;
 mod model;
 mod subtitles;
@@ -966,6 +967,15 @@ fn add_video_layer(
     state.snapshot(&project);
     add_video_in(&mut project, path, width, height, duration_ms, with_audio.unwrap_or(false), tucked);
     project.clone()
+}
+
+/// Whether a video has a sound track, read from its MP4/MOV track list without
+/// decoding; None = unknown (other container / unreadable).
+#[tauri::command]
+fn media_has_audio(path: String) -> Option<bool> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut r = std::io::BufReader::new(file);
+    mp4_tracks::has_sound_track(&mut r)
 }
 
 /// Show a video's own sound rows (flag off, rows moved directly above it) or hide
@@ -7424,6 +7434,7 @@ pub fn run() {
             evaluate_at,
             add_image_layer,
             add_video_layer,
+            media_has_audio,
             add_audio_layer,
             set_audio_track_shown,
             subtitles::import_subtitles,

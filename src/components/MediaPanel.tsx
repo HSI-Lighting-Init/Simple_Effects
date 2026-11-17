@@ -18,6 +18,8 @@ interface Props {
   onRemove: (path: string) => void;
   /** The pointer moved past the drag threshold: a drag of `path` has started. */
   onDragToTimeline: (path: string) => void;
+  /** Files loaded so far while the bin is importing; null when idle. */
+  progress?: { done: number; total: number } | null;
 }
 
 /** Just the file name (for the label under each thumbnail). */
@@ -26,7 +28,7 @@ function baseName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-export default function MediaPanel({ media, thumbs, onImport, onAddToTimeline, onRemove, onDragToTimeline }: Props) {
+export default function MediaPanel({ media, thumbs, onImport, onAddToTimeline, onRemove, onDragToTimeline, progress }: Props) {
   // Click adds; dragging past a few pixels hands the path to the timeline, which
   // owns the drop. Not HTML5 drag-and-drop: WebView2 swallows it on Windows.
   const startPress = (e: ReactMouseEvent, path: string) => {
@@ -61,6 +63,17 @@ export default function MediaPanel({ media, thumbs, onImport, onAddToTimeline, o
           ＋ Import
         </button>
       </div>
+      {progress && progress.total > 0 && (
+        <div className="media-progress" role="progressbar" aria-valuemin={0} aria-valuemax={progress.total} aria-valuenow={progress.done}>
+          <span className="media-progress-label">
+            Importing {Math.min(progress.done + 1, progress.total)} of {progress.total}…
+          </span>
+          <div className="media-progress-track">
+            {/* A sliver even at 0 so a single big file doesn't look stuck. */}
+            <div className="media-progress-fill" style={{ width: `${Math.max(6, (progress.done / progress.total) * 100)}%` }} />
+          </div>
+        </div>
+      )}
       {media.length === 0 ? (
         <div className="media-empty">
           Drop images here

@@ -4,6 +4,7 @@
 // audio stream out of the container. Everything is cached by source path so we
 // decode each file at most once per session.
 import { getMediaUrl } from "./media";
+import { mediaHasAudio } from "./api";
 
 /** ~1000 magnitude buckets (0..1) is plenty to draw a smooth waveform at any zoom. */
 const BUCKETS = 1000;
@@ -16,6 +17,13 @@ export interface Peaks {
 
 const peakCache = new Map<string, Promise<Peaks | null>>();
 const pngCache = new Map<string, string>();
+// Why the last decode of a source failed, so a silent strip can say why.
+const waveErrors = new Map<string, string>();
+
+/** Why the last waveform decode of `src` failed, or null when it didn't. */
+export function waveformError(src: string): string | null {
+  return waveErrors.get(src) ?? null;
+}
 
 // A single shared AudioContext (creating many trips the per-context limit).
 let ctx: AudioContext | null = null;
@@ -36,12 +44,18 @@ export function loadAudioPeaks(src: string): Promise<Peaks | null> {
   if (hit) return hit;
   const job = (async (): Promise<Peaks | null> => {
     const ac = audioCtx();
-    if (!ac) return null;
+    if (!ac) {
+      waveErrors.set(src, "Web Audio isn't available");
+      return null;
+    }
     try {
       const url = await getMediaUrl(src);
       const buf = await (await fetch(url)).arrayBuffer();
       const audio = await ac.decodeAudioData(buf);
-      if (!audio || audio.length === 0 || audio.numberOfChannels === 0) return null;
+      if (!audio || audio.length === 0 || audio.numberOfChannels === 0) {
+        waveErrors.set(src, "no audio data decoded");
+        return null;
+      }
       const chan = audio.getChannelData(0);
       const step = Math.max(1, Math.floor(chan.length / BUCKETS));
       const mags: number[] = [];
@@ -59,8 +73,10 @@ export function loadAudioPeaks(src: string): Promise<Peaks | null> {
       }
       // Normalise so quiet clips still show a readable waveform.
       for (let i = 0; i < mags.length; i++) mags[i] = mags[i] / globalMax;
+      waveErrors.delete(src);
       return { mags, durationMs: Math.round(audio.duration * 1000) };
-    } catch {
+    } catch (e) {
+      waveErrors.set(src, String(e));
       return null;
     }
   })();
@@ -133,8 +149,11 @@ export async function waveformPng(src: string): Promise<string | null> {
   return url;
 }
 
-/** Whether `src` has a decodable audio track (used at import time to decide
- *  whether to split off an audio layer). */
+/** Whether `src` has a sound track. The backend reads an MP4/MOV's track list
+ *  (no decoding, so it works where the browser decoder fails); only when it
+ *  can't (another container, unreadable header) decode the audio here. */
 export async function hasAudio(src: string): Promise<boolean> {
+  const known = await mediaHasAudio(src).catch(() => null);
+  if (known != null) return known;
   return (await loadAudioPeaks(src)) != null;
 }

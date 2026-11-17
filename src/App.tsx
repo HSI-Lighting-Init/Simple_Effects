@@ -433,6 +433,9 @@ export default function App() {
   const [mediaThumbs, setMediaThumbs] = useState<Record<string, string>>({});
   // A Media-bin item being dragged toward the timeline (absolute path), or null.
   const [mediaDragPath, setMediaDragPath] = useState<string | null>(null);
+  // Media-bin loading bar: files whose thumbnail is done / queued (null = idle).
+  const [importProgress, setImportProgress] = useState<{ done: number; total: number } | null>(null);
+  const importCountRef = useRef({ done: 0, total: 0 });
   const endMediaDrag = useCallback(() => setMediaDragPath(null), []);
   // Waveform strips for audio layers, source path → PNG data URL. Loaded lazily
   // from the decoded audio; `wavesLoadedRef` guards against re-decoding.
@@ -951,20 +954,31 @@ export default function App() {
   // Load thumbnails for a set of media paths (image data URLs / video poster
   // frames) into the shared caches. Best-effort — a failed thumbnail just leaves
   // the placeholder icon.
+  // Each thumbnail shows as soon as it's ready, and the bin's bar counts files
+  // done (one shared count, so overlapping imports add up).
   const loadMediaThumbs = useCallback(async (paths: string[]) => {
-    const imgThumbs: Record<string, string> = {};
-    const vidThumbs: Record<string, string> = {};
+    const count = importCountRef.current;
+    count.total += paths.length;
+    setImportProgress({ ...count });
     for (const src of paths) {
       const kind = mediaKind(src);
       try {
-        if (kind === "image") imgThumbs[src] = await loadImageDataUrl(src);
-        else if (kind === "video") vidThumbs[src] = await getVideoPoster(src);
+        if (kind === "image") {
+          const url = await loadImageDataUrl(src);
+          setImages((m) => ({ ...m, [src]: url }));
+        } else if (kind === "video") {
+          const url = await getVideoPoster(src);
+          setMediaThumbs((m) => ({ ...m, [src]: url }));
+        }
       } catch (e) {
         console.warn("thumbnail", src, e);
       }
+      count.done += 1;
+      if (count.done >= count.total) {
+        count.done = count.total = 0;
+        setImportProgress(null);
+      } else setImportProgress({ ...count });
     }
-    if (Object.keys(imgThumbs).length) setImages((m) => ({ ...m, ...imgThumbs }));
-    if (Object.keys(vidThumbs).length) setMediaThumbs((m) => ({ ...m, ...vidThumbs }));
   }, []);
 
   // Add image/video/audio files to the bin (dedup) and load their thumbnails.
@@ -1111,7 +1125,7 @@ export default function App() {
       if (wavesLoadedRef.current.has(src)) continue;
       wavesLoadedRef.current.add(src);
       waveformPng(src)
-        .then((png) => png && setWaveforms((prev) => ({ ...prev, [src]: png })))
+        .then((png) => setWaveforms((prev) => ({ ...prev, [src]: png ?? "" })))
         .catch(() => {});
     }
   }, [project]);
@@ -4814,6 +4828,7 @@ export default function App() {
           onAddToTimeline={onAddMediaToTimeline}
           onRemove={onRemoveMedia}
           onDragToTimeline={setMediaDragPath}
+          progress={importProgress}
         />
         <div
           className="v-resizer"

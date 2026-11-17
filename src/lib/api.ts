@@ -320,6 +320,11 @@ export const addVideoLayer = (path: string, width: number, height: number, durat
 export const addAudioLayer = (path: string, durationMs: number) =>
   invoke<Project>("add_audio_layer", { path, durationMs });
 
+/** Whether a video has a sound track, read from its MP4/MOV track list (null =
+ *  unknown: other container or unreadable). */
+export const mediaHasAudio = (path: string): Promise<boolean | null> =>
+  invoke<boolean | null>("media_has_audio", { path });
+
 /** Show a video's own sound row above it, or hide it back into the video row. */
 export const setAudioTrackShown = (layerId: number, shown: boolean) =>
   invoke<Project>("set_audio_track_shown", { layerId, shown });
