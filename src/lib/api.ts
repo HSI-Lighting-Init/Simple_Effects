@@ -311,13 +311,18 @@ export const evaluateAt = (tMs: number) =>
 export const addImageLayer = (path: string) =>
   invoke<Project>("add_image_layer", { path });
 
-/** Add a video layer (natural size + duration are read on the frontend). */
-export const addVideoLayer = (path: string, width: number, height: number, durationMs: number) =>
-  invoke<Project>("add_video_layer", { path, width, height, durationMs });
+/** Add a video layer (natural size + duration are read on the frontend).
+ *  `withAudio` also adds its sound, tucked into the video's row. */
+export const addVideoLayer = (path: string, width: number, height: number, durationMs: number, withAudio = false) =>
+  invoke<Project>("add_video_layer", { path, width, height, durationMs, withAudio });
 
 /** Add an audio layer (duration is read on the frontend). */
 export const addAudioLayer = (path: string, durationMs: number) =>
   invoke<Project>("add_audio_layer", { path, durationMs });
+
+/** Show a video's own sound row above it, or hide it back into the video row. */
+export const setAudioTrackShown = (layerId: number, shown: boolean) =>
+  invoke<Project>("set_audio_track_shown", { layerId, shown });
 
 /** Re-time a just-added layer to start at `startMs` and slot it above `aboveId`
  *  (null = top). `ripple` pushes later layers right by its length. Folds into the

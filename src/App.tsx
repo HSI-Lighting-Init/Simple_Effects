@@ -20,7 +20,8 @@ import {
   IMPORT_EXTENSIONS,
 } from "./lib/media";
 import { hasAudio, waveformPng } from "./lib/waveform";
-import { videoEndMs } from "./lib/videoSequence";
+import { clipsEndMs } from "./lib/videoSequence";
+import { isTucked, linkedSounds, soundOwner, tuckedSounds } from "./lib/linkedSound";
 import RecorderPanel from "./components/RecorderPanel";
 import ContextMenu from "./components/ContextMenu";
 import MenuBar, { type MenuDef } from "./components/MenuBar";
@@ -52,6 +53,7 @@ import {
   pasteTextLook,
   addVideoLayer,
   addAudioLayer,
+  setAudioTrackShown,
   placeLayer,
   combineLayers,
   explodeLayer,
@@ -1147,17 +1149,20 @@ export default function App() {
     const kind = mediaKind(path);
     // Capture the layer selected at add-time — the new one slots just above it.
     const above = selectedIdRef.current;
-    // Videos without an explicit time go after the last video (or at the playhead
-    // when there is none). Computed before the add so the new layer isn't counted.
-    const seqEnd = kind === "video" && atMs == null ? videoEndMs(projectRef.current?.layers ?? []) : null;
+    // Videos and images without an explicit time go after the last clip (or at the
+    // playhead when there is none). Computed before the add so it isn't counted.
+    const seqEnd =
+      (kind === "video" || kind === "image") && atMs == null
+        ? clipsEndMs(projectRef.current?.layers ?? [])
+        : null;
     const at = seqEnd ?? atMs ?? Math.round(timeRef.current);
     const ripplePlace = seqEnd != null || ripple;
     let p: Project;
-    let videoDurationMs = 0;
     if (kind === "video") {
       const meta = await getVideoMeta(path).catch(() => ({ width: 1280, height: 720, durationMs: 0 }));
-      videoDurationMs = meta.durationMs;
-      p = await addVideoLayer(path, meta.width, meta.height, meta.durationMs);
+      // Probe first: the backend adds the video's sound tucked into its row.
+      const withAudio = await hasAudio(path).catch(() => false);
+      p = await addVideoLayer(path, meta.width, meta.height, meta.durationMs, withAudio);
     } else if (kind === "audio") {
       const meta = await getAudioMeta(path).catch(() => ({ durationMs: 0 }));
       p = await addAudioLayer(path, meta.durationMs);
@@ -1166,23 +1171,12 @@ export default function App() {
       await resolveImages(p);
     }
     const newId = p.layers.length ? p.layers[p.layers.length - 1].id : null;
-    // Drop it at the playhead (videos: after the last video) and directly above
+    // Drop it at the playhead (clips: after the last clip) and directly above
     // the previously selected layer.
     if (newId != null) {
       // grow: the clip keeps its full length and the comp stretches to hold it.
       p = await placeLayer(newId, at, above, true, ripplePlace);
       setSelectedId(newId);
-    }
-    // A video with an audio track gets its own editable audio layer, aligned to
-    // the video. Preview sound still comes from the video element, but this is
-    // what the exporter muxes — so the video's audio now lands in the output too
-    // (and the layer shows its waveform).
-    if (kind === "video" && newId != null && (await hasAudio(path).catch(() => false))) {
-      let pa = await addAudioLayer(path, videoDurationMs);
-      const audId = pa.layers.length ? pa.layers[pa.layers.length - 1].id : null;
-      // No ripple: the video's placement already made room for this row.
-      if (audId != null) pa = await placeLayer(audId, at, newId, true);
-      p = pa;
     }
     setProject(p);
     durationRef.current = p.durationMs;
@@ -1190,6 +1184,26 @@ export default function App() {
     recordAction("add_media", { layerId: newId, path, kind });
     return newId;
   }, [resolveImages, applyTime, recordAction]);
+
+  // Show or hide a video's own sound row. Hiding tucks the rows away, so a
+  // selected sound moves the selection to its video — nothing invisible stays
+  // selected (Delete would remove something you can't see).
+  const onSetAudioTrackShown = useCallback(async (layerId: number, shown: boolean) => {
+    const p = await setAudioTrackShown(layerId, shown);
+    setProject(p);
+    recordAction("audio_track", { layerId, shown });
+    if (shown) return;
+    const video =
+      p.layers.find((l) => l.id === layerId)?.kind.kind === "video"
+        ? layerId
+        : soundOwner(p.layers, layerId);
+    if (video == null) return;
+    const sounds = linkedSounds(p.layers, video).map((l) => l.id);
+    if (selectedIdsRef.current.some((id) => sounds.includes(id))) {
+      setSelectedId(video);
+      setSelectedIds([video]);
+    }
+  }, [recordAction]);
 
   // Probe a file into the agent's MediaAsset shape (kind + duration + pixel size).
   const probeAsset = useCallback(async (path: string): Promise<MediaAsset> => {
@@ -2804,9 +2818,12 @@ export default function App() {
         : selectedIdRef.current != null
           ? [selectedIdRef.current]
           : [];
-      const sel = new Set(ids.filter((id) => chosen.includes(id)));
+      // Tucked sounds have no row: step over them (they ride under their video),
+      // or a click could swap with one and seem to do nothing.
+      const visible = ids.filter((id) => !isTucked(p.layers.find((l) => l.id === id)!, p.layers));
+      const sel = new Set(visible.filter((id) => chosen.includes(id)));
       if (sel.size === 0) return;
-      const arr = ids.slice();
+      let arr = visible.slice();
       if (dir === "up") {
         // Bubble each selected id toward the end, past unselected neighbours.
         for (let i = arr.length - 2; i >= 0; i--)
@@ -2815,7 +2832,8 @@ export default function App() {
         for (let i = 1; i < arr.length; i++)
           if (sel.has(arr[i]) && !sel.has(arr[i - 1])) [arr[i], arr[i - 1]] = [arr[i - 1], arr[i]];
       }
-      if (arr.every((id, i) => id === ids[i])) return; // already at the edge
+      if (arr.every((id, i) => id === visible[i])) return; // already at the edge
+      arr = arr.flatMap((id) => [...tuckedSounds(p.layers, id).map((s) => s.id), id]);
       await onReorder(arr);
     },
     [onReorder]
@@ -3612,6 +3630,10 @@ export default function App() {
         )
           ids.add(a.id);
       }
+    }
+    // A video's tucked sound comes with it (the backend knows the link).
+    for (const id of chosen) {
+      for (const s of tuckedSounds(p.layers, id)) ids.add(s.id);
     }
     const layers = p.layers.filter((l) => ids.has(l.id));
     if (!layers.some((l) => l.kind.kind !== "audio")) {
@@ -5117,9 +5139,26 @@ export default function App() {
                             label: "💬 Generate Subtitles from Speech…",
                             onClick: () => ctxLayer && setSubtitlesFor({ id: ctxLayer.id, name: ctxLayer.name }),
                           };
-                      if (lk === "audio") return [subtitlesItem];
-                      if (lk === "image" || lk === "video")
+                      if (lk === "audio") {
+                        const hideItem =
+                          ctxLayer && soundOwner(project.layers, ctxLayer.id) != null
+                            ? [{ label: "♪ Hide audio track", onClick: () => void onSetAudioTrackShown(ctxMenu.layerId!, false) }]
+                            : [];
+                        return [...hideItem, subtitlesItem];
+                      }
+                      if (lk === "image" || lk === "video") {
+                        const linked = ctxLayer ? linkedSounds(project.layers, ctxLayer.id) : [];
+                        const anyTucked = linked.some((l) => isTucked(l, project.layers));
+                        const audioItem = linked.length
+                          ? [
+                              {
+                                label: anyTucked ? "♪ Show audio track" : "♪ Hide audio track",
+                                onClick: () => void onSetAudioTrackShown(ctxMenu.layerId!, anyTucked),
+                              },
+                            ]
+                          : [];
                         return [
+                          ...audioItem,
                           ...(lk === "video" ? [subtitlesItem] : []),
                           { label: "⇄ Replace media…", onClick: () => void onReplaceMedia(ctxMenu.layerId!) },
                           { label: "⤢ Scale to fit", onClick: () => onScaleToFit(ctxMenu.layerId!) },
@@ -5142,6 +5181,7 @@ export default function App() {
                             : []),
                           ...transitions,
                         ];
+                      }
                       if (lk === "text")
                         return [
                           { label: "⧉ Copy Look", onClick: () => onCopyTextLook(ctxMenu.layerId!) },

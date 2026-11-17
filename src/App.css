@@ -2372,6 +2372,13 @@ body {
   pointer-events: none;
 }
 
+/* A tucked sound's waveform in the lower part of its video's block. */
+.tl-wave-tucked {
+  inset: auto;
+  top: 50%;
+  bottom: 0;
+}
+
 /* A selected block (single or multi-select) gets a bright ring. */
 .tl-block.selected {
   opacity: 1;

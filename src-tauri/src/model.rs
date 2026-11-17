@@ -327,6 +327,12 @@ pub enum LayerKind {
         /// Fade the level down over this many ms into the clip's end (0 = none).
         #[serde(default, rename = "fadeOutMs")]
         fade_out_ms: u32,
+        /// The video layer this sound came from (none for a standalone audio row).
+        #[serde(default, rename = "linkedVideo")]
+        linked_video: Option<u32>,
+        /// No row of its own; repeats every edit of its video.
+        #[serde(default)]
+        tucked: bool,
     },
     /// A nested composition ("precomp"): a set of child layers composited as one
     /// unit under this layer's own transform / opacity / effects / transition.

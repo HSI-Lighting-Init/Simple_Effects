@@ -10,6 +10,7 @@ import type { Track } from "../bindings/Track";
 import { paramColor } from "../lib/paramColors";
 import { mediaKind } from "../lib/media";
 import { mediaDropTarget } from "../lib/videoSequence";
+import { isTucked, tuckedSounds } from "../lib/linkedSound";
 
 /** Smallest range a layer block may be trimmed to (ms) — matches the Rust floor. */
 const MIN_SPAN_MS = 50;
@@ -430,7 +431,8 @@ export default function Timeline({
     return () => s.removeEventListener("wheel", handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const layers = [...project.layers].reverse();
+  // A tucked sound has no row of its own; the video draws its waveform instead.
+  const layers = [...project.layers].reverse().filter((l) => !isTucked(l, project.layers));
 
   // Drop layer `dragId` so it sits just *under* `targetId` in z-order. Works in
   // array space (bottom-first), independent of the reversed row display.
@@ -541,7 +543,7 @@ export default function Timeline({
   // the row drag (HTML5 drag-and-drop is swallowed by WebView2 on Windows).
   useEffect(() => {
     if (!mediaDragPath) return;
-    const isVideo = mediaKind(mediaDragPath) === "video";
+    const isClip = mediaKind(mediaDragPath) === "video" || mediaKind(mediaDragPath) === "image";
     const targetAt = (ev: MouseEvent) => {
       const s = scrollRef.current;
       const el = tracksRef.current;
@@ -556,7 +558,7 @@ export default function Timeline({
         return null;
       const rect = el.getBoundingClientRect();
       const pct = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
-      return mediaDropTarget(project.layers, Math.round(pct * dur), isVideo);
+      return mediaDropTarget(project.layers, Math.round(pct * dur), isClip);
     };
     const move = (ev: MouseEvent) => setDropHint(targetAt(ev)?.ms ?? null);
     const up = (ev: MouseEvent) => {
@@ -630,13 +632,21 @@ export default function Timeline({
       orig.set(gid, { s: L.startMs, e: L.endMs });
       groupMinStart = Math.min(groupMinStart, L.startMs);
       groupMaxEnd = Math.max(groupMaxEnd, L.endMs);
+      // A tucked sound travels invisibly with its video: the pair stops together
+      // at 0:00 and at the comp end, even when the sound starts before the video.
+      if (mode === "move") {
+        for (const s of tuckedSounds(project.layers, gid)) {
+          groupMinStart = Math.min(groupMinStart, s.startMs);
+          groupMaxEnd = Math.max(groupMaxEnd, s.endMs);
+        }
+      }
     }
 
     // Snap targets: the comp bounds, the playhead, and every non-moving layer's edges.
     const thresholdMs = (7 / trackW) * dur;
     const snapTargets = [0, dur, time];
     for (const o of project.layers) {
-      if (!groupIds.includes(o.id)) snapTargets.push(o.startMs, o.endMs);
+      if (!groupIds.includes(o.id) && !isTucked(o, project.layers)) snapTargets.push(o.startMs, o.endMs);
     }
     const snap = (v: number) => {
       let best = v;
@@ -1308,6 +1318,22 @@ export default function Timeline({
                       style={{ backgroundImage: `url(${waveforms[l.kind.src]})` }}
                     />
                   )}
+                  {l.kind.kind === "video" &&
+                    tuckedSounds(project.layers, l.id).map((sound) => {
+                      const wave = sound.kind.kind === "audio" ? waveforms?.[sound.kind.src] : undefined;
+                      if (!wave) return null;
+                      return (
+                        <div
+                          key={`w${sound.id}`}
+                          className="tl-wave tl-wave-tucked"
+                          style={{
+                            left: `${((sound.startMs - l.startMs) / span) * 100}%`,
+                            width: `${((sound.endMs - sound.startMs) / span) * 100}%`,
+                            backgroundImage: `url(${wave})`,
+                          }}
+                        />
+                      );
+                    })}
                   {isTall(l) && layerThumb(l) && (
                     <div
                       className="tl-thumb"

@@ -193,4 +193,12 @@ fadeInMs: number,
 /**
  * Fade the level down over this many ms into the clip's end (0 = none).
  */
-fadeOutMs: number, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", } | { "kind": "shape2d", style: Shape2DStyle, };
+fadeOutMs: number, 
+/**
+ * The video layer this sound came from (none for a standalone audio row).
+ */
+linkedVideo: number | null, 
+/**
+ * No row of its own; repeats every edit of its video.
+ */
+tucked: boolean, } | { "kind": "group", children: Array<Layer>, } | { "kind": "adjustment", } | { "kind": "shape2d", style: Shape2DStyle, };

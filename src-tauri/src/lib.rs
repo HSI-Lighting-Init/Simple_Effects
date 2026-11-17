@@ -6,6 +6,7 @@
 
 mod analyze;
 mod eval;
+mod linked_sound;
 mod mcp_bridge;
 mod sam_service;
 mod model;
@@ -40,6 +41,9 @@ fn default_new_layer_end(duration_ms: u32) -> u32 {
 
 /// Longest composition the app allows (matches `set_comp_duration`).
 const MAX_COMP_MS: u32 = 3_600_000;
+
+/// Default length of a newly added image layer (ms).
+const NEW_IMAGE_MS: u32 = 3_000;
 
 /// Latest end time across the top-level layers (0 when there are none).
 fn layers_end(p: &Project) -> u32 {
@@ -848,7 +852,7 @@ fn add_image_layer(state: State<AppState>, path: String) -> Project {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Image".into());
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
-    let end_ms = default_new_layer_end(project.duration_ms);
+    let end_ms = NEW_IMAGE_MS.min(MAX_COMP_MS);
 
     // Read the image header for its natural size, then scale it to *contain*
     // within the comp so big photos don't overflow the frame.
@@ -876,26 +880,25 @@ fn add_image_layer(state: State<AppState>, path: String) -> Project {
     project.clone()
 }
 
-/// Add a video layer. The frontend reads the video's natural size + duration
-/// (via an `HTMLVideoElement`) and passes them in, so Rust can scale-to-fit like
-/// an image without needing a media decoder. Undoable.
-#[tauri::command]
-fn add_video_layer(
-    state: State<AppState>,
+/// Add a video to the current scope, optionally with its own sound. The sound is
+/// pushed first so the video stays the last (newest) layer; callers take that as
+/// the new id. Returns the video's id.
+fn add_video_in(
+    project: &mut Project,
     path: String,
     width: u32,
     height: u32,
     duration_ms: u32,
-) -> Project {
-    let mut project = state.project.lock().unwrap();
-    state.snapshot(&project);
+    with_audio: bool,
+    tucked: bool,
+) -> u32 {
     let next_id = max_layer_id(&project.layers) + 1;
     let name = std::path::Path::new(&path)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Video".into());
     let (cx, cy) = (project.width as f32 / 2.0, project.height as f32 / 2.0);
-    let was_fit = comp_is_fit(&project);
+    let was_fit = comp_is_fit(project);
     // The clip keeps its own full length when known (the comp stretches to fit
     // it below), else the standard 25% default.
     let end_ms = if duration_ms > 0 {
@@ -908,8 +911,24 @@ fn add_video_layer(
     let mut transform = Transform::at(cx, cy);
     transform.scale_x = Track::constant(fit);
     transform.scale_y = Track::constant(fit);
+    let video_id = next_id;
+    if with_audio {
+        project.layers.push(Layer {
+            id: video_id + 1,
+            name: name.clone(),
+            start_ms: 0,
+            end_ms,
+            kind: LayerKind::Audio { src: path.clone(), duration_ms, in_ms: 0, volume: 1.0, speed: 1.0, reverse: false, fade_in_ms: 0, fade_out_ms: 0, linked_video: Some(video_id), tucked },
+            transform: Transform::at(cx, cy),
+            hidden: false,
+            attach: None,
+            effects: vec![],
+            transition_in: None,
+            transition_out: None,
+        });
+    }
     project.layers.push(Layer {
-        id: next_id,
+        id: video_id,
         name,
         start_ms: 0,
         end_ms,
@@ -922,9 +941,45 @@ fn add_video_layer(
         transition_out: None,
     });
     if duration_ms > 0 {
-        refit_comp(&mut project, was_fit);
+        refit_comp(project, was_fit);
     }
+    video_id
+}
+
+/// Add a video layer. The frontend reads the video's natural size + duration
+/// (via an `HTMLVideoElement`) and passes them in, so Rust can scale-to-fit like
+/// an image without needing a media decoder. `with_audio` also adds the video's
+/// own sound in the same undo step. Undoable.
+#[tauri::command]
+fn add_video_layer(
+    state: State<AppState>,
+    path: String,
+    width: u32,
+    height: u32,
+    duration_ms: u32,
+    with_audio: Option<bool>,
+) -> Project {
+    // Inside a group the sound stays shown: sound there doesn't play today, so
+    // tucking it would hide it silently.
+    let tucked = state.nav.lock().unwrap().is_empty();
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    add_video_in(&mut project, path, width, height, duration_ms, with_audio.unwrap_or(false), tucked);
     project.clone()
+}
+
+/// Show a video's own sound rows (flag off, rows moved directly above it) or hide
+/// them back into the video's row. `layer_id` may be the video or one of its
+/// sounds. Undoable.
+#[tauri::command]
+fn set_audio_track_shown(state: State<AppState>, layer_id: u32, shown: bool) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    // Work on a clone first so a refusal leaves no undo step behind.
+    let mut layers = project.layers.clone();
+    linked_sound::set_shown(&mut layers, layer_id, shown)?;
+    state.snapshot(&project);
+    project.layers = layers;
+    Ok(project.clone())
 }
 
 /// Add an audio layer (no visual). `duration_ms` is read on the frontend. Undoable.
@@ -949,7 +1004,7 @@ fn add_audio_layer(state: State<AppState>, path: String, duration_ms: u32) -> Pr
         name,
         start_ms: 0,
         end_ms,
-        kind: LayerKind::Audio { src: path, duration_ms, in_ms: 0, volume: 1.0, speed: 1.0, reverse: false, fade_in_ms: 0, fade_out_ms: 0 },
+        kind: LayerKind::Audio { src: path, duration_ms, in_ms: 0, volume: 1.0, speed: 1.0, reverse: false, fade_in_ms: 0, fade_out_ms: 0, linked_video: None, tucked: false },
         transform: Transform::at(cx, cy),
         hidden: false,
         attach: None,
@@ -1025,6 +1080,8 @@ fn set_clip_speed(state: State<AppState>, layer_id: u32, speed: f32) -> Result<P
             _ => {}
         }
     }
+    // A tucked sound follows: same speed, rescaled length and offset.
+    linked_sound::follow_speed(&mut project.layers, layer_id, old_speed, new_speed);
     refit_comp(&mut project, was_fit);
     Ok(project.clone())
 }
@@ -1044,6 +1101,7 @@ fn set_clip_reverse(state: State<AppState>, layer_id: u32, reverse: bool) -> Res
         LayerKind::Audio { reverse: r, .. } => *r = reverse,
         _ => return Err("not an audio/video layer".into()),
     }
+    linked_sound::follow_reverse(&mut project.layers, layer_id, reverse);
     Ok(project.clone())
 }
 
@@ -1310,14 +1368,23 @@ fn set_layer_range(
 ) -> Result<Project, String> {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
+    set_range_in(&mut project, layer_id, start_ms, end_ms, in_ms)?;
+    Ok(project.clone())
+}
+
+/// The body of `set_layer_range` after its snapshot: re-time one layer, then
+/// carry a tucked sound along by the same edge moves (see `follow_range`).
+fn set_range_in(project: &mut Project, layer_id: u32, start_ms: u32, end_ms: u32, in_ms: Option<u32>) -> Result<(), String> {
     let dur = project.duration_ms.max(MIN_SPAN_MS);
+    let (old_start, old_end, old_in) = {
+        let l = project.layers.iter().find(|l| l.id == layer_id).ok_or("layer not found")?;
+        (l.start_ms, l.end_ms, layer_in(l))
+    };
     let layer = project
         .layers
         .iter_mut()
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
-    let old_start = layer.start_ms;
-    let old_end = layer.end_ms;
     // End first (capped to the comp), then start kept at least MIN_SPAN behind it.
     let mut e = end_ms.min(dur);
     let mut s = start_ms.min(e.saturating_sub(MIN_SPAN_MS));
@@ -1357,7 +1424,24 @@ fn set_layer_range(
         let max_in = duration_ms.saturating_sub(span);
         *in_ms = new_in.min(max_in);
     }
-    Ok(project.clone())
+    let (ns, ne, ni) = (layer.start_ms, layer.end_ms, layer_in(layer));
+    linked_sound::follow_range(
+        &mut project.layers,
+        layer_id,
+        ns as i64 - old_start as i64,
+        ne as i64 - old_end as i64,
+        ni as i64 - old_in as i64,
+        dur,
+    );
+    Ok(())
+}
+
+/// A layer's source in-point (0 for kinds that have none).
+fn layer_in(l: &Layer) -> u32 {
+    match &l.kind {
+        LayerKind::Video { in_ms, .. } | LayerKind::Audio { in_ms, .. } => *in_ms,
+        _ => 0,
+    }
 }
 
 /// Retime a keyframe: move every key sitting at `from_ms` (one timeline diamond,
@@ -1500,6 +1584,10 @@ fn place_layer(
 }
 
 fn place_in_comp(project: &mut Project, layer_id: u32, start_ms: u32, above_id: Option<u32>, grow: bool, ripple: bool) -> Result<(), String> {
+    let (old_start, old_end) = {
+        let l = project.layers.iter().find(|l| l.id == layer_id).ok_or("layer not found")?;
+        (l.start_ms, l.end_ms)
+    };
     // `ripple`: inserting media mid-timeline pushes everything that starts at or
     // after the insert point right, so later clips still play in order. Runs
     // before the grow / re-time below, which then sees the restored full span.
@@ -1517,7 +1605,23 @@ fn place_in_comp(project: &mut Project, layer_id: u32, start_ms: u32, above_id: 
                 _ => l.end_ms.saturating_sub(l.start_ms).max(MIN_SPAN_MS),
             })
             .ok_or("layer not found")?;
-        for l in project.layers.iter_mut().filter(|l| l.id != layer_id && l.start_ms >= start_ms) {
+        // The videos that move, plus each one's tucked sound (chosen BEFORE any
+        // mutation): a sound shifts exactly when its video does, even if the
+        // sound itself starts on the other side of the insert point.
+        let mut ids: Vec<u32> = project
+            .layers
+            .iter()
+            .filter(|l| l.id != layer_id && l.start_ms >= start_ms && !linked_sound::is_tucked(&project.layers, l))
+            .map(|l| l.id)
+            .collect();
+        for v in ids.clone() {
+            for s in linked_sound::tucked_sounds(&project.layers, v) {
+                if !ids.contains(&s) {
+                    ids.push(s);
+                }
+            }
+        }
+        for l in project.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
             shift_layer_time(l, span as i64);
         }
         if let Some(l) = project.layers.iter_mut().find(|l| l.id == layer_id) {
@@ -1552,10 +1656,25 @@ fn place_in_comp(project: &mut Project, layer_id: u32, start_ms: u32, above_id: 
         layer.start_ms = s.min(e.saturating_sub(MIN_SPAN_MS));
         layer.end_ms = e;
     }
-    // Re-stack: pull the layer out and reinsert just above `above_id`.
+    // A video's tucked sound arrives with it (moves by the same amount).
+    let (new_start, new_end) = {
+        let l = project.layers.iter().find(|l| l.id == layer_id).ok_or("layer not found")?;
+        (l.start_ms, l.end_ms)
+    };
+    linked_sound::follow_range(
+        &mut project.layers,
+        layer_id,
+        new_start as i64 - old_start as i64,
+        new_end as i64 - old_end as i64,
+        0,
+        dur,
+    );
+    // Re-stack: pull the layer out and reinsert just above `above_id` — or above
+    // the top of a video's shown sound run, so a new clip never splits them.
+    let anchor = above_id.map(|aid| linked_sound::stack_anchor(&project.layers, aid));
     if let Some(from) = project.layers.iter().position(|l| l.id == layer_id) {
         let layer = project.layers.remove(from);
-        let insert_at = match above_id.and_then(|aid| project.layers.iter().position(|l| l.id == aid)) {
+        let insert_at = match anchor.and_then(|aid| project.layers.iter().position(|l| l.id == aid)) {
             Some(ai) => ai + 1, // directly above the reference layer
             None => project.layers.len(), // top
         };
@@ -1584,6 +1703,8 @@ fn combine_layers(state: State<AppState>, ids: Vec<u32>) -> Result<Project, Stri
         return Err("select at least two layers to combine".into());
     }
     state.snapshot(&project);
+    // Grouped videos leave their sound outside, as an ordinary row.
+    linked_sound::untuck_members(&mut project.layers, &ids);
     let top_pos = *members.last().unwrap();
     let (mut start_ms, mut end_ms) = (u32::MAX, 0u32);
     // Remove from the top down so earlier indices stay valid; collect in order.
@@ -1861,6 +1982,8 @@ fn set_layer_hidden(
         .find(|l| l.id == layer_id)
         .ok_or("layer not found")?;
     layer.hidden = hidden;
+    // One clip: a tucked sound follows the eye.
+    linked_sound::follow_hidden(&mut project.layers, layer_id, hidden);
     Ok(project.clone())
 }
 
@@ -2988,7 +3111,11 @@ fn replace_layer_media(
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
     match replace_in(&mut project.layers, layer_id, &path, new_is_image, nw, nh, duration_ms, cover) {
-        Some(true) => Ok(project.clone()),
+        Some(true) => {
+            // The old file's sound stays as an ordinary row, no longer linked.
+            linked_sound::release_sounds(&mut project.layers, layer_id);
+            Ok(project.clone())
+        }
         Some(false) => Err("only image or video layers can be replaced".into()),
         None => Err("layer not found".into()),
     }
@@ -6585,9 +6712,14 @@ fn duplicate_layer(state: State<AppState>, layer_id: u32) -> Result<Project, Str
     let mut next = max_layer_id(&project.layers) + 1;
     let mut clone = project.layers[idx].clone();
     reassign_ids(&mut clone, &mut next); // fresh ids for it + any nested children
+    linked_sound::relink_copy(&project.layers[idx], &mut clone);
     clone.name = format!("{} copy", clone.name);
+    let copy_id = clone.id;
     project.layers.insert(idx + 1, clone);
-    reshape_recursive(&mut state.shaped.lock().unwrap(), &project.layers[idx + 1]);
+    linked_sound::duplicate_tucked(&mut project.layers, layer_id, copy_id, &mut next);
+    if let Some(pos) = project.layers.iter().position(|l| l.id == copy_id) {
+        reshape_recursive(&mut state.shaped.lock().unwrap(), &project.layers[pos]);
+    }
     Ok(project.clone())
 }
 
@@ -6610,10 +6742,28 @@ fn split_layer(state: State<AppState>, layer_id: u32, t_ms: u32) -> Result<Proje
         }
     }
     state.snapshot(&project);
-    let orig_start = project.layers[idx].start_ms;
     let mut next = max_layer_id(&project.layers) + 1;
-    let mut second = project.layers[idx].clone();
-    reassign_ids(&mut second, &mut next); // fresh ids for it + any nested children
+    let second_id = split_at(&mut project.layers, idx, t_ms, &mut next)?;
+    linked_sound::after_split(&mut project.layers, layer_id, second_id, t_ms, &mut next);
+    if let Some(pos) = project.layers.iter().position(|l| l.id == second_id) {
+        reshape_recursive(&mut state.shaped.lock().unwrap(), &project.layers[pos]);
+    }
+    Ok(project.clone())
+}
+
+/// Today's split logic, minus the snapshot and reshape: cut `layers[idx]` at
+/// `t_ms`, insert the second piece at `idx + 1` and return its fresh id.
+fn split_at(layers: &mut Vec<Layer>, idx: usize, t_ms: u32, next_id: &mut u32) -> Result<u32, String> {
+    {
+        let l = &layers[idx];
+        if t_ms <= l.start_ms || t_ms >= l.end_ms {
+            return Err("cut point must be inside the layer".into());
+        }
+    }
+    let orig_start = layers[idx].start_ms;
+    let mut second = layers[idx].clone();
+    reassign_ids(&mut second, next_id); // fresh ids for it + any nested children
+    let second_id = second.id;
     second.start_ms = t_ms;
     second.transition_in = None; // it now starts mid-clip
     // A video/audio piece must keep showing the same source frames it showed
@@ -6622,7 +6772,7 @@ fn split_layer(state: State<AppState>, layer_id: u32, t_ms: u32) -> Result<Proje
     // time = in + elapsed*speed; reverse = in + (len - elapsed)*speed), so the
     // timeline offset has to be scaled by speed — using it raw jumps the clip
     // whenever speed != 1.
-    let orig_end = project.layers[idx].end_ms;
+    let orig_end = layers[idx].end_ms;
     let shift_in = |kind: &mut LayerKind, timeline_ms: u32| {
         if let LayerKind::Video { duration_ms, in_ms, speed, .. }
         | LayerKind::Audio { duration_ms, in_ms, speed, .. } = kind
@@ -6640,16 +6790,19 @@ fn split_layer(state: State<AppState>, layer_id: u32, t_ms: u32) -> Result<Proje
         // Reverse plays from the far end of the window down to `in`, so the
         // FIRST piece (the earlier timeline part) starts at the high source
         // time: it needs the advanced in-point; the second piece keeps `in`.
-        shift_in(&mut project.layers[idx].kind, orig_end - t_ms);
+        shift_in(&mut layers[idx].kind, orig_end - t_ms);
     } else {
         // Forward: the second piece continues from the cut.
         shift_in(&mut second.kind, t_ms - orig_start);
     }
-    project.layers[idx].end_ms = t_ms;
-    project.layers[idx].transition_out = None; // it now ends at the cut
-    project.layers.insert(idx + 1, second);
-    reshape_recursive(&mut state.shaped.lock().unwrap(), &project.layers[idx + 1]);
-    Ok(project.clone())
+    layers[idx].end_ms = t_ms;
+    layers[idx].transition_out = None; // it now ends at the cut
+    if matches!(&layers[idx].kind, LayerKind::Group { .. }) {
+        // A copied group's links must point at the copied videos.
+        linked_sound::relink_copy(&layers[idx], &mut second);
+    }
+    layers.insert(idx + 1, second);
+    Ok(second_id)
 }
 
 /// Delete a layer (object). If it's a shape, any layers pinned to it are detached
@@ -6658,6 +6811,8 @@ fn split_layer(state: State<AppState>, layer_id: u32, t_ms: u32) -> Result<Proje
 fn delete_layer(state: State<AppState>, layer_id: u32) -> Project {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
+    // A video's tucked sound goes with it; a shown one stays as an ordinary row.
+    let extra = linked_sound::before_delete(&mut project.layers, &[layer_id]);
     let is_shape = project
         .layers
         .iter()
@@ -6669,8 +6824,14 @@ fn delete_layer(state: State<AppState>, layer_id: u32) -> Project {
             }
         }
     }
-    project.layers.retain(|l| l.id != layer_id);
-    state.shaped.lock().unwrap().remove(&layer_id);
+    project.layers.retain(|l| l.id != layer_id && !extra.contains(&l.id));
+    {
+        let mut shaped = state.shaped.lock().unwrap();
+        shaped.remove(&layer_id);
+        for id in &extra {
+            shaped.remove(id);
+        }
+    }
     project.clone()
 }
 
@@ -6680,6 +6841,8 @@ fn delete_layer(state: State<AppState>, layer_id: u32) -> Project {
 fn delete_layers(state: State<AppState>, layer_ids: Vec<u32>) -> Project {
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
+    // A video's tucked sound goes with it; a shown one stays as an ordinary row.
+    let extra = linked_sound::before_delete(&mut project.layers, &layer_ids);
     for layer_id in &layer_ids {
         let is_shape = project
             .layers
@@ -6693,9 +6856,9 @@ fn delete_layers(state: State<AppState>, layer_ids: Vec<u32>) -> Project {
             }
         }
     }
-    project.layers.retain(|l| !layer_ids.contains(&l.id));
+    project.layers.retain(|l| !layer_ids.contains(&l.id) && !extra.contains(&l.id));
     let mut shaped = state.shaped.lock().unwrap();
-    for id in &layer_ids {
+    for id in layer_ids.iter().chain(extra.iter()) {
         shaped.remove(id);
     }
     project.clone()
@@ -6827,7 +6990,7 @@ fn plan_fast_merge(project: &Project, ids: &[u32], in_ms: u32, out_ms: u32) -> R
                     opacity: op,
                 });
             }
-            LayerKind::Audio { src, duration_ms, in_ms: src_in, volume, speed, reverse, fade_in_ms, fade_out_ms } => {
+            LayerKind::Audio { src, duration_ms, in_ms: src_in, volume, speed, reverse, fade_in_ms, fade_out_ms, .. } => {
                 let spd = if *speed > 0.0 { *speed } else { 1.0 };
                 let source_in = (*src_in as f64 + (cs - l.start_ms) as f64 * spd as f64).round() as u32;
                 let mut play = ce - cs;
@@ -7262,6 +7425,7 @@ pub fn run() {
             add_image_layer,
             add_video_layer,
             add_audio_layer,
+            set_audio_track_shown,
             subtitles::import_subtitles,
             subtitles::whisper_model_ready,
             subtitles::download_whisper_model,
@@ -7861,6 +8025,8 @@ mod fast_merge_tests {
                 reverse: false,
                 fade_in_ms: 0,
                 fade_out_ms: 0,
+                linked_video: None,
+                tucked: false,
             },
             transform: Transform::at(0.0, 0.0),
             hidden: false,

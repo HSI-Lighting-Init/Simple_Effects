@@ -1,25 +1,30 @@
 import type { Layer } from "../bindings/Layer";
 
-/** The latest end time of any video layer (null when there is none). */
-export function videoEndMs(layers: Layer[]): number | null {
+/** Part of the play-one-after-another sequence: a video, or a flat image (an
+ *  image pinned to a 3D shape is a decal, not a clip). */
+const isClipLayer = (l: Layer): boolean =>
+  l.kind.kind === "video" || (l.kind.kind === "image" && l.attach == null);
+
+/** The latest end time of any clip layer (null when there is none). */
+export function clipsEndMs(layers: Layer[]): number | null {
   let end: number | null = null;
   for (const l of layers) {
-    if (l.kind.kind === "video") end = end == null ? l.endMs : Math.max(end, l.endMs);
+    if (isClipLayer(l)) end = end == null ? l.endMs : Math.max(end, l.endMs);
   }
   return end;
 }
 
-/** Where a dropped media file lands: a video snaps to the nearest video edge and
+/** Where a dropped media file lands: a clip snaps to the nearest clip edge and
  *  ripples later layers; anything else lands at the pointer untouched. */
 export function mediaDropTarget(
   layers: Layer[],
   ms: number,
-  isVideo: boolean,
+  isClip: boolean,
 ): { ms: number; ripple: boolean } {
-  if (!isVideo) return { ms, ripple: false };
+  if (!isClip) return { ms, ripple: false };
   const edges: number[] = [];
   for (const l of layers) {
-    if (l.kind.kind === "video") edges.push(l.startMs, l.endMs);
+    if (isClipLayer(l)) edges.push(l.startMs, l.endMs);
   }
   if (edges.length === 0) return { ms, ripple: false };
   let best = edges[0];

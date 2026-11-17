@@ -16,6 +16,7 @@ import { GPU_FX } from "../lib/effects";
 import { makeSyntheticReference } from "../lib/synthetic";
 import { rebuildFromAnalysis, type TemplateAnalysis as RebuildTemplateAnalysis } from "../lib/rebuildFromAnalysis";
 import { matchTransition } from "../lib/transitionMatch";
+import { isTucked } from "../lib/linkedSound";
 import { submitPhrasings, submitTextLines, type ElementTypePhrasing, type TextLineReading } from "./extraction";
 import {
   setCompSize,
@@ -171,6 +172,7 @@ function timelineSummary(p: Project) {
       transitionInDurMs: l.transitionIn?.durMs ?? null,
       transitionInDirection: l.transitionIn?.direction ?? null,
       transitionOut: l.transitionOut?.engine ?? null,
+      tuckedInto: isTucked(l, p.layers) ? (l.kind.kind === "audio" ? l.kind.linkedVideo : null) : null,
     })),
   };
 }
@@ -178,7 +180,7 @@ function timelineSummary(p: Project) {
 export const TOOLS: ToolDef[] = [
   {
     name: "get_timeline",
-    description: "Return the current project: duration, fps, resolution, and every layer (id, name, kind, start/end ms, effects, transitions). Call this before editing and whenever you need current layer ids.",
+    description: "Return the current project: duration, fps, resolution, and every layer (id, name, kind, start/end ms, effects, transitions). Call this before editing and whenever you need current layer ids. An audio layer with tuckedInto set is that video's own sound, shown inside the video's row.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async (_a, ctx) => ok(JSON.stringify(timelineSummary(ctx.project()))),
   },
@@ -231,7 +233,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "add_media_layer",
-    description: "Place a selected source asset (by its list_media index) onto the timeline at the current playhead. Returns the new layer id. Then use set_layer_time to position/trim it. A video with sound also adds a synced audio layer.",
+    description: "Place a selected source asset (by its list_media index) onto the timeline at the current playhead. Returns the new layer id. Then use set_layer_time to position/trim it. A video with sound also adds its sound as an audio layer tucked into the video's row (tuckedInto = the video id): it moves, trims, cuts, changes speed and is deleted with the video automatically, so never re-time it yourself; set_audio still works on it.",
     inputSchema: {
       type: "object",
       properties: { mediaIndex: { type: "integer", description: "index from list_media" } },
