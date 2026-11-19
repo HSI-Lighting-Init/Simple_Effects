@@ -1242,6 +1242,18 @@ pub enum Effect {
         #[serde(rename = "paperColor")]
         paper_color: Rgba,
     },
+    /// Premiere Pro's Crop / garbage matte. Left, Top, Right and Bottom are
+    /// percentages of the source frame to cut away (0 = keep that edge);
+    /// `feather` softens the cropped edges, in SOURCE pixels, scaled by the
+    /// preview downsample the same way Ultra Key's cleanup radii are. All five
+    /// are keyframeable Tracks.
+    Crop {
+        left: Track,
+        top: Track,
+        right: Track,
+        bottom: Track,
+        feather: Track,
+    },
     /// Animated procedural "shiny clouds" — a drifting/morphing fBm caustic /
     /// light-leak pattern composited over the image on the GPU (WebGL). Every
     /// numeric knob is a keyframeable Track; `tint` (shine colour) and `blend`
@@ -1280,7 +1292,69 @@ pub enum Effect {
         pos_y: f32,
         blend: u8,
     },
+    /// Premiere Pro's Ultra Key (the Serious Magic "Ultra" keyer). The 13 keying
+    /// sliders plus Saturation/Hue/Luminance are keyframeable Tracks stored in
+    /// Premiere's UI units; `key_color` (default black = keys nothing), `output`
+    /// (0 Composite · 1 Alpha Channel · 2 Color Channel) and `setting` (0
+    /// Default · 1 Relaxed · 2 Aggressive · 3 Custom) are static. The key maths
+    /// runs on the GPU (ultraKey.frag and its cleanup/final passes).
+    UltraKey {
+        transparency: Track,
+        highlight: Track,
+        shadow: Track,
+        tolerance: Track,
+        pedestal: Track,
+        choke: Track,
+        soften: Track,
+        contrast: Track,
+        #[serde(rename = "midPoint")]
+        mid_point: Track,
+        desaturate: Track,
+        range: Track,
+        spill: Track,
+        luma: Track,
+        saturation: Track,
+        hue: Track,
+        luminance: Track,
+        #[serde(rename = "keyColor")]
+        key_color: Rgba,
+        /// Keyframed Key Colour (WP6), sampled at the playhead like the numeric
+        /// Tracks. Empty = the static `key_color`. Defaulted so projects saved
+        /// before this field still load.
+        #[serde(default, rename = "keyColorKeys")]
+        key_color_keys: Vec<ColorKey>,
+        output: u8,
+        setting: u8,
+        /// The last Custom values of the 13 preset sliders, in
+        /// `ULTRA_KEY_TRACK_NAMES` order. Empty until the user leaves Custom
+        /// for a preset; choosing Custom again restores them. Defaulted so
+        /// projects saved before this field still load.
+        #[serde(default)]
+        custom: Vec<f32>,
+    },
 }
+
+/// The 13 keying sliders a Setting preset writes, in Premiere's order
+/// (transparency, highlight, shadow, tolerance, pedestal, choke, soften,
+/// contrast, midPoint, desaturate, range, spill, luma). The Default preset is
+/// also the registered default of each track.
+pub const ULTRA_KEY_TRACK_NAMES: [&str; 13] = [
+    "transparency",
+    "highlight",
+    "shadow",
+    "tolerance",
+    "pedestal",
+    "choke",
+    "soften",
+    "contrast",
+    "midPoint",
+    "desaturate",
+    "range",
+    "spill",
+    "luma",
+];
+pub const ULTRA_KEY_DEFAULTS: [f32; 13] =
+    [45.0, 10.0, 50.0, 50.0, 10.0, 0.0, 0.0, 0.0, 50.0, 25.0, 50.0, 50.0, 50.0];
 
 /// Opaque white — the default tint for most GPU-overlay effects.
 const WHITE: Rgba = Rgba { r: 255, g: 255, b: 255, a: 255 };
@@ -1330,6 +1404,15 @@ impl Effect {
                 paper_width: 10.0,
                 paper_color: Rgba { r: 245, g: 242, b: 235, a: 255 },
             },
+            // Premiere's Crop defaults to no crop and no feather, so adding the
+            // effect is a visible no-op until the user drags a side.
+            "crop" => Effect::Crop {
+                left: Track::constant(0.0),
+                top: Track::constant(0.0),
+                right: Track::constant(0.0),
+                bottom: Track::constant(0.0),
+                feather: Track::constant(0.0),
+            },
             "shinyclouds" => Effect::ShinyClouds {
                 intensity: Track::constant(1.0),
                 scale: Track::constant(1.0),
@@ -1340,6 +1423,29 @@ impl Effect {
                 opacity: Track::constant(0.6),
                 tint: Rgba { r: 255, g: 255, b: 255, a: 255 },
                 blend: 1, // Screen — pleasant light-leak default
+            },
+            "ultrakey" => Effect::UltraKey {
+                transparency: Track::constant(ULTRA_KEY_DEFAULTS[0]),
+                highlight: Track::constant(ULTRA_KEY_DEFAULTS[1]),
+                shadow: Track::constant(ULTRA_KEY_DEFAULTS[2]),
+                tolerance: Track::constant(ULTRA_KEY_DEFAULTS[3]),
+                pedestal: Track::constant(ULTRA_KEY_DEFAULTS[4]),
+                choke: Track::constant(ULTRA_KEY_DEFAULTS[5]),
+                soften: Track::constant(ULTRA_KEY_DEFAULTS[6]),
+                contrast: Track::constant(ULTRA_KEY_DEFAULTS[7]),
+                mid_point: Track::constant(ULTRA_KEY_DEFAULTS[8]),
+                desaturate: Track::constant(ULTRA_KEY_DEFAULTS[9]),
+                range: Track::constant(ULTRA_KEY_DEFAULTS[10]),
+                spill: Track::constant(ULTRA_KEY_DEFAULTS[11]),
+                luma: Track::constant(ULTRA_KEY_DEFAULTS[12]),
+                saturation: Track::constant(100.0),
+                hue: Track::constant(0.0),
+                luminance: Track::constant(100.0),
+                key_color: Rgba { r: 0, g: 0, b: 0, a: 255 },
+                key_color_keys: Vec::new(),
+                output: 0,
+                setting: 0,
+                custom: Vec::new(),
             },
             // GPU-overlay effects (shared mega-shader). Each is its own named
             // entry so it shows up individually in the Add-effect menu.

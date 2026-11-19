@@ -471,7 +471,7 @@ fn resolve_transition_windows(
 
 /// One effect with its parameters resolved at a point in time (camelCase field
 /// names map straight onto the frontend renderer).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum ResolvedEffect {
@@ -495,6 +495,15 @@ pub enum ResolvedEffect {
         paper_width: f32,
         #[serde(rename = "paperColor")]
         paper_color: Rgba,
+    },
+    /// Crop / garbage matte resolved at `t_ms`: percentages cut from each edge
+    /// and the cropped-edge feather in source pixels.
+    Crop {
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+        feather: f32,
     },
     /// `time` is the comp playhead in seconds (drives the drift/morph on the GPU,
     /// so the animation is fully determined by the timeline → export-accurate).
@@ -529,6 +538,37 @@ pub enum ResolvedEffect {
         #[serde(rename = "posY")]
         pos_y: f32,
         blend: u8,
+    },
+    /// Ultra Key resolved at `t_ms`. Slider values are Premiere UI units
+    /// (0..100, or the CC ranges); `setting` is 0 Default · 1 Relaxed ·
+    /// 2 Aggressive · 3 Custom; `output` is 0 Composite · 1 Alpha Channel ·
+    /// 2 Color Channel.
+    UltraKey {
+        transparency: f32,
+        highlight: f32,
+        shadow: f32,
+        tolerance: f32,
+        pedestal: f32,
+        choke: f32,
+        soften: f32,
+        contrast: f32,
+        #[serde(rename = "midPoint")]
+        mid_point: f32,
+        desaturate: f32,
+        range: f32,
+        spill: f32,
+        luma: f32,
+        saturation: f32,
+        hue: f32,
+        luminance: f32,
+        #[serde(rename = "keyColor")]
+        key_color: Rgba,
+        /// The Key Colour keyframe list, so the Inspector can show/edit it while
+        /// `key_color` is already sampled at the playhead.
+        #[serde(rename = "keyColorKeys")]
+        key_color_keys: Vec<ColorKey>,
+        output: u8,
+        setting: u8,
     },
 }
 
@@ -568,6 +608,13 @@ fn resolve_effect(effect: &Effect, t_ms: u32) -> ResolvedEffect {
                 paper_color: *paper_color,
             }
         }
+        Effect::Crop { left, top, right, bottom, feather } => ResolvedEffect::Crop {
+            left: sample_track(left, t_ms),
+            top: sample_track(top, t_ms),
+            right: sample_track(right, t_ms),
+            bottom: sample_track(bottom, t_ms),
+            feather: sample_track(feather, t_ms),
+        },
         Effect::ShinyClouds {
             intensity, scale, speed, complexity, contrast, brightness, opacity, tint, blend,
         } => ResolvedEffect::ShinyClouds {
@@ -600,6 +647,50 @@ fn resolve_effect(effect: &Effect, t_ms: u32) -> ResolvedEffect {
             pos_x: *pos_x,
             pos_y: *pos_y,
             blend: *blend,
+        },
+        Effect::UltraKey {
+            transparency,
+            highlight,
+            shadow,
+            tolerance,
+            pedestal,
+            choke,
+            soften,
+            contrast,
+            mid_point,
+            desaturate,
+            range,
+            spill,
+            luma,
+            saturation,
+            hue,
+            luminance,
+            key_color,
+            key_color_keys,
+            output,
+            setting,
+            ..
+        } => ResolvedEffect::UltraKey {
+            transparency: sample_track(transparency, t_ms),
+            highlight: sample_track(highlight, t_ms),
+            shadow: sample_track(shadow, t_ms),
+            tolerance: sample_track(tolerance, t_ms),
+            pedestal: sample_track(pedestal, t_ms),
+            choke: sample_track(choke, t_ms),
+            soften: sample_track(soften, t_ms),
+            contrast: sample_track(contrast, t_ms),
+            mid_point: sample_track(mid_point, t_ms),
+            desaturate: sample_track(desaturate, t_ms),
+            range: sample_track(range, t_ms),
+            spill: sample_track(spill, t_ms),
+            luma: sample_track(luma, t_ms),
+            saturation: sample_track(saturation, t_ms),
+            hue: sample_track(hue, t_ms),
+            luminance: sample_track(luminance, t_ms),
+            key_color: sample_color(key_color_keys, *key_color, t_ms),
+            key_color_keys: key_color_keys.clone(),
+            output: *output,
+            setting: *setting,
         },
     }
 }
@@ -1606,6 +1697,28 @@ mod tests {
         ];
         assert_eq!(sample_color(&keys, a, 999).r, 10);
         assert_eq!(sample_color(&keys, a, 1000).r, 200);
+    }
+
+    #[test]
+    fn ultra_key_key_colour_is_sampled_at_the_playhead() {
+        fn rgb(e: &Effect, t: u32) -> (u8, u8, u8) {
+            let ResolvedEffect::UltraKey { key_color, .. } = resolve_effect(e, t) else { panic!() };
+            (key_color.r, key_color.g, key_color.b)
+        }
+        let mut e = Effect::default_of("ultrakey").unwrap();
+        let Effect::UltraKey { key_color, key_color_keys, .. } = &mut e else { panic!() };
+        *key_color = Rgba { r: 1, g: 2, b: 3, a: 255 };
+        *key_color_keys = vec![
+            ColorKey { time_ms: 0, color: Rgba { r: 40, g: 198, b: 59, a: 255 }, easing: Easing::Linear },
+            ColorKey { time_ms: 1000, color: Rgba { r: 60, g: 120, b: 40, a: 255 }, easing: Easing::Linear },
+        ];
+        assert_eq!(rgb(&e, 0), (40, 198, 59));
+        assert_eq!(rgb(&e, 1000), (60, 120, 40));
+        assert_eq!(rgb(&e, 500), (50, 159, 50), "the middle key colour is the blend");
+
+        let Effect::UltraKey { key_color_keys, .. } = &mut e else { panic!() };
+        key_color_keys.clear();
+        assert_eq!(rgb(&e, 500), (1, 2, 3), "no keys → the static key colour");
     }
 
     fn base_selector(kind: SelectorKind) -> AnimSelector {

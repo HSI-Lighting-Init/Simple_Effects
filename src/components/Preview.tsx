@@ -31,9 +31,10 @@ import { sampleTrack, sampleColor } from "../lib/track";
 import { drawSurface, drawTexturedQuad } from "../lib/surface3d";
 import type { Texture } from "../lib/surface3d";
 import { applyEffects, buildFilter } from "../lib/effects";
+import { averageRgbaLinear, localToSourcePixel, type KeyPickCrop } from "../lib/keyPick";
 import { renderShine } from "../lib/shinyClouds";
 import { renderGpuFx, gpuFxIsOverlay } from "../lib/gpuFx";
-import { dropVideo, loadVideo, videoStartSec } from "../lib/media";
+import { dropVideo, loadVideo, toMediaTime, videoStartSec } from "../lib/media";
 import { isRecording, record } from "../lib/recorder";
 import { createTransition, getTransitionMeta } from "../lib/transitions";
 import type { Clip } from "../lib/transitions";
@@ -53,6 +54,32 @@ import type { TextLayerStyles } from "../bindings/TextLayerStyles";
 
 function rgbaCss(c: Rgba): string {
   return `rgba(${c.r}, ${c.g}, ${c.b}, ${c.a / 255})`;
+}
+
+// Set on every Preview render. The badge is an editor guide, so an export frame
+// that happens to hit a GPU failure must not capture it (the export aborts
+// instead).
+let badgesSuppressed = false;
+
+/** Small red chip on the layer when its GPU effect failed (preview only). */
+function drawGpuFailureBadge(ctx: unknown, w: number, h: number) {
+  if (badgesSuppressed || w <= 4 || h <= 4) return;
+  const kctx = ctx as { _context?: CanvasRenderingContext2D };
+  const c = (kctx._context ?? ctx) as CanvasRenderingContext2D;
+  if (!c || typeof c.fillRect !== "function") return;
+  const label = "GPU effect failed";
+  const pad = 4;
+  const bh = Math.min(16, h - 2);
+  if (typeof c.measureText !== "function" || typeof c.fillText !== "function") return;
+  c.save?.();
+  c.font = "600 11px system-ui, sans-serif";
+  const bw = Math.min(w - 2, c.measureText(label).width + pad * 2);
+  c.fillStyle = "rgba(176, 32, 32, 0.92)";
+  c.fillRect(2, 2, bw, bh);
+  c.fillStyle = "#fff";
+  c.textBaseline = "middle";
+  c.fillText(label, 2 + pad, 2 + bh / 2);
+  c.restore?.();
 }
 
 // --- Transition runtime diagnostic (temporary) ------------------------------
@@ -303,6 +330,83 @@ function useCroppedImage(
   }, [img, crop?.x, crop?.y, crop?.width, crop?.height, maxTex]);
 }
 
+// --- WP5 Key Color eyedropper -------------------------------------------------
+interface LayerSource {
+  /** The full pre-effect source (cached image or pooled video frame). */
+  source: CanvasImageSource;
+  /** The source's native pixel dimensions. */
+  w: number;
+  h: number;
+  /** Source-pixel crop, or null for the full image. */
+  crop: KeyPickCrop | null;
+}
+
+// Resolve the PRE-EFFECT source at native resolution. Images use the full cached
+// image (never the capped preview texture); video uses the pooled element at the
+// current playhead frame.
+function layerSource(layer: Layer, imageUrls: Record<string, string>): LayerSource | null {
+  const k = layer.kind;
+  if (k.kind === "image") {
+    // Preview draws `images[k.src]` (the resolved data URL), so that is the key
+    // the decode cache holds; fall back to the raw path for callers that use it.
+    const img = imgCache.get(imageUrls[k.src] ?? k.src);
+    if (!img) return null;
+    const w = img.naturalWidth || img.width;
+    const h = img.naturalHeight || img.height;
+    if (!(w > 0) || !(h > 0)) return null;
+    return { source: img, w, h, crop: k.crop ?? null };
+  }
+  if (k.kind === "video") {
+    const startSec = videoStartSec(
+      k.inMs ?? 0,
+      k.speed ?? 1,
+      k.reverse ?? false,
+      layer.startMs,
+      layer.endMs
+    );
+    const pooled = loadVideo(layer.id, k.src, startSec);
+    if (!pooled.ready) return null;
+    const w = pooled.el.videoWidth;
+    const h = pooled.el.videoHeight;
+    if (!(w > 0) || !(h > 0)) return null;
+    return { source: pooled.el, w, h, crop: null };
+  }
+  return null;
+}
+
+// Draw ONLY the picked 1×1 or clamped 5×5 source rectangle into a fixed 5×5
+// canvas (imageSmoothingEnabled = false), then read that patch. No full-frame
+// copy per pick.
+function sampleLayerSource(
+  info: LayerSource,
+  sx: number,
+  sy: number,
+  average: boolean,
+  scratch: HTMLCanvasElement
+): Rgba | null {
+  scratch.width = 5;
+  scratch.height = 5;
+  const c = scratch.getContext("2d", { willReadFrequently: true });
+  if (!c) return null;
+  c.clearRect(0, 0, 5, 5);
+  c.imageSmoothingEnabled = false;
+
+  const n = 5;
+  const x0 = average ? Math.max(0, Math.min(Math.max(0, info.w - n), sx - 2)) : sx;
+  const y0 = average ? Math.max(0, Math.min(Math.max(0, info.h - n), sy - 2)) : sy;
+  const pw = average ? Math.min(n, info.w - x0) : 1;
+  const ph = average ? Math.min(n, info.h - y0) : 1;
+  c.drawImage(info.source, x0, y0, pw, ph, 0, 0, pw, ph);
+
+  const d = c.getImageData(0, 0, pw, ph).data;
+  if (!average) return { r: d[0], g: d[1], b: d[2], a: 255 };
+  const samples: Rgba[] = [];
+  for (let i = 0; i < d.length; i += 4) {
+    samples.push({ r: d[i], g: d[i + 1], b: d[i + 2], a: d[i + 3] });
+  }
+  return averageRgbaLinear(samples);
+}
+
 // A flat image with an effect stack. Renders the image through an offscreen
 // canvas — colour/blur effects via the canvas `filter`, then each wipe as a
 // gradient mask — and composites the result. Same transform contract as
@@ -312,6 +416,7 @@ function EffectImageNode({
   r,
   interaction,
   registerRef,
+  nodeId,
   crop,
   maxTex,
 }: {
@@ -319,6 +424,8 @@ function EffectImageNode({
   r: ResolvedLayer;
   interaction: Interaction;
   registerRef: NodeRef;
+  /** Konva id for the WP5 eyedropper (layer-<id>). */
+  nodeId: string;
   crop?: CropRect | null;
   maxTex?: number;
 }) {
@@ -331,6 +438,7 @@ function EffectImageNode({
   return (
     <Shape
       ref={registerRef}
+      id={nodeId}
       x={r.x}
       y={r.y}
       width={w}
@@ -345,8 +453,22 @@ function EffectImageNode({
         const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
         // Run the effect stack at the (possibly reduced) texture resolution, then
         // draw it stretched to the logical size — cheap, and no visible change.
-        const tex = applyEffects(off, base, base.width, base.height, r.effects);
-        (ctx as unknown as CanvasRenderingContext2D).drawImage(tex, 0, 0, w, h);
+        let gpuFailure: string | null = null;
+        // The effect chain runs at the (possibly capped) texture size; scale
+        // Ultra Key's cleanup radii back to source-native pixels so preview and
+        // export choke the same amount.
+        const tex = applyEffects(
+          off,
+          base,
+          base.width,
+          base.height,
+          r.effects,
+          (m) => (gpuFailure = m),
+          w > 0 ? base.width / w : 1
+        );
+        const c = ctx as unknown as CanvasRenderingContext2D;
+        c.drawImage(tex, 0, 0, w, h);
+        if (gpuFailure) drawGpuFailureBadge(c, w, h);
       }}
       hitFunc={(ctx, shape) => {
         ctx.beginPath();
@@ -383,8 +505,9 @@ function drawTransitionFrame(
 ) {
   // `base` may be an image OR a video frame; applyEffects draws via drawImage,
   // which accepts both, so the cast is safe and effects apply to either.
+  let gpuFailure: string | null = null;
   const texClip: CanvasImageSource =
-    effects.length > 0 ? applyEffects(bcv, base as Texture, w, h, effects) : base;
+    effects.length > 0 ? applyEffects(bcv, base as Texture, w, h, effects, (m) => (gpuFailure = m)) : base;
   // Run the engine at the size the layer actually covers in the comp, not the
   // source's native size. The engine allocates full-size A/B frames per instance
   // and we build one per frame, so a 6400x11466 image shown at 0.17x cost two
@@ -452,6 +575,7 @@ function drawTransitionFrame(
     c.drawImage(texB, 0, 0, w, h);
     c.globalAlpha = 1;
   }
+  if (gpuFailure) drawGpuFailureBadge(c, w, h);
 }
 
 function TransitionImageNode({
@@ -460,6 +584,7 @@ function TransitionImageNode({
   transition,
   interaction,
   registerRef,
+  nodeId,
   crop,
   maxTex,
 }: {
@@ -468,6 +593,8 @@ function TransitionImageNode({
   transition: ResolvedTransition;
   interaction: Interaction;
   registerRef: NodeRef;
+  /** Konva id for the WP5 eyedropper (layer-<id>). */
+  nodeId: string;
   crop?: CropRect | null;
   maxTex?: number;
 }) {
@@ -480,6 +607,7 @@ function TransitionImageNode({
   return (
     <Shape
       ref={registerRef}
+      id={nodeId}
       x={r.x}
       y={r.y}
       width={w}
@@ -916,6 +1044,7 @@ function ImageNode({
   r,
   interaction,
   registerRef,
+  nodeId,
   crop,
   maxTex,
 }: {
@@ -923,6 +1052,8 @@ function ImageNode({
   r: ResolvedLayer;
   interaction: Interaction;
   registerRef: NodeRef;
+  /** Konva id for the WP5 eyedropper (layer-<id>). */
+  nodeId: string;
   /** Optional source-pixel crop (cover-crops the image into a cell block). */
   crop?: CropRect | null;
   maxTex?: number;
@@ -938,6 +1069,7 @@ function ImageNode({
   return (
     <KImage
       ref={registerRef}
+      id={nodeId}
       image={drawImg}
       width={w}
       height={h}
@@ -1148,6 +1280,7 @@ function VideoNode({
   reverse,
   interaction,
   registerRef,
+  nodeId,
 }: {
   layerId: number;
   src: string;
@@ -1165,6 +1298,8 @@ function VideoNode({
   reverse: boolean;
   interaction: Interaction;
   registerRef: NodeRef;
+  /** Konva id for the WP5 eyedropper (layer-<id>). */
+  nodeId: string;
 }) {
   // Usually already warm (see loadVideo in media.ts), so the first frame draws
   // immediately instead of after a fetch + load + seek.
@@ -1210,11 +1345,11 @@ function VideoNode({
     const elapsed = Math.max(0, (timeMs - layerStartMs) / 1000);
     const playLen = Math.max(0, (layerEndMs - layerStartMs) / 1000);
     const base = inMs / 1000;
-    // Source time: forward advances at `spd`; reverse counts down from the far
+    // Clip time: forward advances at `spd`; reverse counts down from the far
     // end of the window so the clip plays backwards over its timeline range.
-    const wanted = reverse ? base + Math.max(0, playLen - elapsed) * spd : base + elapsed * spd;
-    const atEnd = isFinite(srcLen) && wanted >= srcLen - 0.05;
-    const target = isFinite(srcLen) ? Math.min(Math.max(0, wanted), srcLen - 0.05) : Math.max(0, wanted);
+    const clip = reverse ? base + Math.max(0, playLen - elapsed) * spd : base + elapsed * spd;
+    // Clip time → media time (the file's video start offset) in one place.
+    const { target, atEnd } = toMediaTime(clip, pooled.offsetSec, isFinite(srcLen) ? srcLen : undefined);
     // Reverse can't play natively, so seek every frame. Forward plays at `spd`.
     if (playing && !reverse && !atEnd) {
       v.playbackRate = spd;
@@ -1227,7 +1362,7 @@ function VideoNode({
       if (!v.paused) v.pause();
       if (Math.abs(v.currentTime - target) > 0.02) v.currentTime = target;
     }
-  }, [vid, playing, timeMs, layerStartMs, layerEndMs, durationMs, inMs, speed, reverse]);
+  }, [vid, pooled.offsetSec, playing, timeMs, layerStartMs, layerEndMs, durationMs, inMs, speed, reverse]);
 
   // While playing, keep the layer repainting so the moving frame shows.
   useEffect(() => {
@@ -1256,6 +1391,7 @@ function VideoNode({
     return (
       <Shape
         ref={setRef}
+        id={nodeId}
         x={r.x}
         y={r.y}
         width={w}
@@ -1297,6 +1433,7 @@ function VideoNode({
     return (
       <Shape
         ref={setRef}
+        id={nodeId}
         x={r.x}
         y={r.y}
         width={w}
@@ -1309,8 +1446,11 @@ function VideoNode({
         opacity={r.opacity}
         sceneFunc={(ctx) => {
           const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
-          const tex = applyEffects(off, vid as unknown as Texture, w, h, r.effects);
-          (ctx as unknown as CanvasRenderingContext2D).drawImage(tex, 0, 0, w, h);
+          let gpuFailure: string | null = null;
+          const tex = applyEffects(off, vid as unknown as Texture, w, h, r.effects, (m) => (gpuFailure = m));
+          const c = ctx as unknown as CanvasRenderingContext2D;
+          c.drawImage(tex, 0, 0, w, h);
+          if (gpuFailure) drawGpuFailureBadge(c, w, h);
         }}
         hitFunc={(ctx, shape) => {
           ctx.beginPath();
@@ -1325,6 +1465,7 @@ function VideoNode({
   return (
     <KImage
       ref={setRef}
+      id={nodeId}
       image={vid}
       x={r.x}
       y={r.y}
@@ -1995,8 +2136,11 @@ function DecalNode({
           if (!base) return;
           const bw = base instanceof HTMLImageElement ? base.naturalWidth || base.width : base.width;
           const bh = base instanceof HTMLImageElement ? base.naturalHeight || base.height : base.height;
+          // `cappedTexture` may have downscaled a large image; run Ultra Key's
+          // cleanup radii at source-native scale (export has no cap).
+          const nativeW = isText || decalCrop || !imgTex ? bw : imgTex.naturalWidth || imgTex.width || bw;
           const off = fxOffRef.current ?? (fxOffRef.current = document.createElement("canvas"));
-          const tex = applyEffects(off, base, bw, bh, r.effects);
+          const tex = applyEffects(off, base, bw, bh, r.effects, undefined, bw > 0 ? bw / Math.max(1, nativeW) : 1);
           drawSurface(ctx as DrawCtx, tex, surface, 1);
           if (selected) {
             ctx.save();
@@ -2452,6 +2596,10 @@ interface Props {
    *  synchronous redraw of THIS exact stage (Konva's global `Konva.stages` may be
    *  a different module instance under bundler dedup and come back empty). */
   stageRef?: Ref<Konva.Stage>;
+  /** Active Key Color eyedropper target (layer id + effect index). */
+  keyColorPick?: { layerId: number; index: number } | null;
+  /** A valid pick: the colour sampled from the pre-effect source. */
+  onKeyColorPicked?: (color: Rgba) => void;
 }
 
 // Canvas blend mode per shine blend index (0 Add · 1 Screen · 2 Overlay · 3 Soft).
@@ -2528,7 +2676,7 @@ function AdjustmentNode({
             globalCompositeOperation={SHINE_GCO[s.blend] ?? "screen"}
             perfectDrawEnabled={false}
             sceneFunc={(ctx) => {
-              const pat =
+              const out =
                 s.kind === "shinyclouds"
                   ? renderShine(null, width, height, {
                       time: s.time,
@@ -2561,7 +2709,11 @@ function AdjustmentNode({
                         adjustment: true,
                       })
                     : null;
-              if (!pat) return;
+              const pat = out && out.ok ? out.canvas : null;
+              if (!pat) {
+                if (out && !out.ok) drawGpuFailureBadge(ctx, width, height);
+                return;
+              }
               // Copy the shared GL canvas into a per-node scratch so a second
               // adjustment layer's render can't overwrite it before this draws.
               const off = offRef.current ?? (offRef.current = document.createElement("canvas"));
@@ -2674,7 +2826,11 @@ export default function Preview({
   onSetPreviewQuality,
   fpsOverlay = null,
   stageRef,
+  keyColorPick = null,
+  onKeyColorPicked,
 }: Props) {
+  // Editor-only guides (the GPU failure badge) must never land in export frames.
+  badgesSuppressed = exporting;
   // Longest-side cap for drawn textures. Export always renders at full fidelity;
   // in the editor a cap keeps heavy (multi-megapixel) images cheap to redraw.
   const maxTex = exporting ? Infinity : PREVIEW_QUALITY_CAP[previewQuality];
@@ -2699,6 +2855,7 @@ export default function Preview({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, warmTick]);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const pickCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   // User zoom (1 = fit-to-window) and pan offset (px), driven by the scroll wheel.
   // Applied on top of the fit scale via the Konva layer origin, so the stage stays
@@ -3217,6 +3374,7 @@ export default function Preview({
           reverse={k.reverse ?? false}
           interaction={inter}
           registerRef={reg}
+          nodeId={`layer-${layer.id}`}
         />
       );
     } else if (k.kind === "audio") {
@@ -3245,11 +3403,11 @@ export default function Preview({
       const crop = k.kind === "image" ? k.crop : null;
       node =
         r.transition?.engine && src ? (
-          <TransitionImageNode src={src} r={r} transition={r.transition} interaction={flatInter} registerRef={reg} crop={crop} maxTex={maxTex} />
+          <TransitionImageNode src={src} r={r} transition={r.transition} interaction={flatInter} registerRef={reg} nodeId={`layer-${layer.id}`} crop={crop} maxTex={maxTex} />
         ) : r.effects.length > 0 ? (
-          <EffectImageNode src={src} r={r} interaction={flatInter} registerRef={reg} crop={crop} maxTex={maxTex} />
+          <EffectImageNode src={src} r={r} interaction={flatInter} registerRef={reg} nodeId={`layer-${layer.id}`} crop={crop} maxTex={maxTex} />
         ) : (
-          <ImageNode src={src} r={r} interaction={flatInter} registerRef={reg} crop={crop} maxTex={maxTex} />
+          <ImageNode src={src} r={r} interaction={flatInter} registerRef={reg} nodeId={`layer-${layer.id}`} crop={crop} maxTex={maxTex} />
         );
     }
     // A Flap effect on the selected image layer → a draggable dashed hinge line.
@@ -3290,8 +3448,43 @@ export default function Preview({
     );
   };
 
+  const pickLayer = keyColorPick
+    ? project.layers.find((l) => l.id === keyColorPick.layerId) ?? null
+    : null;
+
+  const onPickClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (!keyColorPick || !pickLayer) return;
+    const stage = e.target.getStage();
+    const p = stage?.getPointerPosition();
+    if (!stage || !p) return;
+    // Konva's absolute transform already includes the layer's anchor/rotation/
+    // scale, every parent group, and the monitor's fit/zoom/pan.
+    const node = stage.findOne(`#layer-${pickLayer.id}`);
+    if (!node) return;
+    const local = node.getAbsoluteTransform().copy().invert().point(p);
+    const info = layerSource(pickLayer, images);
+    if (!info) return;
+    const src = localToSourcePixel(local.x, local.y, {
+      crop: info.crop,
+      nativeWidth: info.w,
+      nativeHeight: info.h,
+      drawWidth: node.width(),
+      drawHeight: node.height(),
+    });
+    if (!src) return;
+    const scratch = pickCanvasRef.current ?? (pickCanvasRef.current = document.createElement("canvas"));
+    const color = sampleLayerSource(
+      info,
+      src.x,
+      src.y,
+      !!(e.evt.ctrlKey || e.evt.metaKey),
+      scratch
+    );
+    if (color) onKeyColorPicked?.(color);
+  };
+
   return (
-    <div ref={wrapRef} className="preview-wrap">
+    <div ref={wrapRef} className={`preview-wrap${keyColorPick ? " picking" : ""}`}>
       {scale > 0 && (
         <Stage
           ref={stageRef}
@@ -3434,6 +3627,20 @@ export default function Preview({
                   </Group>
                 );
               })()}
+
+            {/* Key Color eyedropper: transparent hit layer over the visible
+                stage. Clicks pick from the selected layer's PRE-EFFECT source. */}
+            {keyColorPick && pickLayer && !exporting && (
+              <Rect
+                x={pbL}
+                y={pbT}
+                width={pbR - pbL}
+                height={pbB - pbT}
+                fill="#000"
+                opacity={0.001}
+                onClick={onPickClick}
+              />
+            )}
           </KLayer>
         </Stage>
       )}

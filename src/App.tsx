@@ -164,6 +164,14 @@ import {
   setTornEdgeStatic,
   setShineStatic,
   setGpuFxStatic,
+  setUltraKeyStatic,
+  setUltraKeyColorKey,
+  clearUltraKeyColorKeys,
+  applyUltraKeyPreset,
+  setCellUltraKeyStatic,
+  setCellUltraKeyColorKey,
+  clearCellUltraKeyColorKeys,
+  applyCellUltraKeyPreset,
   evaluateAt,
   getProject,
   loadImageDataUrl,
@@ -227,6 +235,9 @@ import {
 import type { Project } from "./bindings/Project";
 import type { Layer } from "./bindings/Layer";
 import type { ResolvedLayer } from "./bindings/ResolvedLayer";
+import { effectTiming, effectTimingWindow, projectUsesGpu, resetEffectTiming } from "./lib/effects";
+import { keyedVideoSources } from "./lib/exportSource";
+import { GpuFailureError, gpuHealthCheck, isGpuFailure, takeGpuFailure } from "./lib/gpuFx";
 import type { TransformEdit } from "./bindings/TransformEdit";
 import type { LetterAnimation } from "./bindings/LetterAnimation";
 import type { Font } from "./bindings/Font";
@@ -338,6 +349,32 @@ function revealableBox(p: Project, shapeId: number): boolean {
   return !animated;
 }
 
+/** The video seek targets for one comp time: every visible video layer in the
+ *  resolved map, with its source time honouring in-point, speed and reverse.
+ *  Shared by the editor preview render and the deterministic export. */
+function videoSeekTargets(p: Project, map: Record<number, ResolvedLayer>, tMs: number) {
+  return p.layers
+    .filter((l) => l.kind.kind === "video" && map[l.id]?.visible)
+    .map((l) => {
+      const k = l.kind.kind === "video" ? l.kind : null;
+      const durMs = k?.durationMs ?? 0;
+      const inMs = k?.inMs ?? 0;
+      const spd = k?.speed && k.speed > 0 ? k.speed : 1;
+      const reverse = k?.reverse ?? false;
+      const elapsed = Math.max(0, (tMs - l.startMs) / 1000);
+      const playLen = Math.max(0, (l.endMs - l.startMs) / 1000);
+      const wanted = reverse
+        ? inMs / 1000 + Math.max(0, playLen - elapsed) * spd
+        : inMs / 1000 + elapsed * spd;
+      return {
+        layerId: l.id,
+        src: k?.src ?? "",
+        startSec: videoStartSec(inMs, spd, reverse, l.startMs, l.endMs),
+        timeSec: durMs > 0 ? Math.min(Math.max(0, wanted), durMs / 1000 - 0.001) : Math.max(0, wanted),
+      };
+    });
+}
+
 /** Decode every image in `urls` once, up front, before a capture run's
  *  per-frame loop starts. A layer becoming visible for the first time mid-run
  *  mounts a fresh Konva image node, whose own `useImage` now correctly waits
@@ -419,6 +456,9 @@ export default function App() {
   const [labelsW, setLabelsW] = useState(savedLayout.labelsW);
   const [showUiSize, setShowUiSize] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  // Ctrl/Cmd-click eyedropper target: the Ultra Key effect whose static Key
+  // Colour the next Program-monitor click sets. Null = not picking.
+  const [keyColorPick, setKeyColorPick] = useState<{ layerId: number; index: number } | null>(null);
   // Multi-selection of layers (timeline area): every selected id, with
   // `selectedId` as the primary (drives the inspector / preview transformer).
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -490,6 +530,20 @@ export default function App() {
     { x: number; y: number; shapeId?: number; layerId?: number; cell?: number } | null
   >(null);
   const [exporting, setExporting] = useState(false);
+
+  // Export grabs the preview stage's canvas directly for `new VideoFrame`. At the
+  // display DPR that canvas is 2176×1224 for a 1280×720 comp; at pixelRatio 1 it
+  // is exactly the output size. Konva keeps the pixel ratio on each layer's
+  // canvas (Preview.tsx:518 reads the same value), not on the Stage, so set the
+  // layer canvases. Restore the display DPR for editing whenever `exporting`
+  // clears, including after a cancelled or failed export.
+  useEffect(() => {
+    const stage = previewStageRef.current;
+    if (!stage) return;
+    const ratio = exporting ? 1 : typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    for (const layer of stage.getLayers()) layer.getCanvas().setPixelRatio(ratio);
+    stage.batchDraw();
+  }, [exporting]);
   const [exportMsg, setExportMsg] = useState("");
   // While the export renders frames, nothing on screen may change continuously:
   // on a 60 Hz display each presented screen update made the GPU encoder wait
@@ -532,6 +586,8 @@ export default function App() {
   const [fpsOverlay, setFpsOverlay] = useState<number | null>(null);
   const fpsFramesRef = useRef(0);
   const fpsLastRef = useRef(0);
+  // WP9: rate-limit the per-layer effect-cost log to ~1/s next to previewFps.
+  const lastEffectLogRef = useRef(0);
   // The .sefx file the project is bound to (null = never saved). `fileName` is
   // just its display name for the title bar / toolbar.
   const filePathRef = useRef<string | null>(null);
@@ -580,6 +636,7 @@ export default function App() {
   const resolvedRef = useRef<Record<number, ResolvedLayer>>({});
   const selectedIdRef = useRef<number | null>(null);
   const selectedIdsRef = useRef<number[]>([]);
+  const keyColorPickRef = useRef<{ layerId: number; index: number } | null>(null);
   const lastSeekRecRef = useRef(0);
   // Monotonic counter for style edits (shape2d / shape3d params). Each edit does
   // an optimistic project update, then awaits the backend. Because invoke
@@ -592,6 +649,10 @@ export default function App() {
   useEffect(() => { resolvedRef.current = resolved; }, [resolved]);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
   useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
+  useEffect(() => { keyColorPickRef.current = keyColorPick; }, [keyColorPick]);
+  // A pick belongs to the layer it started on; selecting another layer cancels it.
+  useEffect(() => { setKeyColorPick(null); }, [selectedId]);
+  useEffect(() => { if (exporting) setKeyColorPick(null); }, [exporting]);
   const groupPathRef = useRef<{ id: number; name: string }[]>([]);
   useEffect(() => { groupPathRef.current = groupPath; }, [groupPath]);
 
@@ -689,10 +750,11 @@ export default function App() {
   const applyTime = useCallback(async (t: number) => {
     const seq = ++applySeqRef.current;
     const layers = await evaluateAt(Math.round(t));
-    if (seq !== applySeqRef.current) return; // superseded by a newer applyTime
+    if (seq !== applySeqRef.current) return null; // superseded by a newer applyTime
     const map: Record<number, ResolvedLayer> = {};
     for (const l of layers) map[l.id] = l;
     setResolved(map);
+    return map;
   }, []);
 
   // Initial load.
@@ -876,6 +938,8 @@ export default function App() {
     // Reset the FPS meter for this run.
     fpsFramesRef.current = 0;
     fpsLastRef.current = performance.now();
+    resetEffectTiming();
+    lastEffectLogRef.current = 0;
 
     const tick = async () => {
       if (!playingRef.current) return;
@@ -898,7 +962,13 @@ export default function App() {
           const now = performance.now();
           const span = now - fpsLastRef.current;
           if (span >= 333) {
-            setPreviewFps(Math.round((fpsFramesRef.current * 1000) / span));
+            const fpsNow = Math.round((fpsFramesRef.current * 1000) / span);
+            setPreviewFps(fpsNow);
+            // WP9: per-layer effect cost next to the live FPS (at most 1/s).
+            if (now - lastEffectLogRef.current >= 1000) {
+              lastEffectLogRef.current = now;
+              console.info("[preview timing]", { fps: fpsNow, effects: effectTimingWindow(1000) });
+            }
             fpsFramesRef.current = 0;
             fpsLastRef.current = now;
           }
@@ -1278,7 +1348,13 @@ export default function App() {
         await paint();
         for (const t of times) {
           setTime(t);
-          await applyTime(t);
+          const map = await applyTime(t);
+          // render_preview must capture the same frame the export will seek to.
+          // The VideoNode's sync effect alone does not wait for a decoder seek, so
+          // a cold/stepped pool can be one frame behind. Seek every visible video
+          // and wait for its `seeked` event before painting, as the export does.
+          const targets = map ? videoSeekTargets(p, map, t) : [];
+          if (targets.length) await seekVideosForFrame(targets);
           await paint();
           await paint();
           const stage = previewStageRef.current;
@@ -2389,6 +2465,75 @@ export default function App() {
     [applyTime, recordAction]
   );
 
+  const onSetUltraKeyStatic = useCallback(
+    async (layerId: number, index: number, keyColor: Rgba, output: number, setting: number) => {
+      const p = await setUltraKeyStatic(layerId, index, keyColor, output, setting);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("ultrakey_static", { layerId, index, setting });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onApplyUltraKeyPreset = useCallback(
+    async (layerId: number, index: number, setting: number, values: number[]) => {
+      const p = await applyUltraKeyPreset(layerId, index, timeRef.current, setting, values);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("ultrakey_preset", { layerId, index, setting });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onSetUltraKeyColorKey = useCallback(
+    async (layerId: number, index: number, color: Rgba, tMs: number) => {
+      const t = Math.round(tMs);
+      const p = await setUltraKeyColorKey(layerId, index, color, t);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("ultrakey_color_key", { layerId, index, tMs: t });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onClearUltraKeyColorKeys = useCallback(
+    async (layerId: number, index: number, color: Rgba) => {
+      const p = await clearUltraKeyColorKeys(layerId, index, color);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("ultrakey_clear_color_keys", { layerId, index });
+    },
+    [applyTime, recordAction]
+  );
+
+  const startKeyColorPick = useCallback((layerId: number, index: number) => {
+    setKeyColorPick({ layerId, index });
+  }, []);
+
+  const onKeyColorPicked = useCallback(
+    (color: Rgba) => {
+      const pick = keyColorPickRef.current;
+      if (!pick) return;
+      // The picked layer is in the current editing scope (groups are entered by
+      // swapping the scope), so this is the same lookup the other effect
+      // handlers use.
+      const eff = projectRef.current?.layers.find((l) => l.id === pick.layerId)?.effects[pick.index];
+      if (!eff || eff.kind !== "ultrakey") {
+        setKeyColorPick(null);
+        return;
+      }
+      // A keyed Key Colour writes/replaces its key at the playhead (one undo
+      // step); with no keys the pick keeps the static-colour write it had.
+      if (eff.keyColorKeys.length > 0) {
+        void onSetUltraKeyColorKey(pick.layerId, pick.index, color, timeRef.current);
+      } else {
+        void onSetUltraKeyStatic(pick.layerId, pick.index, color, eff.output, eff.setting);
+      }
+      setKeyColorPick(null);
+    },
+    [onSetUltraKeyStatic, onSetUltraKeyColorKey]
+  );
+
   // Drag the Flap hinge line in the preview → set its axis (pos_x), preserving
   // the effect's other static fields.
   const onSetFlapAxis = useCallback(
@@ -2474,6 +2619,54 @@ export default function App() {
       setProject(p);
       await applyTime(timeRef.current);
       recordAction("cell_gpufx_static", { layerId, cell, index, effect, blend });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onSetCellUltraKeyStatic = useCallback(
+    async (
+      layerId: number,
+      cell: number,
+      index: number,
+      keyColor: Rgba,
+      output: number,
+      setting: number
+    ) => {
+      const p = await setCellUltraKeyStatic(layerId, cell, index, keyColor, output, setting);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("cell_ultrakey_static", { layerId, cell, index, setting });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onApplyCellUltraKeyPreset = useCallback(
+    async (layerId: number, cell: number, index: number, setting: number, values: number[]) => {
+      const p = await applyCellUltraKeyPreset(layerId, cell, index, timeRef.current, setting, values);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("cell_ultrakey_preset", { layerId, cell, index, setting });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onSetCellUltraKeyColorKey = useCallback(
+    async (layerId: number, cell: number, index: number, color: Rgba, tMs: number) => {
+      const t = Math.round(tMs);
+      const p = await setCellUltraKeyColorKey(layerId, cell, index, color, t);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("cell_ultrakey_color_key", { layerId, cell, index, tMs: t });
+    },
+    [applyTime, recordAction]
+  );
+
+  const onClearCellUltraKeyColorKeys = useCallback(
+    async (layerId: number, cell: number, index: number, color: Rgba) => {
+      const p = await clearCellUltraKeyColorKeys(layerId, cell, index, color);
+      setProject(p);
+      await applyTime(timeRef.current);
+      recordAction("cell_ultrakey_clear_color_keys", { layerId, cell, index });
     },
     [applyTime, recordAction]
   );
@@ -3132,6 +3325,14 @@ export default function App() {
         await preloadImages(Object.values(imagesRef.current));
         // Let the preview re-render at full resolution (export scale) first.
         await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        // GPU health gate: compile every effect program and render a probe frame
+        // before any frame is rendered. A project that needs the GPU must not
+        // export without it — and must never fall back to an unkeyed render.
+        if (projectUsesGpu(p)) {
+          const health = gpuHealthCheck();
+          if (!health.ok) throw new GpuFailureError(`Export stopped: GPU effect failed before rendering — ${health.error}`);
+        }
+        takeGpuFailure(); // failures recorded while previewing belong to the editor
         const canvas = document.querySelector(".preview-stage canvas") as HTMLCanvasElement | null;
         if (!canvas) throw new Error("preview canvas not found");
         const probing = isProbeEnabled();
@@ -3195,10 +3396,16 @@ export default function App() {
         // make_seek_proxy). Cached after the first export. Without ffmpeg, or if a
         // clip fails, that clip renders from its original: still correct, just slower.
         const proxies = new Map<string, string>();
+        // WP8: a clip with Ultra Key seeks its ORIGINAL, not the lossy seek
+        // proxy — the proxy's second 4:2:0 encode changes exactly the chroma
+        // edges the keyer measures. A source path is proxy-or-original for the
+        // whole export (the video pool is keyed by path), so one keyed layer on
+        // a path keeps that path original.
+        const keyedSrcs = keyedVideoSources(p.layers);
         const clipSrcs = [
           ...new Set(
             p.layers.flatMap((l) =>
-              l.kind.kind === "video" && !l.hidden && (!only || only.has(l.id)) && l.endMs > inMs && l.startMs < outMs
+              l.kind.kind === "video" && !l.hidden && !keyedSrcs.has(l.kind.src) && (!only || only.has(l.id)) && l.endMs > inMs && l.startMs < outMs
                 ? [l.kind.src]
                 : []
             )
@@ -3225,6 +3432,8 @@ export default function App() {
         // Frame count for this render — used to calibrate the render-time estimate
         // shown in the export dialog on the next run.
         const totalFrames = Math.max(1, Math.ceil((duration / 1000) * fps));
+        // WP9: measure the per-layer applyEffects cost of this export only.
+        resetEffectTiming();
         const renderStartedAt = performance.now();
 
         // Wait for the canvas to actually paint the latest applied time.
@@ -3259,8 +3468,18 @@ export default function App() {
           rec.start();
           const startWall = performance.now();
           let lastProbe = -Infinity;
+          let gpuError: string | null = null;
+          const stopForGpu = () => {
+            gpuError = takeGpuFailure();
+            return gpuError != null;
+          };
           await new Promise<void>((resolve) => {
             const tick = async () => {
+              if (stopForGpu()) {
+                if (rec.state !== "inactive") rec.stop();
+                resolve();
+                return;
+              }
               const t = performance.now() - startWall;
               if (t >= duration || cancelRef.current) {
                 await applyTime(outMs);
@@ -3268,11 +3487,20 @@ export default function App() {
                   await awaitPaint();
                   probePreview(canvas, outMs);
                 }
+                await awaitPaint();
+                if (stopForGpu()) {
+                  if (rec.state !== "inactive") rec.stop();
+                }
                 resolve();
                 return;
               }
               setExportMsg(`Rendering… ${Math.round((t / duration) * 100)}%`);
               await applyTime(inMs + t);
+              if (stopForGpu()) {
+                if (rec.state !== "inactive") rec.stop();
+                resolve();
+                return;
+              }
               if (probing && t - lastProbe >= 150) {
                 lastProbe = t;
                 await awaitPaint();
@@ -3283,8 +3511,9 @@ export default function App() {
             requestAnimationFrame(tick);
           });
           await new Promise((r) => setTimeout(r, 250));
-          rec.stop();
+          if (rec.state !== "inactive") rec.stop();
           await stopped;
+          if (gpuError) throw new GpuFailureError(`Export stopped: GPU effect failed — ${gpuError}`);
           return new Blob(chunks, { type: mime });
         };
 
@@ -3372,27 +3601,7 @@ export default function App() {
                   // `.visible`, not mere presence: evaluateAt returns EVERY layer, so this
                   // used to load + await all of the comp's videos on every frame — one
                   // unloadable clip anywhere stalled each frame by SEEK_TIMEOUT_MS.
-                  const videoTargets = p.layers
-                    .filter((l) => l.kind.kind === "video" && map[l.id]?.visible)
-                    .map((l) => {
-                      const k = l.kind.kind === "video" ? l.kind : null;
-                      const durMs = k?.durationMs ?? 0;
-                      const inMs = k?.inMs ?? 0;
-                      const spd = k?.speed && k.speed > 0 ? k.speed : 1;
-                      const reverse = k?.reverse ?? false;
-                      // Source time honours speed & reverse (matches VideoNode).
-                      const elapsed = Math.max(0, (tMs - l.startMs) / 1000);
-                      const playLen = Math.max(0, (l.endMs - l.startMs) / 1000);
-                      const wanted = reverse
-                        ? inMs / 1000 + Math.max(0, playLen - elapsed) * spd
-                        : inMs / 1000 + elapsed * spd;
-                      return {
-                        layerId: l.id,
-                        src: k?.src ?? "",
-                        startSec: videoStartSec(inMs, spd, reverse, l.startMs, l.endMs),
-                        timeSec: durMs > 0 ? Math.min(Math.max(0, wanted), durMs / 1000 - 0.001) : Math.max(0, wanted),
-                      };
-                    });
+                  const videoTargets = videoSeekTargets(p, map, tMs);
                   const ps0 = performance.now();
                   if (videoTargets.length) await seekVideosForFrame(videoTargets);
                   phase.seekMs += performance.now() - ps0;
@@ -3415,6 +3624,10 @@ export default function App() {
                   // (and any others) so the captured canvas holds THIS frame.
                   previewStageRef.current?.draw();
                   for (const st of Konva.stages) st.draw();
+                  // A GPU effect that fails mid-export must abort, never ship a
+                  // frame with the effect silently missing.
+                  const gpuError = takeGpuFailure();
+                  if (gpuError) throw new GpuFailureError(`Export stopped: GPU effect failed — ${gpuError}`);
                 },
                 onFrameRendered: probing ? (relMs) => probePreview(canvas, inMs + relMs) : undefined,
                 onProgress: (frac) => {
@@ -3437,6 +3650,7 @@ export default function App() {
                 webmLen = await runEncode("h264");
                 usedCodec = "h264";
               } catch (e) {
+                if (isGpuFailure(e)) throw e; // never retry around a failed GPU effect
                 if (cancelRef.current) throw e; // the user cancelled
                 console.warn("GPU H.264 export failed, using the standard encoder", e);
                 setExportMsg("GPU encoder unavailable — using the standard encoder…");
@@ -3459,6 +3673,9 @@ export default function App() {
             // silent (a status line the next message overwrote), so a failed
             // frame-accurate render quietly turned into a frozen one. Say so and let
             // the user decide; unattended (agent/MCP) exports just fail.
+            // A GPU failure is different: the realtime path would render with the
+            // effect missing, so abort instead of offering the fallback.
+            if (isGpuFailure(e)) throw e;
             if (cancelRef.current) throw e; // cancelled, not failed: no fallback prompt
             console.error("deterministic export failed", e);
             const useRealtime =
@@ -3579,12 +3796,20 @@ export default function App() {
         // Where the time went — shown in the console and kept in the session log.
         const totalMs = performance.now() - exportStartedAt;
         const secs = (ms: number) => +(ms / 1000).toFixed(1);
+        // WP9: per-layer applyEffects cost (grouped by each layer's stack kind).
+        const effectCost = effectTiming();
+        const effectByStack = Object.fromEntries(
+          Object.entries(effectCost.byStack).map(([stack, ms]) => [stack, secs(ms)])
+        );
         const perf = {
           mode: fast ? "fast" : "exact",
           codec: usedCodec,
           frames: stats.frames,
           totalS: secs(totalMs),
           fpsAchieved: stats.frames ? +((stats.frames / Math.max(1, totalMs - (timing.proxyMs ?? 0) - (timing.ffmpegMs ?? 0))) * 1000).toFixed(1) : 0,
+          effectS: secs(effectCost.totalMs),
+          effectCalls: effectCost.calls,
+          effectByStack,
           proxyS: secs(timing.proxyMs ?? 0),
           evaluateS: secs(phase.evalMs),
           videoSeekS: secs(phase.seekMs),
@@ -4206,6 +4431,10 @@ export default function App() {
       // letting the key re-trigger the parameter.
       const onControl = tag === "INPUT" || tag === "SELECT" || tag === "BUTTON" || typing;
       if (e.key === "Escape") {
+        if (keyColorPickRef.current) {
+          setKeyColorPick(null);
+          return;
+        }
         setSelectedPart(null);
         setDecomposeId(null);
         setSelectedId(null);
@@ -4410,6 +4639,15 @@ export default function App() {
   if (!project) return <div className="loading">Loading…</div>;
 
   const selectedLayer = project.layers.find((l) => l.id === selectedId) ?? null;
+  // The Key Color eyedropper works on a flat image/video layer in the current
+  // editing scope. Groups are edited by entering them (their children are
+  // top-level there), so group children are covered; grid cells and 3D decals
+  // stay excluded.
+  const canPickKeyColor =
+    !!selectedLayer &&
+    selectedId != null &&
+    !selectedLayer.attach &&
+    (selectedLayer.kind.kind === "image" || selectedLayer.kind.kind === "video");
   // All 3D-shape objects, for the "pin to shape" picker.
   const shapes = project.layers
     .filter((l) => l.kind.kind === "shape3d")
@@ -4897,6 +5135,8 @@ export default function App() {
             previewQuality={previewQuality}
             onSetPreviewQuality={setPreviewQuality}
             fpsOverlay={fpsOverlay}
+            keyColorPick={keyColorPick}
+            onKeyColorPicked={onKeyColorPicked}
           />
           {merging && (
             <div className="export-overlay">
@@ -4963,6 +5203,16 @@ export default function App() {
           onSetTornEdgeStatic={onSetTornEdgeStatic}
           onSetShineStatic={onSetShineStatic}
           onSetGpuFxStatic={onSetGpuFxStatic}
+          onSetUltraKeyStatic={onSetUltraKeyStatic}
+          onSetUltraKeyColorKey={onSetUltraKeyColorKey}
+          onClearUltraKeyColorKeys={onClearUltraKeyColorKeys}
+          onApplyUltraKeyPreset={onApplyUltraKeyPreset}
+          onStartKeyColorPick={canPickKeyColor ? startKeyColorPick : undefined}
+          keyColorPickIndex={keyColorPick && keyColorPick.layerId === selectedId ? keyColorPick.index : null}
+          onSetCellUltraKeyStatic={onSetCellUltraKeyStatic}
+          onSetCellUltraKeyColorKey={onSetCellUltraKeyColorKey}
+          onClearCellUltraKeyColorKeys={onClearCellUltraKeyColorKeys}
+          onApplyCellUltraKeyPreset={onApplyCellUltraKeyPreset}
           onShapeParams={onShapeParams}
           onShapeRotKey={onShapeRotKey}
           onSetShape2d={onSetShape2d}
@@ -5418,6 +5668,7 @@ export default function App() {
               : mediaThumbs[fxLayer.kind.src]
           }
           effects={resolved[fxLayer.id]?.effects ?? []}
+          timeMs={time}
           onAddEffect={onAddEffect}
           onRemoveEffect={onRemoveEffect}
           onKeyEffect={onKeyEffect}
@@ -5425,6 +5676,10 @@ export default function App() {
           onSetTornEdgeStatic={onSetTornEdgeStatic}
           onSetShineStatic={onSetShineStatic}
           onSetGpuFxStatic={onSetGpuFxStatic}
+          onSetUltraKeyStatic={onSetUltraKeyStatic}
+          onSetUltraKeyColorKey={onSetUltraKeyColorKey}
+          onClearUltraKeyColorKeys={onClearUltraKeyColorKeys}
+          onApplyUltraKeyPreset={onApplyUltraKeyPreset}
           onClose={() => setFxEditorId(null)}
         />
       )}

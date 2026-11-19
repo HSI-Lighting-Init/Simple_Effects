@@ -978,6 +978,18 @@ fn media_has_audio(path: String) -> Option<bool> {
     mp4_tracks::has_sound_track(&mut r)
 }
 
+/// When a file's first video frame is stamped (the video stream's start_time),
+/// read from the MP4/MOV boxes without decoding. A browser plays clip time `t` at
+/// media time `t + offset` to show the frame an editor shows; None = unknown
+/// (other container / unreadable), which the frontend treats as 0. Read per file:
+/// a seek proxy has its own.
+#[tauri::command]
+fn media_video_offset(path: String) -> Option<f64> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut r = std::io::BufReader::new(file);
+    mp4_tracks::video_start_offset(&mut r)
+}
+
 /// Show a video's own sound rows (flag off, rows moved directly above it) or hide
 /// them back into the video's row. `layer_id` may be the video or one of its
 /// sounds. Undoable.
@@ -4837,6 +4849,11 @@ fn effect_track_mut<'a>(e: &'a mut Effect, param: &str) -> Option<&'a mut Track>
         (Effect::Invert { amount }, "amount") => Some(amount),
         (Effect::Wipe { position, .. }, "position") => Some(position),
         (Effect::Wipe { softness, .. }, "softness") => Some(softness),
+        (Effect::Crop { left, .. }, "left") => Some(left),
+        (Effect::Crop { top, .. }, "top") => Some(top),
+        (Effect::Crop { right, .. }, "right") => Some(right),
+        (Effect::Crop { bottom, .. }, "bottom") => Some(bottom),
+        (Effect::Crop { feather, .. }, "feather") => Some(feather),
         (Effect::ShinyClouds { intensity, .. }, "intensity") => Some(intensity),
         (Effect::ShinyClouds { scale, .. }, "scale") => Some(scale),
         (Effect::ShinyClouds { speed, .. }, "speed") => Some(speed),
@@ -4851,8 +4868,182 @@ fn effect_track_mut<'a>(e: &'a mut Effect, param: &str) -> Option<&'a mut Track>
         (Effect::GpuOverlay { softness, .. }, "softness") => Some(softness),
         (Effect::GpuOverlay { extra, .. }, "extra") => Some(extra),
         (Effect::GpuOverlay { opacity, .. }, "opacity") => Some(opacity),
+        (Effect::UltraKey { transparency, .. }, "transparency") => Some(transparency),
+        (Effect::UltraKey { highlight, .. }, "highlight") => Some(highlight),
+        (Effect::UltraKey { shadow, .. }, "shadow") => Some(shadow),
+        (Effect::UltraKey { tolerance, .. }, "tolerance") => Some(tolerance),
+        (Effect::UltraKey { pedestal, .. }, "pedestal") => Some(pedestal),
+        (Effect::UltraKey { choke, .. }, "choke") => Some(choke),
+        (Effect::UltraKey { soften, .. }, "soften") => Some(soften),
+        (Effect::UltraKey { contrast, .. }, "contrast") => Some(contrast),
+        (Effect::UltraKey { mid_point, .. }, "midPoint") => Some(mid_point),
+        (Effect::UltraKey { desaturate, .. }, "desaturate") => Some(desaturate),
+        (Effect::UltraKey { range, .. }, "range") => Some(range),
+        (Effect::UltraKey { spill, .. }, "spill") => Some(spill),
+        (Effect::UltraKey { luma, .. }, "luma") => Some(luma),
+        (Effect::UltraKey { saturation, .. }, "saturation") => Some(saturation),
+        (Effect::UltraKey { hue, .. }, "hue") => Some(hue),
+        (Effect::UltraKey { luminance, .. }, "luminance") => Some(luminance),
         _ => None,
     }
+}
+
+/// Editing one of Ultra Key's 13 preset sliders away from its registered
+/// default flips Setting to Custom (Premiere's UI rule). Other params leave it.
+fn mark_ultrakey_custom(effect: &mut Effect, param: &str, value: f32) {
+    let Some(i) = crate::model::ULTRA_KEY_TRACK_NAMES.iter().position(|p| *p == param) else {
+        return;
+    };
+    if let Effect::UltraKey { setting, .. } = effect {
+        if value != crate::model::ULTRA_KEY_DEFAULTS[i] {
+            *setting = 3;
+        }
+    }
+}
+
+/// The 13 preset-order slider values of an Ultra Key effect at `t_ms`.
+fn ultrakey_track_values_at(effect: &Effect, t_ms: u32) -> Option<[f32; 13]> {
+    let Effect::UltraKey {
+        transparency,
+        highlight,
+        shadow,
+        tolerance,
+        pedestal,
+        choke,
+        soften,
+        contrast,
+        mid_point,
+        desaturate,
+        range,
+        spill,
+        luma,
+        ..
+    } = effect
+    else {
+        return None;
+    };
+    Some([
+        eval::sample_track(transparency, t_ms),
+        eval::sample_track(highlight, t_ms),
+        eval::sample_track(shadow, t_ms),
+        eval::sample_track(tolerance, t_ms),
+        eval::sample_track(pedestal, t_ms),
+        eval::sample_track(choke, t_ms),
+        eval::sample_track(soften, t_ms),
+        eval::sample_track(contrast, t_ms),
+        eval::sample_track(mid_point, t_ms),
+        eval::sample_track(desaturate, t_ms),
+        eval::sample_track(range, t_ms),
+        eval::sample_track(spill, t_ms),
+        eval::sample_track(luma, t_ms),
+    ])
+}
+
+/// Write 13 preset-order values to an Ultra Key effect's slider tracks. Unkeyed
+/// tracks take the value as their constant; keyed tracks get an inserted/updated
+/// key at `t_ms` (Premiere writes presets at the playhead).
+fn set_ultrakey_track_values(
+    effect: &mut Effect,
+    t_ms: u32,
+    start_ms: u32,
+    values: &[f32],
+) -> Result<(), String> {
+    let Effect::UltraKey {
+        transparency,
+        highlight,
+        shadow,
+        tolerance,
+        pedestal,
+        choke,
+        soften,
+        contrast,
+        mid_point,
+        desaturate,
+        range,
+        spill,
+        luma,
+        ..
+    } = effect
+    else {
+        return Err("not an ultra key effect".into());
+    };
+    let tracks = [
+        transparency,
+        highlight,
+        shadow,
+        tolerance,
+        pedestal,
+        choke,
+        soften,
+        contrast,
+        mid_point,
+        desaturate,
+        range,
+        spill,
+        luma,
+    ];
+    for (track, value) in tracks.into_iter().zip(values.iter().copied()) {
+        if track.keys.is_empty() {
+            track.default = value;
+        } else {
+            upsert_key(track, t_ms, Some(value), false, start_ms, None);
+        }
+    }
+    Ok(())
+}
+
+/// Write a Setting to an Ultra Key effect. Choosing a preset while Setting is
+/// Custom first snapshots the current slider values into `custom`; choosing
+/// Custom writes that snapshot back (or leaves the sliders alone when it is
+/// still empty). `values` is in `ULTRA_KEY_TRACK_NAMES` order and is ignored
+/// when restoring Custom.
+fn write_ultrakey_values(
+    effect: &mut Effect,
+    t_ms: u32,
+    start_ms: u32,
+    setting: u8,
+    values: &[f32],
+) -> Result<(), String> {
+    if setting > 3 {
+        return Err("ultrakey setting must be 0..3".into());
+    }
+    if !matches!(effect, Effect::UltraKey { .. }) {
+        return Err("not an ultra key effect".into());
+    }
+
+    if setting == 3 {
+        let custom = if let Effect::UltraKey { custom, .. } = effect {
+            custom.clone()
+        } else {
+            unreachable!()
+        };
+        if let Effect::UltraKey { setting: s, .. } = effect {
+            *s = 3;
+        }
+        if custom.len() == crate::model::ULTRA_KEY_TRACK_NAMES.len() {
+            set_ultrakey_track_values(effect, t_ms, start_ms, &custom)?;
+        }
+        return Ok(());
+    }
+
+    if values.len() != crate::model::ULTRA_KEY_TRACK_NAMES.len() {
+        return Err("ultrakey preset needs 13 values".into());
+    }
+
+    // Leaving Custom keeps this instance's sliders for the next Custom pick.
+    if matches!(effect, Effect::UltraKey { setting: 3, .. }) {
+        if let Some(snapshot) = ultrakey_track_values_at(effect, t_ms) {
+            if let Effect::UltraKey { custom, .. } = effect {
+                *custom = snapshot.to_vec();
+            }
+        }
+    }
+
+    set_ultrakey_track_values(effect, t_ms, start_ms, values)?;
+    if let Effect::UltraKey { setting: s, .. } = effect {
+        *s = setting;
+    }
+    Ok(())
 }
 
 /// Append a default effect of the named kind to a layer's effect stack. Undoable.
@@ -4909,6 +5100,7 @@ fn key_effect(
     let effect = layer.effects.get_mut(index).ok_or("effect index out of range")?;
     let track = effect_track_mut(effect, &param).ok_or("effect has no such parameter")?;
     upsert_key(track, t_ms, Some(value), seed_start, start, None);
+    mark_ultrakey_custom(effect, &param, value);
     Ok(project.clone())
 }
 
@@ -5039,6 +5231,138 @@ fn set_gpufx_static(
     Ok(project.clone())
 }
 
+/// Write Ultra Key's static fields. The key colour is left alone while the
+/// effect has Key Colour keyframes: the list wins in the resolver anyway, and
+/// the static value stays the fallback (the first key), as with text colour.
+fn write_ultrakey_static(
+    effect: &mut Effect,
+    key_color: Rgba,
+    output: u8,
+    setting: u8,
+) -> Result<(), String> {
+    match effect {
+        Effect::UltraKey { key_color: k, key_color_keys, output: o, setting: s, .. } => {
+            if key_color_keys.is_empty() {
+                *k = key_color;
+            }
+            *o = output;
+            *s = setting;
+        }
+        _ => return Err("not an ultra key effect".into()),
+    }
+    Ok(())
+}
+
+/// Set an Ultra Key effect's static fields: key colour, output mode (0 Composite
+/// · 1 Alpha Channel · 2 Color Channel) and Setting.
+#[tauri::command]
+fn set_ultrakey_static(
+    state: State<AppState>,
+    layer_id: u32,
+    index: usize,
+    key_color: Rgba,
+    output: u8,
+    setting: u8,
+) -> Result<Project, String> {
+    if output > 2 {
+        return Err("ultrakey output must be 0..2".into());
+    }
+    if setting > 3 {
+        return Err("ultrakey setting must be 0..3".into());
+    }
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let effect = layer.effects.get_mut(index).ok_or("not an ultra key effect")?;
+    write_ultrakey_static(effect, key_color, output, setting)?;
+    Ok(project.clone())
+}
+
+/// Set an Ultra Key's Key Colour at the playhead: writes/replaces the colour key
+/// at `t_ms` on its keyframe list (WP6). Mirrors `set_text_color`; the static
+/// colour follows the first key so clearing later still has a sensible fallback.
+#[tauri::command]
+fn set_ultrakey_color_key(
+    state: State<AppState>,
+    layer_id: u32,
+    index: usize,
+    color: Rgba,
+    t_ms: u32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let effect = layer.effects.get_mut(index).ok_or("effect index out of range")?;
+    let Effect::UltraKey { key_color, key_color_keys, .. } = effect else {
+        return Err("not an ultra key effect".into());
+    };
+    let prev = key_color_keys.last().map(|k| k.color).unwrap_or(*key_color);
+    upsert_color_key(key_color_keys, t_ms, color, prev, false, 0);
+    if let Some(first) = key_color_keys.first() {
+        *key_color = first.color;
+    }
+    Ok(project.clone())
+}
+
+/// Clear an Ultra Key's Key Colour keyframes, collapsing to the given static
+/// colour. Mirrors `clear_text_color_keys`. Undoable.
+#[tauri::command]
+fn clear_ultrakey_color_keys(
+    state: State<AppState>,
+    layer_id: u32,
+    index: usize,
+    color: Rgba,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    match layer.effects.get_mut(index) {
+        Some(Effect::UltraKey { key_color, key_color_keys, .. }) => {
+            key_color_keys.clear();
+            *key_color = color;
+        }
+        _ => return Err("not an ultra key effect".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Apply a Setting preset (or restore Custom) to an Ultra Key effect. `values`
+/// is the 13 preset-order sliders; unkeyed tracks take it as a constant, keyed
+/// tracks get a key at `t_ms`. Undoable.
+#[tauri::command]
+fn apply_ultrakey_preset(
+    state: State<AppState>,
+    layer_id: u32,
+    index: usize,
+    t_ms: u32,
+    setting: u8,
+    values: Vec<f32>,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project
+        .layers
+        .iter_mut()
+        .find(|l| l.id == layer_id)
+        .ok_or("layer not found")?;
+    let start = layer.start_ms;
+    let effect = layer.effects.get_mut(index).ok_or("effect index out of range")?;
+    write_ultrakey_values(effect, t_ms, start, setting, &values)?;
+    Ok(project.clone())
+}
+
 /// Borrow one grid cell's effect stack mutably (errors if not a grid / bad cell).
 fn cell_effects_mut(layer: &mut Layer, cell: u32) -> Result<&mut Vec<Effect>, String> {
     let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
@@ -5092,6 +5416,7 @@ fn key_cell_effect(
     let effect = fx.get_mut(index).ok_or("effect index out of range")?;
     let track = effect_track_mut(effect, &param).ok_or("effect has no such parameter")?;
     upsert_key(track, t_ms, Some(value), seed_start, start, None);
+    mark_ultrakey_custom(effect, &param, value);
     Ok(project.clone())
 }
 
@@ -5170,6 +5495,98 @@ fn set_cell_gpufx_static(
         }
         _ => return Err("not a gpu overlay effect".into()),
     }
+    Ok(project.clone())
+}
+
+/// Set a grid cell's Ultra Key static fields. Undoable.
+#[tauri::command]
+fn set_cell_ultrakey_static(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    index: usize,
+    key_color: Rgba,
+    output: u8,
+    setting: u8,
+) -> Result<Project, String> {
+    if output > 2 {
+        return Err("ultrakey output must be 0..2".into());
+    }
+    if setting > 3 {
+        return Err("ultrakey setting must be 0..3".into());
+    }
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let effect = cell_effects_mut(layer, cell)?.get_mut(index).ok_or("not an ultra key effect")?;
+    write_ultrakey_static(effect, key_color, output, setting)?;
+    Ok(project.clone())
+}
+
+/// Set a grid cell's Ultra Key Key Colour at the playhead. Undoable.
+#[tauri::command]
+fn set_cell_ultrakey_color_key(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    index: usize,
+    color: Rgba,
+    t_ms: u32,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let effect = cell_effects_mut(layer, cell)?.get_mut(index).ok_or("effect index out of range")?;
+    let Effect::UltraKey { key_color, key_color_keys, .. } = effect else {
+        return Err("not an ultra key effect".into());
+    };
+    let prev = key_color_keys.last().map(|k| k.color).unwrap_or(*key_color);
+    upsert_color_key(key_color_keys, t_ms, color, prev, false, 0);
+    if let Some(first) = key_color_keys.first() {
+        *key_color = first.color;
+    }
+    Ok(project.clone())
+}
+
+/// Clear a grid cell's Ultra Key Key Colour keyframes. Undoable.
+#[tauri::command]
+fn clear_cell_ultrakey_color_keys(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    index: usize,
+    color: Rgba,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    match cell_effects_mut(layer, cell)?.get_mut(index) {
+        Some(Effect::UltraKey { key_color, key_color_keys, .. }) => {
+            key_color_keys.clear();
+            *key_color = color;
+        }
+        _ => return Err("not an ultra key effect".into()),
+    }
+    Ok(project.clone())
+}
+
+/// Apply a Setting preset to a grid cell's Ultra Key effect. Undoable.
+#[tauri::command]
+fn apply_cell_ultrakey_preset(
+    state: State<AppState>,
+    layer_id: u32,
+    cell: u32,
+    index: usize,
+    t_ms: u32,
+    setting: u8,
+    values: Vec<f32>,
+) -> Result<Project, String> {
+    let mut project = state.project.lock().unwrap();
+    state.snapshot(&project);
+    let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
+    let start = layer.start_ms;
+    let effect = cell_effects_mut(layer, cell)?.get_mut(index).ok_or("effect index out of range")?;
+    write_ultrakey_values(effect, t_ms, start, setting, &values)?;
     Ok(project.clone())
 }
 
@@ -5416,6 +5833,60 @@ fn for_each_cell_track_mut(
     Ok(())
 }
 
+/// Call `f` on each colour-key list belonging to ONE grid cell's effect stack.
+fn for_each_cell_color_keys_mut(
+    layer: &mut Layer,
+    cell: u32,
+    mut f: impl FnMut(&mut Vec<ColorKey>, Option<&mut Rgba>),
+) -> Result<(), String> {
+    let LayerKind::FrameGrid { cells, .. } = &mut layer.kind else {
+        return Err("not a frame grid".into());
+    };
+    let c = cells.get_mut(cell as usize).ok_or("cell out of range")?;
+    for e in c.effects.iter_mut() {
+        walk_effect_color_keys(e, &mut f);
+    }
+    Ok(())
+}
+
+/// Retime every key of ONE grid cell at `from_ms` to `to_ms` (numeric Tracks and
+/// effect colour keys share the time base).
+fn move_cell_keys(layer: &mut Layer, cell: u32, from_ms: u32, to: u32) -> Result<(), String> {
+    for_each_cell_track_mut(layer, cell, |tr| {
+        if !tr.keys.iter().any(|k| k.time_ms == from_ms) {
+            return;
+        }
+        tr.keys.retain(|k| k.time_ms != to);
+        for k in tr.keys.iter_mut() {
+            if k.time_ms == from_ms {
+                k.time_ms = to;
+            }
+        }
+        tr.keys.sort_by(|a, b| a.time_ms.cmp(&b.time_ms));
+    })?;
+    for_each_cell_color_keys_mut(layer, cell, |keys, _| {
+        if !keys.iter().any(|k| k.time_ms == from_ms) {
+            return;
+        }
+        keys.retain(|k| k.time_ms != to);
+        for k in keys.iter_mut() {
+            if k.time_ms == from_ms {
+                k.time_ms = to;
+            }
+        }
+        keys.sort_by_key(|k| k.time_ms);
+    })?;
+    Ok(())
+}
+
+/// Delete every key of ONE grid cell at `t_ms` (numeric Tracks and effect
+/// colour keys).
+fn delete_cell_keys(layer: &mut Layer, cell: u32, t_ms: u32) -> Result<(), String> {
+    for_each_cell_track_mut(layer, cell, |tr| tr.keys.retain(|k| k.time_ms != t_ms))?;
+    for_each_cell_color_keys_mut(layer, cell, |keys, _| keys.retain(|k| k.time_ms != t_ms))?;
+    Ok(())
+}
+
 /// Retime every keyframe of one grid cell that sits at `from_ms` to `to_ms`
 /// (drag a diamond in the cell's child timeline). Undoable.
 #[tauri::command]
@@ -5434,18 +5905,7 @@ fn move_cell_keyframes_at(
     if to == from_ms {
         return Ok(project.clone());
     }
-    for_each_cell_track_mut(layer, cell, |tr| {
-        if !tr.keys.iter().any(|k| k.time_ms == from_ms) {
-            return;
-        }
-        tr.keys.retain(|k| k.time_ms != to);
-        for k in tr.keys.iter_mut() {
-            if k.time_ms == from_ms {
-                k.time_ms = to;
-            }
-        }
-        tr.keys.sort_by(|a, b| a.time_ms.cmp(&b.time_ms));
-    })?;
+    move_cell_keys(layer, cell, from_ms, to)?;
     Ok(project.clone())
 }
 
@@ -5460,7 +5920,7 @@ fn delete_cell_keyframes_at(
     let mut project = state.project.lock().unwrap();
     state.snapshot(&project);
     let layer = project.layers.iter_mut().find(|l| l.id == layer_id).ok_or("layer not found")?;
-    for_each_cell_track_mut(layer, cell, |tr| tr.keys.retain(|k| k.time_ms != t_ms))?;
+    delete_cell_keys(layer, cell, t_ms)?;
     Ok(project.clone())
 }
 
@@ -5540,6 +6000,7 @@ fn key_linked_effect(
     let effect = fx.get_mut(index).ok_or("effect index out of range")?;
     let track = effect_track_mut(effect, &param).ok_or("effect has no such parameter")?;
     upsert_key(track, t_ms, Some(value), seed_start, start, None);
+    mark_ultrakey_custom(effect, &param, value);
     Ok(project.clone())
 }
 
@@ -6550,6 +7011,31 @@ fn for_each_color_keys_mut(layer: &mut Layer, mut f: impl FnMut(&mut Vec<ColorKe
         }
         _ => {}
     }
+    // Effect colour keys sit in the same three stacks `for_each_track_mut`
+    // reaches: layer effects, grid-cell effects, linked-group effects.
+    if let LayerKind::FrameGrid { cells, linked, .. } = &mut layer.kind {
+        for cell in cells.iter_mut() {
+            for e in cell.effects.iter_mut() {
+                walk_effect_color_keys(e, &mut f);
+            }
+        }
+        for g in linked.iter_mut() {
+            for e in g.effects.iter_mut() {
+                walk_effect_color_keys(e, &mut f);
+            }
+        }
+    }
+    for e in &mut layer.effects {
+        walk_effect_color_keys(e, &mut f);
+    }
+}
+
+/// Call `f` on each effect's colour-keyframe list (with the static colour it
+/// animates). Only Ultra Key has one today.
+fn walk_effect_color_keys(e: &mut Effect, f: &mut dyn FnMut(&mut Vec<ColorKey>, Option<&mut Rgba>)) {
+    if let Effect::UltraKey { key_color, key_color_keys, .. } = e {
+        f(key_color_keys, Some(key_color));
+    }
 }
 
 fn for_each_track_mut(layer: &mut Layer, mut f: impl FnMut(&mut Track)) {
@@ -6682,6 +7168,13 @@ fn walk_effect_tracks(e: &mut Effect, f: &mut dyn FnMut(&mut Track)) {
         }
         // Fully static — no Track fields to walk.
         Effect::TornEdge { .. } => {}
+        Effect::Crop { left, top, right, bottom, feather } => {
+            f(left);
+            f(top);
+            f(right);
+            f(bottom);
+            f(feather);
+        }
         Effect::ShinyClouds {
             intensity, scale, speed, complexity, contrast, brightness, opacity, ..
         } => {
@@ -6703,6 +7196,42 @@ fn walk_effect_tracks(e: &mut Effect, f: &mut dyn FnMut(&mut Track)) {
             f(softness);
             f(extra);
             f(opacity);
+        }
+        Effect::UltraKey {
+            transparency,
+            highlight,
+            shadow,
+            tolerance,
+            pedestal,
+            choke,
+            soften,
+            contrast,
+            mid_point,
+            desaturate,
+            range,
+            spill,
+            luma,
+            saturation,
+            hue,
+            luminance,
+            ..
+        } => {
+            f(transparency);
+            f(highlight);
+            f(shadow);
+            f(tolerance);
+            f(pedestal);
+            f(choke);
+            f(soften);
+            f(contrast);
+            f(mid_point);
+            f(desaturate);
+            f(range);
+            f(spill);
+            f(luma);
+            f(saturation);
+            f(hue);
+            f(luminance);
         }
     }
 }
@@ -7435,6 +7964,7 @@ pub fn run() {
             add_image_layer,
             add_video_layer,
             media_has_audio,
+        media_video_offset,
             add_audio_layer,
             set_audio_track_shown,
             subtitles::import_subtitles,
@@ -7507,6 +8037,10 @@ pub fn run() {
             set_cell_wipe_static,
             set_cell_shine_static,
             set_cell_gpufx_static,
+            set_cell_ultrakey_static,
+            set_cell_ultrakey_color_key,
+            clear_cell_ultrakey_color_keys,
+            apply_cell_ultrakey_preset,
             set_cell_pan,
             paste_cell_effects,
             paste_cell_effects_all,
@@ -7533,6 +8067,10 @@ pub fn run() {
             set_tornedge_static,
             set_shine_static,
             set_gpufx_static,
+            set_ultrakey_static,
+            set_ultrakey_color_key,
+            clear_ultrakey_color_keys,
+            apply_ultrakey_preset,
             save_binary_file,
             delete_layer,
             delete_keyframes_at,
@@ -8467,5 +9005,373 @@ mod text_look_tests {
         shift_layer_time(&mut l, 500);
         let LayerKind::Text { animators, .. } = &l.kind else { panic!() };
         assert_eq!(animators[0].selector.offset.keys[0].time_ms, 1500);
+    }
+}
+
+#[cfg(test)]
+mod ultrakey_tests {
+    use super::*;
+
+    fn default_effect() -> Effect {
+        Effect::default_of("ultrakey").expect("ultrakey kind")
+    }
+
+    #[test]
+    fn default_is_premieres_default_preset_with_a_black_key() {
+        let e = default_effect();
+        let Effect::UltraKey { transparency, highlight, shadow, key_color, setting, .. } = &e else {
+            panic!("not ultrakey");
+        };
+        assert_eq!(transparency.default, 45.0);
+        assert_eq!(highlight.default, 10.0);
+        assert_eq!(shadow.default, 50.0);
+        assert_eq!((key_color.r, key_color.g, key_color.b, key_color.a), (0, 0, 0, 255));
+        assert_eq!(*setting, 0);
+    }
+
+    #[test]
+    fn preset_writes_unkeyed_tracks_as_constants_and_sets_setting() {
+        let mut e = default_effect();
+        write_ultrakey_values(
+            &mut e,
+            500,
+            0,
+            2,
+            &[40.0, 10.0, 55.0, 90.0, 50.0, 10.0, 10.0, 10.0, 50.0, 50.0, 50.0, 50.0, 50.0],
+        )
+        .unwrap();
+        let Effect::UltraKey { transparency, soften, setting, .. } = &e else { panic!() };
+        assert_eq!(transparency.default, 40.0);
+        assert!(transparency.keys.is_empty(), "unkeyed track stays a constant");
+        assert_eq!(soften.default, 10.0);
+        assert_eq!(*setting, 2);
+    }
+
+    #[test]
+    fn preset_on_a_keyed_track_writes_a_key_at_the_playhead() {
+        let mut e = default_effect();
+        let Effect::UltraKey { transparency, .. } = &mut e else { panic!() };
+        transparency.keys.push(Keyframe { time_ms: 100, value: 45.0, easing: Easing::Linear });
+        write_ultrakey_values(
+            &mut e,
+            500,
+            0,
+            2,
+            &[60.0, 10.0, 50.0, 50.0, 10.0, 0.0, 0.0, 0.0, 50.0, 25.0, 50.0, 50.0, 50.0],
+        )
+        .unwrap();
+        let Effect::UltraKey { transparency, setting, .. } = &e else { panic!() };
+        assert_eq!(transparency.keys.len(), 2);
+        assert_eq!(transparency.keys[1].time_ms, 500);
+        assert_eq!(transparency.keys[1].value, 60.0);
+        assert_eq!(*setting, 2);
+    }
+
+    #[test]
+    fn editing_a_preset_slider_away_from_its_default_flips_custom() {
+        let mut e = default_effect();
+        mark_ultrakey_custom(&mut e, "transparency", 60.0);
+        let Effect::UltraKey { setting, .. } = &e else { panic!() };
+        assert_eq!(*setting, 3);
+
+        let mut e = default_effect();
+        mark_ultrakey_custom(&mut e, "transparency", 45.0);
+        let Effect::UltraKey { setting, .. } = &e else { panic!() };
+        assert_eq!(*setting, 0, "editing back to the default does not flip");
+
+        let mut e = default_effect();
+        mark_ultrakey_custom(&mut e, "saturation", 150.0);
+        let Effect::UltraKey { setting, .. } = &e else { panic!() };
+        assert_eq!(*setting, 0, "CC sliders are not preset sliders");
+    }
+
+    #[test]
+    fn preset_requires_thirteen_values_and_an_ultrakey_effect() {
+        let mut e = default_effect();
+        assert!(write_ultrakey_values(&mut e, 0, 0, 0, &[1.0]).is_err());
+        let mut other = Effect::default_of("blur").unwrap();
+        assert!(write_ultrakey_values(&mut other, 0, 0, 0, &[0.0; 13]).is_err());
+    }
+
+    #[test]
+    fn custom_to_default_to_custom_restores_the_custom_values() {
+        let mut e = default_effect();
+        if let Effect::UltraKey { transparency, setting, .. } = &mut e {
+            transparency.default = 60.0;
+            *setting = 3;
+        }
+
+        write_ultrakey_values(&mut e, 0, 0, 0, &crate::model::ULTRA_KEY_DEFAULTS).unwrap();
+        let Effect::UltraKey { transparency, custom, .. } = &e else { panic!() };
+        assert_eq!(transparency.default, 45.0);
+        assert_eq!(
+            custom.as_slice(),
+            &[60.0, 10.0, 50.0, 50.0, 10.0, 0.0, 0.0, 0.0, 50.0, 25.0, 50.0, 50.0, 50.0]
+        );
+
+        write_ultrakey_values(&mut e, 0, 0, 3, &[]).unwrap();
+        let Effect::UltraKey { transparency, setting, .. } = &e else { panic!() };
+        assert_eq!(transparency.default, 60.0);
+        assert_eq!(*setting, 3);
+    }
+
+    #[test]
+    fn choosing_custom_without_a_snapshot_leaves_the_sliders_alone() {
+        let mut e = default_effect();
+        if let Effect::UltraKey { transparency, setting, .. } = &mut e {
+            transparency.default = 70.0;
+            *setting = 0;
+        }
+        write_ultrakey_values(&mut e, 0, 0, 3, &[]).unwrap();
+        let Effect::UltraKey { transparency, setting, custom, .. } = &e else { panic!() };
+        assert_eq!(transparency.default, 70.0);
+        assert_eq!(*setting, 3);
+        assert!(custom.is_empty());
+    }
+
+    #[test]
+    fn custom_survives_a_serialize_deserialize_round_trip() {
+        let mut e = default_effect();
+        let values = [61.0, 11.0, 51.0, 52.0, 12.0, 1.0, 2.0, 3.0, 53.0, 26.0, 51.0, 52.0, 55.0];
+        if let Effect::UltraKey { custom, .. } = &mut e {
+            *custom = values.to_vec();
+        }
+
+        let json = serde_json::to_string(&e).unwrap();
+        let back: Effect = serde_json::from_str(&json).unwrap();
+        let Effect::UltraKey { custom, .. } = back else { panic!() };
+        assert_eq!(custom, values.to_vec());
+
+        let mut old: serde_json::Value = serde_json::from_str(&json).unwrap();
+        old.as_object_mut().unwrap().remove("custom");
+        let old: Effect = serde_json::from_value(old).unwrap();
+        let Effect::UltraKey { custom, .. } = old else { panic!() };
+        assert!(custom.is_empty(), "old projects load with an empty snapshot");
+    }
+
+    // --- WP6: keyframed Key Colour -------------------------------------------
+
+    fn green_a() -> Rgba {
+        Rgba { r: 40, g: 198, b: 59, a: 255 }
+    }
+    fn green_b() -> Rgba {
+        Rgba { r: 60, g: 120, b: 40, a: 255 }
+    }
+
+    /// An Ultra Key whose `transparency` track and Key Colour list both have a
+    /// key at each time in `times` (the numeric and colour keys share a base).
+    fn keyed_effect(times: &[u32], color: Rgba) -> Effect {
+        let mut e = default_effect();
+        let Effect::UltraKey { transparency, key_color_keys, .. } = &mut e else { panic!() };
+        for &t in times {
+            transparency.keys.push(Keyframe { time_ms: t, value: 45.0, easing: Easing::Linear });
+            key_color_keys.push(ColorKey { time_ms: t, color, easing: Easing::Linear });
+        }
+        e
+    }
+
+    fn patch_layer(effects: Vec<Effect>) -> Layer {
+        Layer {
+            id: 1,
+            name: "keyed".into(),
+            start_ms: 0,
+            end_ms: 3000,
+            kind: LayerKind::ColorPatch {
+                color: Rgba { r: 10, g: 20, b: 30, a: 255 },
+                blend: crate::model::BlendMode::Normal,
+                width: 100.0,
+                height: 100.0,
+            },
+            transform: Transform::at(0.0, 0.0),
+            hidden: false,
+            attach: None,
+            effects,
+            transition_in: None,
+            transition_out: None,
+        }
+    }
+
+    #[test]
+    fn old_projects_load_without_key_colour_keys() {
+        let mut e = default_effect();
+        let Effect::UltraKey { key_color, key_color_keys, .. } = &mut e else { panic!() };
+        *key_color = green_a();
+        *key_color_keys = vec![ColorKey { time_ms: 0, color: green_a(), easing: Easing::Linear }];
+
+        let json = serde_json::to_value(&e).unwrap();
+        assert!(json.get("keyColorKeys").is_some(), "a keyed effect writes its colour keys");
+        let back: Effect = serde_json::from_value(json.clone()).unwrap();
+        let Effect::UltraKey { key_color_keys, .. } = &back else { panic!() };
+        assert_eq!(key_color_keys.len(), 1);
+
+        // Steps 2-6 saved Ultra Key without this list: the field must default.
+        let mut old = json;
+        old.as_object_mut().unwrap().remove("keyColorKeys");
+        let old: Effect = serde_json::from_value(old).unwrap();
+        let Effect::UltraKey { key_color, key_color_keys, .. } = old else { panic!() };
+        assert!(key_color_keys.is_empty(), "no list in the JSON → no colour keys");
+        assert_eq!((key_color.r, key_color.g, key_color.b), (40, 198, 59));
+    }
+
+    #[test]
+    fn static_setter_keeps_the_key_colour_while_the_list_is_active() {
+        let mut e = keyed_effect(&[500], green_a());
+        // The key command keeps the static fallback equal to the first key.
+        let Effect::UltraKey { key_color, .. } = &mut e else { panic!() };
+        *key_color = green_a();
+        write_ultrakey_static(&mut e, green_b(), 2, 1).unwrap();
+        let Effect::UltraKey { key_color, key_color_keys, output, setting, .. } = &e else {
+            panic!()
+        };
+        assert_eq!(key_color_keys.len(), 1);
+        assert_eq!(
+            (key_color.r, key_color.g, key_color.b),
+            (40, 198, 59),
+            "the fallback stays the first key"
+        );
+        assert_eq!((*output, *setting), (2, 1), "Output/Setting still change");
+
+        // With no keys the static setter keeps writing the colour.
+        let mut e = default_effect();
+        write_ultrakey_static(&mut e, green_b(), 0, 0).unwrap();
+        let Effect::UltraKey { key_color, .. } = &e else { panic!() };
+        assert_eq!((key_color.r, key_color.g, key_color.b), (60, 120, 40));
+    }
+
+    #[test]
+    fn moving_a_clip_shifts_the_key_colour_keys_with_the_numeric_keys() {
+        let mut l = patch_layer(vec![keyed_effect(&[1000], green_a())]);
+        shift_layer_time(&mut l, 500);
+        assert_eq!((l.start_ms, l.end_ms), (500, 3500));
+        let Effect::UltraKey { transparency, key_color_keys, .. } = &l.effects[0] else { panic!() };
+        assert_eq!(transparency.keys[0].time_ms, 1500);
+        assert_eq!(key_color_keys[0].time_ms, 1500);
+    }
+
+    #[test]
+    fn deleting_the_keyframe_at_a_time_removes_the_key_colour_key() {
+        let mut l = patch_layer(vec![keyed_effect(&[1000, 2000], green_a())]);
+        delete_layer_keys_at(&mut l, 2000);
+        let Effect::UltraKey { transparency, key_color_keys, .. } = &l.effects[0] else { panic!() };
+        assert_eq!(transparency.keys.iter().map(|k| k.time_ms).collect::<Vec<_>>(), vec![1000]);
+        assert_eq!(key_color_keys.iter().map(|k| k.time_ms).collect::<Vec<_>>(), vec![1000]);
+    }
+
+    #[test]
+    fn clearing_the_keyframes_freezes_the_key_colour_at_the_playhead() {
+        let mut l = patch_layer(vec![keyed_effect(&[0], green_a())]);
+        let Effect::UltraKey { key_color_keys, .. } = &mut l.effects[0] else { panic!() };
+        key_color_keys.push(ColorKey { time_ms: 2000, color: green_b(), easing: Easing::Linear });
+        clear_layer_keys(&mut l, 1000);
+        let Effect::UltraKey { key_color, key_color_keys, .. } = &l.effects[0] else { panic!() };
+        assert!(key_color_keys.is_empty());
+        // Halfway between A (40,198,59) and B (60,120,40), rounded.
+        assert_eq!((key_color.r, key_color.g, key_color.b), (50, 159, 50));
+    }
+
+    #[test]
+    fn key_colour_keys_in_cell_and_linked_stacks_move_with_the_clip() {
+        let mut l = patch_layer(vec![]);
+        l.kind = LayerKind::FrameGrid {
+            rows: 1,
+            cols: 1,
+            cell_w: 100.0,
+            cell_h: 100.0,
+            vertices: vec![GridVertex::default(); 4],
+            constrain: ConstrainMode::FreeForm,
+            cells: vec![FrameCell { effects: vec![keyed_effect(&[1000], green_a())], ..FrameCell::default() }],
+            linked: vec![LinkedEffectGroup {
+                id: 1,
+                effects: vec![keyed_effect(&[1000], green_a())],
+                members: vec![0],
+            }],
+            line_width: 0.0,
+            line_color: Rgba { r: 255, g: 255, b: 255, a: 255 },
+            line_color_keys: vec![],
+            background: None,
+        };
+        shift_layer_time(&mut l, 500);
+        let LayerKind::FrameGrid { cells, linked, .. } = &l.kind else { panic!() };
+        let Effect::UltraKey { key_color_keys, .. } = &cells[0].effects[0] else { panic!() };
+        assert_eq!(key_color_keys[0].time_ms, 1500, "cell effect colour key moved");
+        let Effect::UltraKey { key_color_keys, .. } = &linked[0].effects[0] else { panic!() };
+        assert_eq!(key_color_keys[0].time_ms, 1500, "linked effect colour key moved");
+    }
+
+    #[test]
+    fn cell_keyframe_drag_and_delete_include_the_key_colour_key() {
+        let mut l = patch_layer(vec![]);
+        l.kind = LayerKind::FrameGrid {
+            rows: 1,
+            cols: 1,
+            cell_w: 100.0,
+            cell_h: 100.0,
+            vertices: vec![GridVertex::default(); 4],
+            constrain: ConstrainMode::FreeForm,
+            cells: vec![FrameCell {
+                effects: vec![keyed_effect(&[1000, 2000], green_a())],
+                ..FrameCell::default()
+            }],
+            linked: vec![],
+            line_width: 0.0,
+            line_color: Rgba { r: 255, g: 255, b: 255, a: 255 },
+            line_color_keys: vec![],
+            background: None,
+        };
+        move_cell_keys(&mut l, 0, 1000, 1200).unwrap();
+        let LayerKind::FrameGrid { cells, .. } = &l.kind else { panic!() };
+        let Effect::UltraKey { transparency, key_color_keys, .. } = &cells[0].effects[0] else { panic!() };
+        assert_eq!(transparency.keys.iter().map(|k| k.time_ms).collect::<Vec<_>>(), vec![1200, 2000]);
+        assert_eq!(key_color_keys.iter().map(|k| k.time_ms).collect::<Vec<_>>(), vec![1200, 2000]);
+
+        delete_cell_keys(&mut l, 0, 2000).unwrap();
+        let LayerKind::FrameGrid { cells, .. } = &l.kind else { panic!() };
+        let Effect::UltraKey { transparency, key_color_keys, .. } = &cells[0].effects[0] else { panic!() };
+        assert_eq!(transparency.keys.iter().map(|k| k.time_ms).collect::<Vec<_>>(), vec![1200]);
+        assert_eq!(key_color_keys.iter().map(|k| k.time_ms).collect::<Vec<_>>(), vec![1200]);
+    }
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::*;
+
+    #[test]
+    fn default_crop_is_the_identity() {
+        let e = Effect::default_of("crop").expect("crop kind");
+        let Effect::Crop { left, top, right, bottom, feather } = &e else {
+            panic!("not crop");
+        };
+        for t in [left, top, right, bottom, feather] {
+            assert_eq!(t.default, 0.0);
+            assert!(t.keys.is_empty());
+        }
+    }
+
+    #[test]
+    fn all_five_tracks_are_keyable_and_walked() {
+        let mut e = Effect::default_of("crop").unwrap();
+        for param in ["left", "top", "right", "bottom", "feather"] {
+            let track = effect_track_mut(&mut e, param).expect(param);
+            upsert_key(track, 250, Some(12.0), false, 0, None);
+        }
+        let Effect::Crop { left, top, right, bottom, feather } = &e else { panic!() };
+        for t in [left, top, right, bottom, feather] {
+            assert_eq!(t.keys.len(), 1);
+            assert_eq!(t.keys[0].time_ms, 250);
+            assert_eq!(t.keys[0].value, 12.0);
+        }
+
+        let mut walked = 0;
+        walk_effect_tracks(&mut e, &mut |_t| walked += 1);
+        assert_eq!(walked, 5, "every crop track is visited");
+    }
+
+    #[test]
+    fn crop_survives_a_serialize_deserialize_round_trip() {
+        let e = Effect::default_of("crop").unwrap();
+        let json = serde_json::to_string(&e).unwrap();
+        let back: Effect = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, Effect::Crop { .. }));
     }
 }

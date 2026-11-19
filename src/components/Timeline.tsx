@@ -99,9 +99,20 @@ function pushEffectTracks(effects: Effect[], out: KeyTimeSet) {
     else if (e.kind === "gpuoverlay")
       for (const tr of [e.intensity, e.scale, e.speed, e.detail, e.softness, e.extra, e.opacity])
         out.add(tr, "effect");
+    else if (e.kind === "ultrakey") {
+      for (const tr of [
+        e.transparency, e.highlight, e.shadow, e.tolerance, e.pedestal, e.choke, e.soften,
+        e.contrast, e.midPoint, e.desaturate, e.range, e.spill, e.luma, e.saturation, e.hue,
+        e.luminance,
+      ])
+        out.add(tr, "effect");
+      out.addColorKeys(e.keyColorKeys, "effect");
+    }
     else if (e.kind === "tornedge") {
       // Fully static — no Track fields to mark.
-    } else out.add(e.amount, "effect");
+    } else if (e.kind === "crop")
+      for (const tr of [e.left, e.top, e.right, e.bottom, e.feather]) out.add(tr, "effect");
+    else out.add(e.amount, "effect");
   }
 }
 

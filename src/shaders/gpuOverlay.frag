@@ -110,7 +110,7 @@ void main() {
     // background) — preserved below so a per-image effect never flattens a
     // transparent layer opaque. Unused in adjustment mode (u_inputImage is a
     // throwaway opaque pixel there; that path computes its own alpha).
-    float srcAlpha = texture(u_inputImage, uv).a;
+    float srcAlpha = (u_adjustment == 1) ? 1.0 : texture(u_inputImage, uv).a;
 
     // Effects fall into two families: OVERLAY effects fill (col, mask) and are
     // composited/emitted below; DIRECT effects (heat haze, vignette, grain) need

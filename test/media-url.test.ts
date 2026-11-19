@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 
-vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (p: string) => `http://asset.localhost/${encodeURIComponent(p)}` }));
+vi.mock("@tauri-apps/api/core", () => ({
+  convertFileSrc: (p: string) => `http://asset.localhost/${encodeURIComponent(p)}`,
+  invoke: vi.fn(),
+}));
 const { getMediaUrl } = await import("../src/lib/media");
 
 describe("getMediaUrl", () => {

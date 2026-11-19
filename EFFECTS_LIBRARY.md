@@ -98,6 +98,8 @@ Applied per clip (stack, top-to-bottom), each parameter keyframeable.
 | Hue Shift | `hue` | `hue-rotate(degrees)` | `degrees` |
 | Invert | `invert` | `invert(amount)` | `amount` 0..1 |
 | Wipe / Fade | `wipe` | directional alpha ramp: mask α from a gradient at angle `θ`, edge at `position`, width `softness` | `angle`, `position`, `softness`, `invert` |
+| Crop | `crop` | Premiere-style garbage matte: one `destination-in` rect mask, Left/Top/Right/Bottom in % of the frame, cropped edges softened by `feather` (source px, scaled by the preview downsample) | `left`, `top`, `right`, `bottom`, `feather` |
+| Ultra Key | `ultrakey` | Premiere Pro's Ultra Key: linear-light keying space, alpha from chroma angle+distance, physical spill un-mix, sRGB output (GPU pass) | `transparency`, `highlight`, `shadow`, `tolerance`, `pedestal`, `desaturate`, `range`, `spill`, `luma`, `saturation`, `hue`, `luminance`, `keyColor` |
 
 ---
 

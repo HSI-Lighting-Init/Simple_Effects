@@ -325,6 +325,11 @@ export const addAudioLayer = (path: string, durationMs: number) =>
 export const mediaHasAudio = (path: string): Promise<boolean | null> =>
   invoke<boolean | null>("media_has_audio", { path });
 
+/** When the file's first video frame is stamped, in seconds (null = unknown,
+ *  treated as 0). Read per file: a seek proxy has its own. */
+export const mediaVideoOffset = (path: string): Promise<number | null> =>
+  invoke<number | null>("media_video_offset", { path });
+
 /** Show a video's own sound row above it, or hide it back into the video row. */
 export const setAudioTrackShown = (layerId: number, shown: boolean) =>
   invoke<Project>("set_audio_track_shown", { layerId, shown });
@@ -647,6 +652,11 @@ export type EffectParam =
   | "degrees"
   | "position"
   | "softness"
+  | "left"
+  | "top"
+  | "right"
+  | "bottom"
+  | "feather"
   | "intensity"
   | "scale"
   | "speed"
@@ -655,7 +665,22 @@ export type EffectParam =
   | "brightness"
   | "opacity"
   | "detail"
-  | "extra";
+  | "extra"
+  | "transparency"
+  | "highlight"
+  | "shadow"
+  | "tolerance"
+  | "pedestal"
+  | "choke"
+  | "soften"
+  | "midPoint"
+  | "desaturate"
+  | "range"
+  | "spill"
+  | "luma"
+  | "saturation"
+  | "hue"
+  | "luminance";
 
 /** Key one effect parameter at a time (animates the effect). */
 export const keyEffect = (
@@ -696,6 +721,32 @@ export const setTornEdgeStatic = (
 /** Set a shiny-clouds effect's static fields (tint + blend mode). */
 export const setShineStatic = (layerId: number, index: number, tint: Rgba, blend: number) =>
   invoke<Project>("set_shine_static", { layerId, index, tint, blend });
+
+/** Set Ultra Key's static fields: key colour, output mode and Setting. */
+export const setUltraKeyStatic = (
+  layerId: number,
+  index: number,
+  keyColor: Rgba,
+  output: number,
+  setting: number
+) => invoke<Project>("set_ultrakey_static", { layerId, index, keyColor, output, setting });
+
+/** Apply a Setting preset (or restore Custom) to an Ultra Key effect. */
+export const applyUltraKeyPreset = (
+  layerId: number,
+  index: number,
+  tMs: number,
+  setting: number,
+  values: number[]
+) => invoke<Project>("apply_ultrakey_preset", { layerId, index, tMs, setting, values });
+
+/** Write (or replace) an Ultra Key Key Colour key at the playhead. */
+export const setUltraKeyColorKey = (layerId: number, index: number, color: Rgba, tMs: number) =>
+  invoke<Project>("set_ultrakey_color_key", { layerId, index, color, tMs });
+
+/** Clear an Ultra Key's Key Colour keys, leaving the given static colour. */
+export const clearUltraKeyColorKeys = (layerId: number, index: number, color: Rgba) =>
+  invoke<Project>("clear_ultrakey_color_keys", { layerId, index, color });
 
 /** Set a GPU-overlay effect's static fields (effect, tints, flare pos, blend). */
 export const setGpuFxStatic = (
@@ -741,6 +792,39 @@ export const setCellShineStatic = (
   tint: Rgba,
   blend: number
 ) => invoke<Project>("set_cell_shine_static", { layerId, cell, index, tint, blend });
+
+export const setCellUltraKeyStatic = (
+  layerId: number,
+  cell: number,
+  index: number,
+  keyColor: Rgba,
+  output: number,
+  setting: number
+) => invoke<Project>("set_cell_ultrakey_static", { layerId, cell, index, keyColor, output, setting });
+
+export const setCellUltraKeyColorKey = (
+  layerId: number,
+  cell: number,
+  index: number,
+  color: Rgba,
+  tMs: number
+) => invoke<Project>("set_cell_ultrakey_color_key", { layerId, cell, index, color, tMs });
+
+export const clearCellUltraKeyColorKeys = (
+  layerId: number,
+  cell: number,
+  index: number,
+  color: Rgba
+) => invoke<Project>("clear_cell_ultrakey_color_keys", { layerId, cell, index, color });
+
+export const applyCellUltraKeyPreset = (
+  layerId: number,
+  cell: number,
+  index: number,
+  tMs: number,
+  setting: number,
+  values: number[]
+) => invoke<Project>("apply_cell_ultrakey_preset", { layerId, cell, index, tMs, setting, values });
 
 export const setCellGpuFxStatic = (
   layerId: number,

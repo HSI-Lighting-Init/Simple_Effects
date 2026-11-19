@@ -4,15 +4,17 @@
 // loop today and can be re-exposed over MCP later without touching handlers.
 //
 // Scope is deliberately the "watchable scenario video" 80%: arrange, trim,
-// transition, speed, text, basic colour, music. No LUT / chroma / stabilize /
+// transition, speed, text, basic colour, keying, music. No LUT / stabilize /
 // denoise / duck — those capabilities don't exist in the engine yet.
 import type { Project } from "../bindings/Project";
 import type { TransformEdit } from "../bindings/TransformEdit";
+import type { Rgba } from "../bindings/Rgba";
 import type { EffectParam } from "../lib/api";
 import { codecsFor, type Container, type VideoCodec } from "../lib/exportSettings";
 import { REGISTRY } from "../lib/transitions/registry";
 import { STYLE_PACKS, stylePackById, applyStylePack } from "../lib/stylePacks";
 import { GPU_FX } from "../lib/effects";
+import { ULTRA_KEY_PRESETS } from "../lib/ultraKey";
 import { makeSyntheticReference } from "../lib/synthetic";
 import { rebuildFromAnalysis, type TemplateAnalysis as RebuildTemplateAnalysis } from "../lib/rebuildFromAnalysis";
 import { matchTransition } from "../lib/transitionMatch";
@@ -29,6 +31,8 @@ import {
   setClipSpeed,
   addEffect,
   keyEffect,
+  setUltraKeyStatic,
+  applyUltraKeyPreset,
   addTextLayer,
   setAudioVolume,
   setAudioFade,
@@ -140,6 +144,13 @@ const EFFECT_PARAMS: Record<string, Record<string, { lo: number; hi: number; not
     position: { lo: 0, hi: 1, note: "0..1 sweep progress" },
     softness: { lo: 0, hi: 1, note: "0..1 edge feather" },
   },
+  crop: {
+    left: { lo: 0, hi: 100, note: "% cut from the left edge" },
+    top: { lo: 0, hi: 100, note: "% cut from the top edge" },
+    right: { lo: 0, hi: 100, note: "% cut from the right edge" },
+    bottom: { lo: 0, hi: 100, note: "% cut from the bottom edge" },
+    feather: { lo: 0, hi: 200, note: "cropped-edge feather, source px" },
+  },
   // Fully static (side/depth/seed/toothCount/paperWidth/paperColor) — no Track
   // fields to key, same gap as wipe's angle/invert. Listed with no params so
   // add_effect still accepts the kind (with its default_of starting values).
@@ -154,7 +165,27 @@ const EFFECT_PARAMS: Record<string, Record<string, { lo: number; hi: number; not
       Object.fromEntries(GPU_FX[idx].sliders.map((s) => [s.key, { lo: s.min, hi: s.max, note: s.label }])),
     ])
   ),
+  ultrakey: {
+    transparency: { lo: 0, hi: 100 }, highlight: { lo: 0, hi: 100 },
+    shadow: { lo: 0, hi: 100 }, tolerance: { lo: 0, hi: 100 },
+    pedestal: { lo: 0, hi: 100 }, choke: { lo: 0, hi: 100 },
+    soften: { lo: 0, hi: 100 }, contrast: { lo: 0, hi: 100 },
+    midPoint: { lo: 0, hi: 100, note: "Matte cleanup mid point" },
+    desaturate: { lo: 0, hi: 100 }, range: { lo: 0, hi: 100 },
+    spill: { lo: 0, hi: 100 }, luma: { lo: 0, hi: 100 },
+    saturation: { lo: 0, hi: 200 }, hue: { lo: -180, hi: 180, note: "degrees" },
+    luminance: { lo: 0, hi: 200 },
+  },
 };
+
+/** Parse an agent-provided "#rrggbb" / "rrggbb" key colour. */
+function parseHexColor(v: unknown): Rgba | null {
+  if (typeof v !== "string") return null;
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(v.trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255, a: 255 };
+}
 
 function timelineSummary(p: Project) {
   return {
@@ -419,13 +450,16 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "add_effect",
-    description: "Add one effect to a layer's stack — a basic colour/blur filter, or a GPU overlay (shinyclouds, or one of the 10 named gpu-overlay looks: caustics, lensflare, sparkle, heathaze, filmgrain, vignette, shimmer, aurora, fog, flap) — reachable directly here, not just through apply_style. kind + valid params/ranges come from list_effects; never invent either. params sets each named parameter's starting value (all optional — omit to use the kind's defaults); values outside list_effects' range are clamped.",
+    description: "Add one effect to a layer's stack — a basic colour/blur filter, the ultrakey keyer, the crop garbage matte, or a GPU overlay (shinyclouds, or one of the 10 named gpu-overlay looks: caustics, lensflare, sparkle, heathaze, filmgrain, vignette, shimmer, aurora, fog, flap) — reachable directly here, not just through apply_style. kind + valid params/ranges come from list_effects; never invent either. params sets each named parameter's starting value (all optional — omit to use the kind's defaults); values outside list_effects' range are clamped. Ultra Key also takes keyColor (#rrggbb, default black = keys nothing), output (0 Composite, 1 Alpha Channel, 2 Color Channel) and setting (0 Default, 1 Relaxed, 2 Aggressive, 3 Custom).",
     inputSchema: {
       type: "object",
       properties: {
         layerId: { type: "integer" },
         kind: { type: "string", enum: Object.keys(EFFECT_PARAMS) },
-        params: { type: "object", additionalProperties: { type: "number" }, description: "paramName -> value, e.g. {\"amount\": 1.4} for brightness, or {\"intensity\": 0.8, \"opacity\": 0.6} for a GPU overlay" },
+        params: { type: "object", additionalProperties: { type: "number" }, description: "paramName -> value, e.g. {\"amount\": 1.4} for brightness, {\"intensity\": 0.8, \"opacity\": 0.6} for a GPU overlay, or {\"transparency\": 45} for ultrakey" },
+        keyColor: { type: "string", description: "ultrakey only: #rrggbb key colour (default #000000 keys nothing)" },
+        output: { type: "integer", enum: [0, 1, 2], description: "ultrakey only: 0 Composite, 1 Alpha Channel, 2 Color Channel" },
+        setting: { type: "integer", enum: [0, 1, 2, 3], description: "ultrakey only: 0 Default, 1 Relaxed, 2 Aggressive, 3 Custom" },
       },
       required: ["layerId", "kind"],
       additionalProperties: false,
@@ -447,6 +481,33 @@ export const TOOLS: ToolDef[] = [
       let p = await addEffect(id, kind);
       const layer = findLayer(p, id);
       const index = layer ? layer.effects.length - 1 : 0;
+      if (kind === "ultrakey") {
+        let setting = 0;
+        if (a.setting !== undefined) {
+          setting = int(a.setting, 0);
+          if (setting < 0 || setting > 3) return err("ultrakey setting must be 0..3");
+          if (setting < 3) {
+            const values = setting === 0 ? ULTRA_KEY_PRESETS.default : setting === 1 ? ULTRA_KEY_PRESETS.relaxed : ULTRA_KEY_PRESETS.aggressive;
+            p = await applyUltraKeyPreset(id, index, 0, setting, [...values]);
+          }
+        }
+        let output = 0;
+        if (a.output !== undefined) {
+          output = int(a.output, 0);
+          if (output < 0 || output > 2) return err("ultrakey output must be 0..2");
+        }
+        if (a.keyColor !== undefined || setting === 3 || a.output !== undefined) {
+          let keyColor: Rgba = { r: 0, g: 0, b: 0, a: 255 };
+          const cur = findLayer(p, id)?.effects[index];
+          if (cur && cur.kind === "ultrakey") keyColor = cur.keyColor;
+          if (a.keyColor !== undefined) {
+            const parsed = parseHexColor(a.keyColor);
+            if (!parsed) return err("keyColor must be a #rrggbb hex colour");
+            keyColor = parsed;
+          }
+          p = await setUltraKeyStatic(id, index, keyColor, output, setting);
+        }
+      }
       for (const [param, value] of Object.entries(applied)) p = await keyEffect(id, index, param as EffectParam, 0, value, false);
       await ctx.commit(p);
       return ok(JSON.stringify({ added: kind, index, applied }));

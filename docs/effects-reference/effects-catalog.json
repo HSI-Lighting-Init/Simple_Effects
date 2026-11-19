@@ -146,7 +146,7 @@
       ]
     },
     {
-      "id": "chroma_key", "name": "Chroma Key (Green/Blue screen)", "category": "key", "status": "gap",
+      "id": "chroma_key", "name": "Chroma Key (Green/Blue screen)", "category": "key", "status": "done",
       "kdenliveTag": "avfilter.chromakey / bluescreen0r",
       "renderTechnique": "webgl-shader", "priority": "high",
       "params": [
@@ -164,14 +164,15 @@
       "params": [{ "name": "axis", "type": "enum", "min": 0, "max": 1, "default": 0, "_values": ["horizontal", "vertical"] }]
     },
     {
-      "id": "crop", "name": "Crop", "category": "geometry", "status": "gap",
+      "id": "crop", "name": "Crop", "category": "geometry", "status": "done",
       "kdenliveTag": "qtcrop / avfilter.crop",
-      "renderTechnique": "geometry", "priority": "low",
+      "renderTechnique": "canvas-mask", "priority": "high",
       "params": [
-        { "name": "left", "type": "double", "min": 0, "max": 1, "default": 0 },
-        { "name": "top", "type": "double", "min": 0, "max": 1, "default": 0 },
-        { "name": "right", "type": "double", "min": 0, "max": 1, "default": 0 },
-        { "name": "bottom", "type": "double", "min": 0, "max": 1, "default": 0 }
+        { "name": "left", "type": "double", "min": 0, "max": 100, "default": 0 },
+        { "name": "top", "type": "double", "min": 0, "max": 100, "default": 0 },
+        { "name": "right", "type": "double", "min": 0, "max": 100, "default": 0 },
+        { "name": "bottom", "type": "double", "min": 0, "max": 100, "default": 0 },
+        { "name": "feather", "type": "double", "min": 0, "max": 200, "default": 0 }
       ]
     }
   ]

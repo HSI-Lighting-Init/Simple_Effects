@@ -14,6 +14,11 @@ type EffectParam =
   | "degrees"
   | "position"
   | "softness"
+  | "left"
+  | "top"
+  | "right"
+  | "bottom"
+  | "feather"
   | "intensity"
   | "scale"
   | "speed"
@@ -22,7 +27,22 @@ type EffectParam =
   | "brightness"
   | "opacity"
   | "detail"
-  | "extra";
+  | "extra"
+  | "transparency"
+  | "highlight"
+  | "shadow"
+  | "tolerance"
+  | "pedestal"
+  | "choke"
+  | "soften"
+  | "midPoint"
+  | "desaturate"
+  | "range"
+  | "spill"
+  | "luma"
+  | "saturation"
+  | "hue"
+  | "luminance";
 
 // Draws the image with its effect stack onto a canvas (guaranteed-correct
 // preview — the exact same filter + wipe + shine pipeline the scene uses).
@@ -67,6 +87,7 @@ export default function EffectEditor({
   name,
   src,
   effects,
+  timeMs,
   onAddEffect,
   onRemoveEffect,
   onKeyEffect,
@@ -74,12 +95,17 @@ export default function EffectEditor({
   onSetTornEdgeStatic,
   onSetShineStatic,
   onSetGpuFxStatic,
+  onSetUltraKeyStatic,
+  onSetUltraKeyColorKey,
+  onClearUltraKeyColorKeys,
+  onApplyUltraKeyPreset,
   onClose,
 }: {
   layerId: number;
   name: string;
   src?: string;
   effects: ResolvedEffect[];
+  timeMs: number;
   onAddEffect: (layerId: number, kind: string) => void;
   onRemoveEffect: (layerId: number, index: number) => void;
   onKeyEffect: (
@@ -111,6 +137,21 @@ export default function EffectEditor({
     posY: number,
     blend: number
   ) => void;
+  onSetUltraKeyStatic: (
+    layerId: number,
+    index: number,
+    keyColor: Rgba,
+    output: number,
+    setting: number
+  ) => void;
+  onSetUltraKeyColorKey: (layerId: number, index: number, color: Rgba, tMs: number) => void;
+  onClearUltraKeyColorKeys: (layerId: number, index: number, color: Rgba) => void;
+  onApplyUltraKeyPreset: (
+    layerId: number,
+    index: number,
+    setting: number,
+    values: number[]
+  ) => void;
   onClose: () => void;
 }) {
   return (
@@ -130,6 +171,7 @@ export default function EffectEditor({
             <EffectsSection
               layerId={layerId}
               effects={effects}
+              timeMs={timeMs}
               onAddEffect={onAddEffect}
               onRemoveEffect={onRemoveEffect}
               onKeyEffect={onKeyEffect}
@@ -137,6 +179,10 @@ export default function EffectEditor({
               onSetTornEdgeStatic={onSetTornEdgeStatic}
               onSetShineStatic={onSetShineStatic}
               onSetGpuFxStatic={onSetGpuFxStatic}
+              onSetUltraKeyStatic={onSetUltraKeyStatic}
+              onSetUltraKeyColorKey={onSetUltraKeyColorKey}
+              onClearUltraKeyColorKeys={onClearUltraKeyColorKeys}
+              onApplyUltraKeyPreset={onApplyUltraKeyPreset}
             />
             <p className="insp-hint">
               Stack as many effects as you want — they composite top-to-bottom and

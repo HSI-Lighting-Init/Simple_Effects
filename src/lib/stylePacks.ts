@@ -100,6 +100,19 @@ const BLACK = hex("#000000");
  *  them. The applier gives these to every clip directly instead. */
 const DIRECT_FX: ReadonlySet<FxKind> = new Set(["filmgrain", "vignette", "heathaze"]);
 
+/** The effect stack applyStylePack writes on one clip, in order: the pack's
+ *  grade, the per-pixel overlay kinds, then the hero accent. Exported so the
+ *  stack-order test can assert this generated order is unchanged by WP3. */
+export function stylePackClipFx(pack: StylePack, hero: boolean): FxSpec[] {
+  const direct = (pack.overlay ?? []).filter((s) => DIRECT_FX.has(s.kind));
+  return [...pack.grade, ...direct, ...(hero ? pack.accent ?? [] : [])];
+}
+
+/** The adjustment-layer overlay stack (compositable kinds only), in order. */
+export function stylePackOverlayFx(pack: StylePack): FxSpec[] {
+  return (pack.overlay ?? []).filter((s) => !DIRECT_FX.has(s.kind));
+}
+
 export const STYLE_PACKS: StylePack[] = [
   {
     id: "instagram-block",
@@ -451,7 +464,7 @@ export async function applyStylePack(pack: StylePack, io: StyleIO): Promise<Styl
   for (const [i, c] of clips.entries()) {
     p = await clearFx(p, c.id);
     const hero = i === 0 || i === clips.length - 1;
-    for (const spec of [...pack.grade, ...directOverlay, ...(hero ? pack.accent ?? [] : [])]) p = await addFx(c.id, spec);
+    for (const spec of stylePackClipFx(pack, hero)) p = await addFx(c.id, spec);
     p = await kenBurns(p, byId(p, c.id), i, pack.motion);
 
     const engines = pack.transitions.engines;
@@ -556,7 +569,7 @@ export async function applyStylePack(pack: StylePack, io: StyleIO): Promise<Styl
   //    (Direct per-pixel kinds — grain/vignette/heat-haze — already went on every
   //    clip above; only the compositable kinds belong here.)
   const overlays: string[] = directOverlay.map((s) => s.kind);
-  const adjustmentFx = (pack.overlay ?? []).filter((s) => !DIRECT_FX.has(s.kind));
+  const adjustmentFx = stylePackOverlayFx(pack);
   if (adjustmentFx.length) {
     p = await addAdjustmentLayer();
     const aid = p.layers[p.layers.length - 1].id;

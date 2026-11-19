@@ -433,6 +433,12 @@ async function applyFades(layerId: number, shot: ShotAnalysis, p: Project): Prom
   return p;
 }
 
+/** The CSS grade kinds gradeShot always writes, in order. Exported so the
+ *  stack-order test can assert this generated order is unchanged by WP3. */
+export const GRADE_SHOT_FX = ["brightness", "contrast", "saturate"] as const;
+/** The optional GPU look gradeShot appends when the shot shows vignette/grain. */
+export const GRADE_SHOT_OPTIONAL_FX = ["vignette", "filmgrain"] as const;
+
 /** Grade: brightness/contrast/saturate always, vignette only when measured
  *  strength is meaningfully above 0 — via the same add_effect path the agent
  *  tool and stylePacks.ts use. */
@@ -443,10 +449,9 @@ async function gradeShot(layerId: number, shot: ShotAnalysis, p: Project): Promi
     const idx = layer ? layer.effects.length - 1 : 0;
     p = await keyEffect(layerId, idx, param, 0, value, false);
   };
-  await applyOne("brightness", "amount", shot.look.brightness);
-  await applyOne("contrast", "amount", shot.look.contrast);
-  await applyOne("saturate", "amount", shot.look.saturate);
-  if (shot.look.vignetteStrength > 0.15) await applyOne("vignette", "intensity", shot.look.vignetteStrength);
+  const values = [shot.look.brightness, shot.look.contrast, shot.look.saturate];
+  for (const [i, kind] of GRADE_SHOT_FX.entries()) await applyOne(kind, "amount", values[i]);
+  if (shot.look.vignetteStrength > 0.15) await applyOne(GRADE_SHOT_OPTIONAL_FX[0], "intensity", shot.look.vignetteStrength);
   return p;
 }
 
@@ -503,6 +508,10 @@ async function buildKineticTitle(t: KineticTitle, p: Project): Promise<Project> 
   return p;
 }
 
+/** The effect stack every card-stack copy gets. Exported for the WP3
+ *  stack-order test (a torn edge is the only effect a card stack writes). */
+export const CARD_STACK_FX = ["tornedge"] as const;
+
 /** Build one fanned, torn-edge card stack: `copies` layers of the SAME media
  *  item, each box-fit to the full comp and stepped `offsetPx` further along
  *  a diagonal, every copy torn on `tornSide`. Added furthest-back copy
@@ -532,7 +541,7 @@ async function buildCardStack(cs: CardStack, mediaIndex: number, compW: number, 
     await editKeyframes(layerId, cs.startMs, { x: cx, y: cy, scaleX: baseline, scaleY: baseline, easing: "linear" }, true);
     p = await editKeyframes(layerId, cs.endMs, { x: cx, y: cy, scaleX: baseline, scaleY: baseline, easing: "linear" }, false);
 
-    p = await addEffect(layerId, "tornedge");
+    for (const kind of CARD_STACK_FX) p = await addEffect(layerId, kind);
     const idx = p.layers.find((l) => l.id === layerId)!.effects.length - 1;
     p = await setTornEdgeStatic(layerId, idx, side, 0.12, 1000 + i, 16, paperWidth, paperColor);
   }

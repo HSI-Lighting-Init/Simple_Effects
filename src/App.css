@@ -908,6 +908,30 @@ body {
   line-height: 1.4;
 }
 
+/* Key Colour swatch + the Program-monitor eyedropper button. */
+.insp-color-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.insp-color-row input[type="color"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* A keyframeable colour field (ColorKeyField) fills the row; the pipette stays
+   at its right. */
+.insp-color-row > .an-num {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.insp-color-row .insp-btn {
+  flex: 0 0 auto;
+}
+.insp-pick-wrap {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
 /* Per-transition variable controls (the math knobs). */
 .tr-vars {
   display: flex;
@@ -1699,6 +1723,11 @@ body {
 
 .preview-stage {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* Key Color eyedropper: crosshair over the Program monitor. */
+.preview-wrap.picking canvas {
+  cursor: crosshair;
 }
 
 /* Zoom readout / fit-to-window button, bottom-left of the preview. */

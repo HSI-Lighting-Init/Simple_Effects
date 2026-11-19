@@ -162,6 +162,12 @@ async function maybeFade(rng: () => number, layerId: number, startMs: number, en
   return p;
 }
 
+/** The CSS grade kinds synthetic gradeShot always writes, in order. Exported
+ *  for the WP3 stack-order test. */
+export const SYNTHETIC_GRADE_FX = ["brightness", "contrast", "saturate"] as const;
+/** The GPU look it appends at random (vignette or film grain). */
+export const SYNTHETIC_GRADE_OPTIONAL_FX = ["vignette", "filmgrain"] as const;
+
 /** Random grade (brightness/contrast/saturate) and, sometimes, vignette/grain —
  *  via the same add_effect path the agent tool uses. */
 async function gradeShot(rng: () => number, layerId: number, p: Project): Promise<Project> {
@@ -171,11 +177,14 @@ async function gradeShot(rng: () => number, layerId: number, p: Project): Promis
     const idx = layer ? layer.effects.length - 1 : 0;
     p = await keyEffect(layerId, idx, param, 0, range(rng, lo, hi), false);
   };
-  await applyOne("brightness", "amount", 0.85, 1.2);
-  await applyOne("contrast", "amount", 0.9, 1.3);
-  await applyOne("saturate", "amount", 0.8, 1.4);
-  if (rng() < 0.3) await applyOne("vignette", "intensity", 0.2, 0.6);
-  else if (rng() < 0.3) await applyOne("filmgrain", "intensity", 0.05, 0.2);
+  const base: [string, number, number][] = [
+    [SYNTHETIC_GRADE_FX[0], 0.85, 1.2],
+    [SYNTHETIC_GRADE_FX[1], 0.9, 1.3],
+    [SYNTHETIC_GRADE_FX[2], 0.8, 1.4],
+  ];
+  for (const [kind, lo, hi] of base) await applyOne(kind, "amount", lo, hi);
+  if (rng() < 0.3) await applyOne(SYNTHETIC_GRADE_OPTIONAL_FX[0], "intensity", 0.2, 0.6);
+  else if (rng() < 0.3) await applyOne(SYNTHETIC_GRADE_OPTIONAL_FX[1], "intensity", 0.05, 0.2);
   return p;
 }
 

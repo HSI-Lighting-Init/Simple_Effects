@@ -8,6 +8,7 @@
 // file URL directly instead: that only fetches the byte ranges they need, so a
 // large file never gets copied into memory just to show its bin thumbnail.
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { mediaVideoOffset } from "./api";
 import { record } from "./recorder";
 
 export type MediaKind = "image" | "video" | "audio";
@@ -190,8 +191,49 @@ export interface PooledVideo {
   el: HTMLVideoElement;
   ready: boolean;
   whenReady: Promise<HTMLVideoElement>;
+  /** When the file's first video frame is stamped (s). Of the file this element
+   *  actually loads (a proxy has its own); set before `ready`. */
+  offsetSec: number;
 }
 const videoPool = new Map<number, PooledVideo>();
+
+// path → video start offset, read once per file from its MP4 boxes. Unknown
+// (other containers, unreadable) is 0: the browser's own mapping, as before.
+const videoOffsets = new Map<string, Promise<number>>();
+function videoOffset(path: string): Promise<number> {
+  let p = videoOffsets.get(path);
+  if (!p) {
+    p = mediaVideoOffset(path)
+      .then((s) => (typeof s === "number" && Number.isFinite(s) && s > 0 ? s : 0))
+      .catch(() => 0);
+    videoOffsets.set(path, p);
+  }
+  return p;
+}
+
+/** Land inside the wanted frame, not on its boundary. A browser shows the frame
+ *  with pts <= currentTime and quantizes currentTime, so a seek to exactly a
+ *  frame's timestamp can read one frame early (measured: a seek to 2.033333 s
+ *  settled at 2.033332 s and showed the frame stamped 2.000 s). 1 ms is above that
+ *  rounding and below a frame at any rate up to 240 fps. */
+export const SEEK_BIAS_SEC = 0.001;
+
+/** THE place clip time becomes media time. An editor puts a clip's first video
+ *  frame at clip time 0; a browser's timeline starts at the file's time zero, so
+ *  when the first video frame is stamped later (B-frame delay, edit list) clip
+ *  time t lives at media time t + `offsetSec`. Reading it at t shows the previous
+ *  frame.
+ *  `durationSec` is the element's length (undefined = unknown, no end clamp). */
+export function toMediaTime(
+  clipSec: number,
+  offsetSec: number,
+  durationSec?: number
+): { wanted: number; target: number; atEnd: boolean } {
+  const wanted = Math.max(0, clipSec) + offsetSec + SEEK_BIAS_SEC;
+  if (durationSec === undefined || !Number.isFinite(durationSec)) return { wanted, target: wanted, atEnd: false };
+  const last = durationSec - 0.05;
+  return { wanted, target: Math.min(wanted, Math.max(0, last)), atEnd: wanted >= last };
+}
 
 // Export-only short-GOP stand-ins (original path → proxy path; see makeSeekProxy).
 // loadVideo resolves through this, so swapping it rebuilds every pooled element.
@@ -199,14 +241,22 @@ let seekProxies = new Map<string, string>();
 
 /** Install (or with null, remove) the export's seek proxies. */
 export function setSeekProxies(next: Map<string, string> | null) {
+  const oldProxies = new Set(seekProxies.values());
   // Release the old proxies' blobs: they're only needed while exporting.
-  for (const proxy of seekProxies.values()) {
+  for (const proxy of oldProxies) {
     const url = urlCache.get(proxy);
     if (url) URL.revokeObjectURL(url);
     urlCache.delete(proxy);
   }
   seekProxies = next ?? new Map();
   slowSeeksLogged = 0;
+  // A pooled element may still point at an old proxy path whose blob URL was
+  // just revoked (this is the post-export stale-frame case). Drop it so the
+  // next loadVideo builds a fresh element from the current mapping: the
+  // original after an export, a new proxy before the next one.
+  for (const [layerId, entry] of [...videoPool]) {
+    if (oldProxies.has(entry.src)) dropVideo(layerId);
+  }
 }
 
 /** The file a video layer's element actually loads (its proxy while exporting). */
@@ -214,7 +264,8 @@ export function videoSrc(src: string): string {
   return seekProxies.get(src) ?? src;
 }
 
-/** Source time (s) a video layer shows at its first frame. */
+/** CLIP time (s) a video layer shows at its first frame (not media time; see
+ *  `toMediaTime`). */
 export function videoStartSec(
   inMs: number,
   speed: number,
@@ -238,10 +289,11 @@ export function loadVideo(layerId: number, src: string, startSec = 0): PooledVid
   // Always silent: sound comes from the layer's separate audio layer, so deleting
   // or hiding that layer removes it and preview matches export.
   el.muted = true;
-  const entry: PooledVideo = { src, el, ready: false, whenReady: null as never };
-  entry.whenReady = getMediaUrl(src).then(
-    (url) =>
+  const entry: PooledVideo = { src, el, ready: false, whenReady: null as never, offsetSec: 0 };
+  entry.whenReady = Promise.all([getMediaUrl(src), videoOffset(src)]).then(
+    ([url, offset]) =>
       new Promise<HTMLVideoElement>((resolve, reject) => {
+        entry.offsetSec = offset;
         const done = () => {
           entry.ready = true;
           resolve(el);
@@ -249,7 +301,7 @@ export function loadVideo(layerId: number, src: string, startSec = 0): PooledVid
         // Without this a file the browser can't decode left whenReady pending forever.
         el.onerror = () => reject(new Error(`Couldn't decode ${src}: ${el.error?.message || "unsupported video"}`));
         el.onloadeddata = () => {
-          const t = Math.min(startSec, Math.max(0, (el.duration || 0) - 0.05));
+          const t = toMediaTime(startSec, offset, el.duration || 0).target;
           if (t > 0.02) {
             el.addEventListener("seeked", done, { once: true });
             el.currentTime = t;
@@ -285,8 +337,10 @@ let slowSeeksLogged = 0;
 export interface VideoSeekTarget {
   layerId: number;
   src: string;
-  /** The layer's first-frame source time (for loadVideo's initial park). */
+  /** The layer's first-frame CLIP time (for loadVideo's initial park). */
   startSec: number;
+  /** CLIP time (in-point, speed and reverse applied) — not media time. The file's
+   *  start offset is added here, once, by `toMediaTime`. */
   timeSec: number;
 }
 
@@ -314,14 +368,19 @@ export async function seekVideosForFrame(targets: VideoSeekTarget[]): Promise<vo
       const entry = loadVideo(layerId, src, startSec);
       await timeout(entry.whenReady);
       const v = entry.el;
-      // Same end clamp as VideoNode, so its sync effect doesn't re-seek after us.
-      const t = Number.isFinite(v.duration) ? Math.min(timeSec, Math.max(0, v.duration - 0.05)) : timeSec;
-      if (entry.ready && Math.abs(v.currentTime - t) >= 0.001) {
+      // Same mapping and end clamp as VideoNode, so its sync effect doesn't re-seek after us.
+      const t = toMediaTime(timeSec, entry.offsetSec, v.duration).target;
+      // `currentTime` already reads the target while a seek is still in flight
+      // (VideoNode's sync effect assigns it first), so also wait out `seeking`;
+      // otherwise the paint captures the previous frame.
+      const needSeek = Math.abs(v.currentTime - t) >= 0.001;
+      if (entry.ready && (needSeek || v.seeking)) {
         let onSeeked = () => {};
         await timeout(
           new Promise<void>((resolve) => {
             onSeeked = resolve;
             v.addEventListener("seeked", onSeeked, { once: true });
+            if (!needSeek) return;
             try {
               v.currentTime = t;
             } catch {

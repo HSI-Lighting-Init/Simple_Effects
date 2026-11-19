@@ -22,6 +22,7 @@ import { fontStyles } from "../lib/api";
 import { sampleTrack, constTrack, upsertKey, isKeyed, sampleColor, isColorKeyed, upsertColorKey } from "../lib/track";
 import { labelColor, paramColor } from "../lib/paramColors";
 import { GPU_FX } from "../lib/effects";
+import { ultraKeyPresetValues } from "../lib/ultraKey";
 import type { ColorKey } from "../bindings/ColorKey";
 import type { Shape2DStyle } from "../bindings/Shape2DStyle";
 import type { VectorShape } from "../bindings/VectorShape";
@@ -1517,6 +1518,7 @@ const EFFECT_TYPES: { kind: string; label: string }[] = [
   { kind: "hue", label: "Hue shift" },
   { kind: "invert", label: "Invert" },
   { kind: "wipe", label: "Wipe / fade" },
+  { kind: "crop", label: "Crop" },
   { kind: "tornedge", label: "Torn paper edge" },
   { kind: "shinyclouds", label: "Shiny clouds (GPU)" },
   { kind: "caustics", label: "Caustics (GPU)" },
@@ -1529,7 +1531,12 @@ const EFFECT_TYPES: { kind: string; label: string }[] = [
   { kind: "aurora", label: "Aurora (GPU)" },
   { kind: "fog", label: "Fog / smoke (GPU)" },
   { kind: "flap", label: "Flap / 3D flip (GPU)" },
+  { kind: "ultrakey", label: "Ultra Key" },
 ];
+
+// Linked groups have no static-field setters, so Ultra Key's key colour and
+// Setting cannot be edited there; keep its per-clip keyer out of that menu.
+const LINKED_EFFECT_TYPES = EFFECT_TYPES.filter((t) => t.kind !== "ultrakey");
 
 // Per-GPU-effect UI schema (name/sliders/colours/position per `effect` index) —
 // shared with the agent's add_effect tool, see src/lib/effects.ts.
@@ -1540,6 +1547,11 @@ type EffectParam =
   | "degrees"
   | "position"
   | "softness"
+  | "left"
+  | "top"
+  | "right"
+  | "bottom"
+  | "feather"
   | "intensity"
   | "scale"
   | "speed"
@@ -1548,7 +1560,22 @@ type EffectParam =
   | "brightness"
   | "opacity"
   | "detail"
-  | "extra";
+  | "extra"
+  | "transparency"
+  | "highlight"
+  | "shadow"
+  | "tolerance"
+  | "pedestal"
+  | "choke"
+  | "soften"
+  | "midPoint"
+  | "desaturate"
+  | "range"
+  | "spill"
+  | "luma"
+  | "saturation"
+  | "hue"
+  | "luminance";
 type KeyEffect = (
   layerId: number,
   index: number,
@@ -1578,6 +1605,21 @@ type SetGpuFxStatic = (
   posY: number,
   blend: number
 ) => void;
+type SetUltraKeyStatic = (
+  layerId: number,
+  index: number,
+  keyColor: Rgba,
+  output: number,
+  setting: number
+) => void;
+type ApplyUltraKeyPreset = (
+  layerId: number,
+  index: number,
+  setting: number,
+  values: number[]
+) => void;
+type SetUltraKeyColorKey = (layerId: number, index: number, color: Rgba, tMs: number) => void;
+type ClearUltraKeyColorKeys = (layerId: number, index: number, color: Rgba) => void;
 
 // A collapsible inspector section: shows only its title until expanded. Used to
 // keep the panel tidy — collapse the sections you're not working on.
@@ -1943,6 +1985,7 @@ function EffectRow({
   layerId,
   index,
   eff,
+  timeMs,
   open,
   onToggle,
   onRemove,
@@ -1951,10 +1994,17 @@ function EffectRow({
   onSetTornEdgeStatic,
   onSetShineStatic,
   onSetGpuFxStatic,
+  onSetUltraKeyStatic,
+  onSetUltraKeyColorKey,
+  onClearUltraKeyColorKeys,
+  onApplyUltraKeyPreset,
+  onStartKeyColorPick,
+  picking,
 }: {
   layerId: number;
   index: number;
   eff: ResolvedEffect;
+  timeMs: number;
   open: boolean;
   onToggle: (index: number) => void;
   onRemove: (layerId: number, index: number) => void;
@@ -1963,6 +2013,14 @@ function EffectRow({
   onSetTornEdgeStatic?: SetTornEdgeStatic;
   onSetShineStatic?: SetShineStatic;
   onSetGpuFxStatic?: SetGpuFxStatic;
+  onSetUltraKeyStatic?: SetUltraKeyStatic;
+  onSetUltraKeyColorKey?: SetUltraKeyColorKey;
+  onClearUltraKeyColorKeys?: ClearUltraKeyColorKeys;
+  onApplyUltraKeyPreset?: ApplyUltraKeyPreset;
+  /** Enter Program-monitor pick mode for this Ultra Key's static Key Colour. */
+  onStartKeyColorPick?: (layerId: number, index: number) => void;
+  /** This row's pick is active (crosshair on the Program monitor). */
+  picking?: boolean;
 }) {
   // The 9 GPU-overlay effects all share the resolved kind "gpuoverlay", so the
   // name comes from the per-effect schema; everything else looks up EFFECT_TYPES.
@@ -2010,6 +2068,22 @@ function EffectRow({
           </label>
           <p className="insp-hint">
             Keyframe <b>Position</b> (move the playhead, drag) to sweep the fade across.
+          </p>
+        </>
+      );
+      break;
+    case "crop":
+      body = (
+        <>
+          {effSlider("Left (%)", eff.left, 0, 100, 1, (v) => key("left", v))}
+          {effSlider("Top (%)", eff.top, 0, 100, 1, (v) => key("top", v))}
+          {effSlider("Right (%)", eff.right, 0, 100, 1, (v) => key("right", v))}
+          {effSlider("Bottom (%)", eff.bottom, 0, 100, 1, (v) => key("bottom", v))}
+          {effSlider("Edge feather (px)", eff.feather, 0, 200, 1, (v) => key("feather", v))}
+          <p className="insp-hint">
+            Cuts the stands and rigs out of a shot — put it above or below Ultra Key, as in
+            Premiere: the stack runs top to bottom. Feather is in source pixels, so a
+            reduced preview feathers the same as the export.
           </p>
         </>
       );
@@ -2116,6 +2190,126 @@ function EffectRow({
         </>
       );
       break;
+    case "ultrakey": {
+      if (!onSetUltraKeyStatic || !onApplyUltraKeyPreset) {
+        body = <p className="insp-hint">Edit Ultra Key in the layer's inspector.</p>;
+        break;
+      }
+      const setStatic = (patch: { keyColor?: Rgba; output?: number; setting?: number }) =>
+        onSetUltraKeyStatic(
+          layerId,
+          index,
+          patch.keyColor ?? eff.keyColor,
+          patch.output ?? eff.output,
+          patch.setting ?? eff.setting
+        );
+      const pickSetting = (setting: number) => {
+        if (setting === eff.setting) return;
+        // Preset tables are UI-only; Custom restores this instance's persisted
+        // snapshot in the Rust preset command (empty = leave the sliders as-is).
+        const table = ultraKeyPresetValues(setting);
+        onApplyUltraKeyPreset(layerId, index, setting, table ? [...table] : []);
+      };
+      const opaque = (c: Rgba): Rgba => ({ r: c.r, g: c.g, b: c.b, a: 255 });
+      // ColorKeyField writes the whole list: empty means either "no keys" (a
+      // static swatch edit) or "freeze the keys away" (its stopwatch toggle).
+      const setKeyColour = (c: Rgba, keys: ColorKey[]) => {
+        if (keys.length === 0) {
+          if (eff.keyColorKeys.length > 0) onClearUltraKeyColorKeys?.(layerId, index, opaque(c));
+          else setStatic({ keyColor: opaque(c) });
+          return;
+        }
+        const at = keys.find((k) => k.timeMs === Math.round(timeMs)) ?? keys[keys.length - 1];
+        onSetUltraKeyColorKey?.(layerId, index, opaque(at.color), timeMs);
+      };
+      body = (
+        <>
+          <label className="insp-field">
+            Setting
+            <select value={eff.setting} onChange={(e) => pickSetting(Number(e.target.value))}>
+              <option value={0}>Default</option>
+              <option value={1}>Relaxed</option>
+              <option value={2}>Aggressive</option>
+              <option value={3}>Custom</option>
+            </select>
+          </label>
+          <div className="insp-field">
+            <div className="insp-color-row">
+              <ColorKeyField
+                label="Key Colour"
+                color={eff.keyColor}
+                keys={eff.keyColorKeys}
+                tMs={timeMs}
+                onChange={setKeyColour}
+              />
+              <span
+                className="insp-pick-wrap"
+                title={
+                  onStartKeyColorPick
+                    ? "Pick the Key Colour from the Program monitor · Ctrl/Cmd-click averages 5×5 · Esc cancels"
+                    : "Picking works on top-level image and video layers; grid cells, groups and 3D decals are not supported yet"
+                }
+              >
+                <button
+                  type="button"
+                  aria-label="Pick Key Colour"
+                  className={`insp-btn tiny${picking ? " active" : ""}`}
+                  disabled={!onStartKeyColorPick}
+                  onClick={() => onStartKeyColorPick?.(layerId, index)}
+                >
+                  ⌖
+                </button>
+              </span>
+            </div>
+          </div>
+          {picking && (
+            <p className="insp-hint">Click the Program monitor to sample the source. Esc cancels.</p>
+          )}
+          <label className="insp-field">
+            Output
+            <select value={eff.output} onChange={(e) => setStatic({ output: Number(e.target.value) })}>
+              <option value={0}>Composite</option>
+              <option value={1}>Alpha Channel</option>
+              <option value={2}>Color Channel</option>
+            </select>
+          </label>
+          <Section title="Matte Generation">
+            {effSlider("Transparency", eff.transparency, 0, 100, 1, (v) => key("transparency", v))}
+            {effSlider("Highlight", eff.highlight, 0, 100, 1, (v) => key("highlight", v))}
+            {effSlider("Shadow", eff.shadow, 0, 100, 1, (v) => key("shadow", v))}
+            {effSlider("Tolerance", eff.tolerance, 0, 100, 1, (v) => key("tolerance", v))}
+            {effSlider("Pedestal", eff.pedestal, 0, 100, 1, (v) => key("pedestal", v))}
+          </Section>
+          <Section title="Matte Cleanup">
+            {effSlider("Choke", eff.choke, 0, 100, 1, (v) => key("choke", v))}
+            {effSlider("Soften", eff.soften, 0, 100, 1, (v) => key("soften", v))}
+            {effSlider("Contrast", eff.contrast, 0, 100, 1, (v) => key("contrast", v))}
+            {effSlider("Mid Point", eff.midPoint, 0, 100, 1, (v) => key("midPoint", v))}
+            <p className="insp-hint">
+              Choke erodes the matte, Soften blurs it, and Contrast is linear about Mid Point.
+            </p>
+          </Section>
+          <Section title="Spill Suppression">
+            {effSlider("Desaturate", eff.desaturate, 0, 100, 1, (v) => key("desaturate", v))}
+            {effSlider("Range", eff.range, 0, 100, 1, (v) => key("range", v))}
+            {effSlider("Spill", eff.spill, 0, 100, 1, (v) => key("spill", v))}
+            {effSlider("Luma", eff.luma, 0, 100, 1, (v) => key("luma", v))}
+          </Section>
+          <Section title="Color Correction">
+            {effSlider("Saturation", eff.saturation, 0, 200, 1, (v) => key("saturation", v))}
+            {effSlider("Hue", eff.hue, -180, 180, 1, (v) => key("hue", v))}
+            {effSlider("Luminance", eff.luminance, 0, 200, 1, (v) => key("luminance", v))}
+          </Section>
+          <p className="insp-hint">
+            Works in linear light on chromaticity, like Premiere's Ultra Key. Default Key Colour
+            is black, which keys nothing — pick a screen colour. Soft edges blend in sRGB here,
+            so to match Premiere, raise <b>Soften</b> slightly or turn off{" "}
+            <b>Composite in Linear Color</b> in the Premiere sequence.
+          </p>
+        </>
+      );
+      break;
+    }
     case "gpuoverlay": {
       const schema = GPU_FX[eff.effect];
       const setStatic = (patch: { tint?: Rgba; tint2?: Rgba; posX?: number; posY?: number; blend?: number }) =>
@@ -2234,6 +2428,7 @@ function EffectRow({
 export function EffectsSection({
   layerId,
   effects,
+  timeMs,
   onAddEffect,
   onRemoveEffect,
   onKeyEffect,
@@ -2241,9 +2436,17 @@ export function EffectsSection({
   onSetTornEdgeStatic,
   onSetShineStatic,
   onSetGpuFxStatic,
+  onSetUltraKeyStatic,
+  onSetUltraKeyColorKey,
+  onClearUltraKeyColorKeys,
+  onApplyUltraKeyPreset,
+  onStartKeyColorPick,
+  keyColorPickIndex,
+  excludeKinds,
 }: {
   layerId: number;
   effects: ResolvedEffect[];
+  timeMs: number;
   onAddEffect: (layerId: number, kind: string) => void;
   onRemoveEffect: (layerId: number, index: number) => void;
   onKeyEffect: KeyEffect;
@@ -2251,6 +2454,16 @@ export function EffectsSection({
   onSetTornEdgeStatic?: SetTornEdgeStatic;
   onSetShineStatic?: SetShineStatic;
   onSetGpuFxStatic?: SetGpuFxStatic;
+  onSetUltraKeyStatic?: SetUltraKeyStatic;
+  onSetUltraKeyColorKey?: SetUltraKeyColorKey;
+  onClearUltraKeyColorKeys?: ClearUltraKeyColorKeys;
+  onApplyUltraKeyPreset?: ApplyUltraKeyPreset;
+  /** Enter Program-monitor pick mode for an Ultra Key row's Key Colour. */
+  onStartKeyColorPick?: (layerId: number, index: number) => void;
+  /** The row whose pick is currently active. */
+  keyColorPickIndex?: number | null;
+  /** Kinds this stack must not offer in its add menu. */
+  excludeKinds?: readonly string[];
 }) {
   // Accordion: only one effect's details show at a time, so the stack stays tidy
   // and you focus on the effect you're editing. Adding one opens it automatically.
@@ -2270,7 +2483,13 @@ export function EffectsSection({
           value=""
           buttonLabel="＋ Add effect…"
           favKey="effects"
-          groups={[{ category: "Effects", items: EFFECT_TYPES.map((t) => ({ id: t.kind, label: t.label })) }]}
+          groups={[{
+            category: "Effects",
+            items: EFFECT_TYPES.filter((t) => !excludeKinds?.includes(t.kind)).map((t) => ({
+              id: t.kind,
+              label: t.label,
+            })),
+          }]}
           onChange={(kind) => onAddEffect(layerId, kind)}
         />
       </label>
@@ -2285,6 +2504,7 @@ export function EffectsSection({
           layerId={layerId}
           index={i}
           eff={eff}
+          timeMs={timeMs}
           open={openIdx === i}
           onToggle={toggle}
           onRemove={onRemoveEffect}
@@ -2293,6 +2513,12 @@ export function EffectsSection({
           onSetTornEdgeStatic={onSetTornEdgeStatic}
           onSetShineStatic={onSetShineStatic}
           onSetGpuFxStatic={onSetGpuFxStatic}
+          onSetUltraKeyStatic={onSetUltraKeyStatic}
+          onSetUltraKeyColorKey={onSetUltraKeyColorKey}
+          onClearUltraKeyColorKeys={onClearUltraKeyColorKeys}
+          onApplyUltraKeyPreset={onApplyUltraKeyPreset}
+          onStartKeyColorPick={onStartKeyColorPick}
+          picking={keyColorPickIndex === i}
         />
       ))}
     </Section>
@@ -2508,6 +2734,14 @@ interface Props {
   onSetTornEdgeStatic: SetTornEdgeStatic;
   onSetShineStatic: SetShineStatic;
   onSetGpuFxStatic: SetGpuFxStatic;
+  onSetUltraKeyStatic: SetUltraKeyStatic;
+  onSetUltraKeyColorKey: SetUltraKeyColorKey;
+  onClearUltraKeyColorKeys: ClearUltraKeyColorKeys;
+  onApplyUltraKeyPreset: ApplyUltraKeyPreset;
+  /** Enter Program-monitor pick mode for an Ultra Key row's Key Colour. */
+  onStartKeyColorPick?: (layerId: number, index: number) => void;
+  /** The row whose pick is currently active. */
+  keyColorPickIndex?: number | null;
   onShapeParams: (layerId: number, p: ShapeParams) => void;
   onShapeRotKey: (
     layerId: number,
@@ -2620,6 +2854,10 @@ interface Props {
   onSetCellWipeStatic: (layerId: number, cell: number, index: number, angle: number, invert: boolean) => void;
   onSetCellShineStatic: (layerId: number, cell: number, index: number, tint: Rgba, blend: number) => void;
   onSetCellGpuFxStatic: (layerId: number, cell: number, index: number, effect: number, tint: Rgba, tint2: Rgba, posX: number, posY: number, blend: number) => void;
+  onSetCellUltraKeyStatic: (layerId: number, cell: number, index: number, keyColor: Rgba, output: number, setting: number) => void;
+  onSetCellUltraKeyColorKey: (layerId: number, cell: number, index: number, color: Rgba, tMs: number) => void;
+  onClearCellUltraKeyColorKeys: (layerId: number, cell: number, index: number, color: Rgba) => void;
+  onApplyCellUltraKeyPreset: (layerId: number, cell: number, index: number, setting: number, values: number[]) => void;
   gridLinked: ResolvedLinkedEffect[];
   onLinkEffect: (layerId: number, kind: string, cells: number[]) => void;
   onAddLinkedEffect: (layerId: number, groupId: number, kind: string) => void;
@@ -2651,6 +2889,7 @@ function FrameGridSection({
   cellPanNow,
   cellMerged,
   cellEffects,
+  timeMs,
   constrain,
   onSetCellImage,
   onClearCellImage,
@@ -2679,6 +2918,10 @@ function FrameGridSection({
   onSetCellWipeStatic,
   onSetCellShineStatic,
   onSetCellGpuFxStatic,
+  onSetCellUltraKeyStatic,
+  onSetCellUltraKeyColorKey,
+  onClearCellUltraKeyColorKeys,
+  onApplyCellUltraKeyPreset,
   gridLinked,
   onLinkEffect,
   onAddLinkedEffect,
@@ -2700,6 +2943,7 @@ function FrameGridSection({
   cellPanNow: { x: number; y: number } | null;
   cellMerged: boolean;
   cellEffects: ResolvedEffect[];
+  timeMs: number;
   constrain: "freeform" | "rails";
   onSetCellImage: (layerId: number, cell: number) => void;
   onClearCellImage: (layerId: number, cell: number) => void;
@@ -2750,6 +2994,10 @@ function FrameGridSection({
   onSetCellWipeStatic: (layerId: number, cell: number, index: number, angle: number, invert: boolean) => void;
   onSetCellShineStatic: (layerId: number, cell: number, index: number, tint: Rgba, blend: number) => void;
   onSetCellGpuFxStatic: (layerId: number, cell: number, index: number, effect: number, tint: Rgba, tint2: Rgba, posX: number, posY: number, blend: number) => void;
+  onSetCellUltraKeyStatic: (layerId: number, cell: number, index: number, keyColor: Rgba, output: number, setting: number) => void;
+  onSetCellUltraKeyColorKey: (layerId: number, cell: number, index: number, color: Rgba, tMs: number) => void;
+  onClearCellUltraKeyColorKeys: (layerId: number, cell: number, index: number, color: Rgba) => void;
+  onApplyCellUltraKeyPreset: (layerId: number, cell: number, index: number, setting: number, values: number[]) => void;
   gridLinked: ResolvedLinkedEffect[];
   onLinkEffect: (layerId: number, kind: string, cells: number[]) => void;
   onAddLinkedEffect: (layerId: number, groupId: number, kind: string) => void;
@@ -2900,6 +3148,7 @@ function FrameGridSection({
             <EffectsSection
               layerId={layerId}
               effects={cellEffects}
+              timeMs={timeMs}
               onAddEffect={(lid, kind) => onAddCellEffect(lid, selectedCell, kind)}
               onRemoveEffect={(lid, idx) => onRemoveCellEffect(lid, selectedCell, idx)}
               onKeyEffect={(lid, idx, param, value, seed) => onKeyCellEffect(lid, selectedCell, idx, param, value, seed)}
@@ -2907,6 +3156,18 @@ function FrameGridSection({
               onSetShineStatic={(lid, idx, tint, blend) => onSetCellShineStatic(lid, selectedCell, idx, tint, blend)}
               onSetGpuFxStatic={(lid, idx, effect, tint, tint2, posX, posY, blend) =>
                 onSetCellGpuFxStatic(lid, selectedCell, idx, effect, tint, tint2, posX, posY, blend)
+              }
+              onSetUltraKeyStatic={(lid, idx, keyColor, output, setting) =>
+                onSetCellUltraKeyStatic(lid, selectedCell, idx, keyColor, output, setting)
+              }
+              onSetUltraKeyColorKey={(lid, idx, color, t) =>
+                onSetCellUltraKeyColorKey(lid, selectedCell, idx, color, t)
+              }
+              onClearUltraKeyColorKeys={(lid, idx, color) =>
+                onClearCellUltraKeyColorKeys(lid, selectedCell, idx, color)
+              }
+              onApplyUltraKeyPreset={(lid, idx, setting, values) =>
+                onApplyCellUltraKeyPreset(lid, selectedCell, idx, setting, values)
               }
             />
           )}
@@ -2926,6 +3187,7 @@ function FrameGridSection({
         rows={rows}
         cols={cols}
         selectedCell={selectedCell}
+        timeMs={timeMs}
         gridLinked={gridLinked}
         onLinkEffect={onLinkEffect}
         onAddLinkedEffect={onAddLinkedEffect}
@@ -3128,6 +3390,7 @@ function LinkedEffectsSection({
   rows,
   cols,
   selectedCell,
+  timeMs,
   gridLinked,
   onLinkEffect,
   onAddLinkedEffect,
@@ -3142,6 +3405,7 @@ function LinkedEffectsSection({
   rows: number;
   cols: number;
   selectedCell: number | null;
+  timeMs: number;
   gridLinked: ResolvedLinkedEffect[];
   onLinkEffect: (layerId: number, kind: string, cells: number[]) => void;
   onAddLinkedEffect: (layerId: number, groupId: number, kind: string) => void;
@@ -3173,7 +3437,7 @@ function LinkedEffectsSection({
           }}
         >
           <option value="">＋ Link…</option>
-          {EFFECT_TYPES.map((t) => (
+          {LINKED_EFFECT_TYPES.map((t) => (
             <option key={t.kind} value={t.kind}>
               {t.label}
             </option>
@@ -3203,7 +3467,7 @@ function LinkedEffectsSection({
               }}
             >
               <option value="">＋ Add…</option>
-              {EFFECT_TYPES.map((t) => (
+              {LINKED_EFFECT_TYPES.map((t) => (
                 <option key={t.kind} value={t.kind}>
                   {t.label}
                 </option>
@@ -3216,6 +3480,7 @@ function LinkedEffectsSection({
               layerId={layerId}
               index={i}
               eff={eff}
+              timeMs={timeMs}
               open={openLinked[g.id] === i}
               onToggle={(idx) =>
                 setOpenLinked((s) => ({ ...s, [g.id]: s[g.id] === idx ? null : idx }))
@@ -3282,6 +3547,16 @@ export default function Inspector({
   onSetTornEdgeStatic,
   onSetShineStatic,
   onSetGpuFxStatic,
+  onSetUltraKeyStatic,
+  onSetUltraKeyColorKey,
+  onClearUltraKeyColorKeys,
+  onApplyUltraKeyPreset,
+  onStartKeyColorPick,
+  keyColorPickIndex,
+  onSetCellUltraKeyStatic,
+  onSetCellUltraKeyColorKey,
+  onClearCellUltraKeyColorKeys,
+  onApplyCellUltraKeyPreset,
   onShapeParams,
   onShapeRotKey,
   onSetShape2d,
@@ -3508,6 +3783,7 @@ export default function Inspector({
         <EffectsSection
           layerId={layer.id}
           effects={resolvedEffects}
+          timeMs={timeMs}
           onAddEffect={onAddEffect}
           onRemoveEffect={onRemoveEffect}
           onKeyEffect={onKeyEffect}
@@ -3515,6 +3791,12 @@ export default function Inspector({
           onSetTornEdgeStatic={onSetTornEdgeStatic}
           onSetShineStatic={onSetShineStatic}
           onSetGpuFxStatic={onSetGpuFxStatic}
+          onSetUltraKeyStatic={onSetUltraKeyStatic}
+          onSetUltraKeyColorKey={onSetUltraKeyColorKey}
+          onClearUltraKeyColorKeys={onClearUltraKeyColorKeys}
+          onApplyUltraKeyPreset={onApplyUltraKeyPreset}
+          onStartKeyColorPick={onStartKeyColorPick}
+          keyColorPickIndex={keyColorPickIndex}
         />
       )}
       {layer && layer.kind.kind === "adjustment" && (
@@ -3530,6 +3812,7 @@ export default function Inspector({
           <EffectsSection
             layerId={layer.id}
             effects={resolvedEffects}
+            timeMs={timeMs}
             onAddEffect={onAddEffect}
             onRemoveEffect={onRemoveEffect}
             onKeyEffect={onKeyEffect}
@@ -3537,6 +3820,11 @@ export default function Inspector({
             onSetTornEdgeStatic={onSetTornEdgeStatic}
             onSetShineStatic={onSetShineStatic}
             onSetGpuFxStatic={onSetGpuFxStatic}
+            onSetUltraKeyStatic={onSetUltraKeyStatic}
+            onSetUltraKeyColorKey={onSetUltraKeyColorKey}
+            onClearUltraKeyColorKeys={onClearUltraKeyColorKeys}
+            onApplyUltraKeyPreset={onApplyUltraKeyPreset}
+            excludeKinds={["ultrakey", "crop"]}
           />
         </>
       )}
@@ -3559,6 +3847,7 @@ export default function Inspector({
           cellPanNow={cellPanNow}
           cellMerged={cellMerged}
           cellEffects={cellEffects}
+          timeMs={timeMs}
           constrain={layer.kind.constrain}
           lineWidth={lineWidth}
           lineColor={lineColor}
@@ -3586,6 +3875,10 @@ export default function Inspector({
           onSetCellWipeStatic={onSetCellWipeStatic}
           onSetCellShineStatic={onSetCellShineStatic}
           onSetCellGpuFxStatic={onSetCellGpuFxStatic}
+          onSetCellUltraKeyStatic={onSetCellUltraKeyStatic}
+          onSetCellUltraKeyColorKey={onSetCellUltraKeyColorKey}
+          onClearCellUltraKeyColorKeys={onClearCellUltraKeyColorKeys}
+          onApplyCellUltraKeyPreset={onApplyCellUltraKeyPreset}
           gridLinked={gridLinked}
           onLinkEffect={onLinkEffect}
           onAddLinkedEffect={onAddLinkedEffect}
